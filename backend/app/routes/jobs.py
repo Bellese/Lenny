@@ -1,0 +1,219 @@
+"""Job management endpoints."""
+
+import logging
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.db import get_session
+from app.models.config import CDRConfig
+from app.models.job import Job, JobStatus
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+
+# ---------------------------------------------------------------------------
+# Request / response schemas
+# ---------------------------------------------------------------------------
+
+
+class JobCreate(BaseModel):
+    measure_id: str
+    measure_name: str | None = None
+    period_start: str
+    period_end: str
+    cdr_url: str | None = None  # if omitted, use active CDR config or default
+
+
+class JobResponse(BaseModel):
+    id: int
+    measure_id: str
+    measure_name: str | None
+    period_start: str
+    period_end: str
+    cdr_url: str
+    status: str
+    total_patients: int
+    processed_patients: int
+    failed_patients: int
+    created_at: str
+    completed_at: str | None
+    error_message: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class BatchResponse(BaseModel):
+    id: int
+    batch_number: int
+    patient_ids: list[str]
+    status: str
+    retry_count: int
+    error_message: str | None
+    created_at: str
+    completed_at: str | None
+
+    model_config = {"from_attributes": True}
+
+
+class JobDetailResponse(JobResponse):
+    batches: list[BatchResponse]
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _job_to_response(job: Job) -> dict:
+    return {
+        "id": job.id,
+        "measure_id": job.measure_id,
+        "measure_name": job.measure_name,
+        "period_start": job.period_start,
+        "period_end": job.period_end,
+        "cdr_url": job.cdr_url,
+        "status": job.status.value if isinstance(job.status, JobStatus) else job.status,
+        "total_patients": job.total_patients,
+        "processed_patients": job.processed_patients,
+        "failed_patients": job.failed_patients,
+        "created_at": job.created_at.isoformat() if job.created_at else None,
+        "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "error_message": job.error_message,
+    }
+
+
+def _batch_to_response(batch) -> dict:
+    return {
+        "id": batch.id,
+        "batch_number": batch.batch_number,
+        "patient_ids": batch.patient_ids,
+        "status": batch.status.value if hasattr(batch.status, "value") else batch.status,
+        "retry_count": batch.retry_count,
+        "error_message": batch.error_message,
+        "created_at": batch.created_at.isoformat() if batch.created_at else None,
+        "completed_at": batch.completed_at.isoformat() if batch.completed_at else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("", response_model=JobResponse, status_code=201)
+async def create_job(
+    body: JobCreate,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Create a new measure calculation job."""
+    # Resolve CDR URL
+    cdr_url = body.cdr_url
+    if not cdr_url:
+        result = await session.execute(
+            select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1)
+        )
+        config = result.scalar_one_or_none()
+        cdr_url = config.cdr_url if config else settings.DEFAULT_CDR_URL
+
+    job = Job(
+        measure_id=body.measure_id,
+        measure_name=body.measure_name,
+        period_start=body.period_start,
+        period_end=body.period_end,
+        cdr_url=cdr_url,
+        status=JobStatus.queued,
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+
+    logger.info("Job created", extra={"job_id": job.id, "measure_id": job.measure_id})
+    return _job_to_response(job)
+
+
+@router.get("", response_model=list[JobResponse])
+async def list_jobs(
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    """List all jobs, most recent first."""
+    result = await session.execute(select(Job).order_by(Job.created_at.desc()))
+    jobs = result.scalars().all()
+    return [_job_to_response(j) for j in jobs]
+
+
+@router.get("/{job_id}", response_model=JobDetailResponse)
+async def get_job(
+    job_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Get job details including batch breakdown."""
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "not-found",
+                        "diagnostics": f"Job {job_id} not found",
+                    }
+                ],
+            },
+        )
+    resp = _job_to_response(job)
+    resp["batches"] = [_batch_to_response(b) for b in job.batches]
+    return resp
+
+
+@router.post("/{job_id}/cancel", response_model=JobResponse)
+async def cancel_job(
+    job_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Cancel a running or queued job."""
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "not-found",
+                        "diagnostics": f"Job {job_id} not found",
+                    }
+                ],
+            },
+        )
+
+    if job.status not in (JobStatus.queued, JobStatus.running):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "conflict",
+                        "diagnostics": f"Job is already {job.status.value}, cannot cancel",
+                    }
+                ],
+            },
+        )
+
+    job.status = JobStatus.cancelled
+    job.completed_at = datetime.now(timezone.utc)
+    await session.commit()
+    await session.refresh(job)
+
+    logger.info("Job cancelled", extra={"job_id": job_id})
+    return _job_to_response(job)

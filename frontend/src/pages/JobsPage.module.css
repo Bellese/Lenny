@@ -1,0 +1,315 @@
+.page {
+  max-width: 1100px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--space-6);
+  gap: var(--space-4);
+}
+
+.title {
+  font-size: var(--font-size-page);
+  font-weight: var(--font-weight-semibold);
+}
+
+.newBtn {
+  margin-left: auto;
+  padding: var(--space-2) var(--space-5);
+  background: var(--color-accent);
+  color: #fff;
+  border-radius: var(--radius-md);
+  font-weight: var(--font-weight-semibold);
+  min-height: 44px;
+  transition: background var(--transition);
+}
+
+.newBtn:hover {
+  background: var(--color-accent-hover);
+}
+
+.tableWrapper {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-primary);
+}
+
+.measureCell {
+  font-weight: var(--font-weight-semibold);
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.periodCell {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  white-space: nowrap;
+}
+
+.dateCell {
+  white-space: nowrap;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.progressCell {
+  min-width: 180px;
+}
+
+.progressInfo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.progressMeta {
+  display: flex;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.completedText {
+  font-size: var(--font-size-sm);
+  color: var(--color-success);
+  font-weight: var(--font-weight-semibold);
+}
+
+.statusBadge {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  border-radius: 100px;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  text-transform: capitalize;
+}
+
+.statusSuccess {
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.statusRunning {
+  background: var(--color-accent-light);
+  color: var(--color-accent);
+}
+
+.statusQueued {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+}
+
+.statusError {
+  background: var(--color-error-light);
+  color: var(--color-error);
+}
+
+.statusDefault {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-tertiary);
+}
+
+.cancelBtn {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-error);
+  color: var(--color-error);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  min-height: 32px;
+  transition: background var(--transition);
+}
+
+.cancelBtn:hover {
+  background: var(--color-error-light);
+}
+
+.viewLink {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.emptyRow {
+  text-align: center;
+  color: var(--color-text-tertiary);
+  padding: var(--space-12) var(--space-4) !important;
+}
+
+.skeletonCell {
+  height: 18px;
+  width: 80%;
+}
+
+.errorState {
+  padding: var(--space-8);
+  background: var(--color-error-light);
+  border-radius: var(--radius-lg);
+  text-align: center;
+  color: var(--color-error);
+}
+
+.errorState p {
+  margin-bottom: var(--space-4);
+}
+
+.retryBtn {
+  padding: var(--space-2) var(--space-5);
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-weight: var(--font-weight-semibold);
+  min-height: 44px;
+}
+
+.retryBtn:hover {
+  background: var(--color-bg-secondary);
+}
+
+/* Modal */
+.modalOverlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  z-index: 300;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-4);
+}
+
+.modal {
+  background: var(--color-bg-primary);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  width: 480px;
+  max-width: 100%;
+  max-height: 90vh;
+  overflow-y: auto;
+  animation: fadeIn 150ms ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.modalHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-6) var(--space-6) 0;
+}
+
+.modalTitle {
+  font-size: var(--font-size-section);
+  font-weight: var(--font-weight-semibold);
+}
+
+.modalClose {
+  font-size: 24px;
+  width: 36px;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: var(--color-text-tertiary);
+}
+
+.modalClose:hover {
+  background: var(--color-bg-secondary);
+}
+
+.modalBody {
+  padding: var(--space-6);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.formGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.formRow {
+  display: flex;
+  gap: var(--space-4);
+}
+
+.formRow .formGroup {
+  flex: 1;
+}
+
+.label {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.select,
+.input {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  min-height: 44px;
+  font-size: var(--font-size-body);
+}
+
+.modalFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-3);
+  padding-top: var(--space-4);
+  border-top: 1px solid var(--color-border);
+}
+
+.primaryBtn {
+  padding: var(--space-2) var(--space-6);
+  background: var(--color-accent);
+  color: #fff;
+  border-radius: var(--radius-md);
+  font-weight: var(--font-weight-semibold);
+  min-height: 44px;
+  transition: background var(--transition);
+}
+
+.primaryBtn:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.primaryBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.secondaryBtn {
+  padding: var(--space-2) var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  color: var(--color-text-secondary);
+  font-weight: var(--font-weight-semibold);
+  min-height: 44px;
+  transition: background var(--transition);
+}
+
+.secondaryBtn:hover {
+  background: var(--color-bg-secondary);
+}
+
+@media (max-width: 767px) {
+  .title {
+    font-size: var(--font-size-section);
+  }
+
+  .formRow {
+    flex-direction: column;
+  }
+}

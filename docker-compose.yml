@@ -1,0 +1,73 @@
+services:
+  frontend:
+    build: ./frontend
+    ports: ["3000:3000"]
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+
+  backend:
+    build: ./backend
+    ports: ["8000:8000"]
+    depends_on:
+      db:
+        condition: service_healthy
+      hapi-fhir-cdr:
+        condition: service_healthy
+      hapi-fhir-measure:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://mct2:mct2@db:5432/mct2
+      - MEASURE_ENGINE_URL=http://hapi-fhir-measure:8080/fhir
+      - DEFAULT_CDR_URL=http://hapi-fhir-cdr:8080/fhir
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db:
+    image: postgres:16-alpine
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    environment:
+      - POSTGRES_DB=mct2
+      - POSTGRES_USER=mct2
+      - POSTGRES_PASSWORD=mct2
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mct2"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  hapi-fhir-cdr:
+    image: hapiproject/hapi:v7.6.0
+    volumes: ["cdrdata:/data/hapi"]
+    environment:
+      - hapi.fhir.server_address=http://hapi-fhir-cdr:8080/fhir
+      - hapi.fhir.defer_indexing_for_codesystems_of_size=0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/fhir/metadata"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+  hapi-fhir-measure:
+    image: hapiproject/hapi:v7.6.0
+    volumes: ["measuredata:/data/hapi"]
+    environment:
+      - hapi.fhir.server_address=http://hapi-fhir-measure:8080/fhir
+      - hapi.fhir.defer_indexing_for_codesystems_of_size=0
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/fhir/metadata"]
+      interval: 10s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+
+volumes:
+  pgdata:
+  cdrdata:
+  measuredata:

@@ -1,0 +1,252 @@
+.page {
+  max-width: 1100px;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  margin-bottom: var(--space-6);
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.title {
+  font-size: var(--font-size-page);
+  font-weight: var(--font-weight-semibold);
+}
+
+.jobSelector {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.jobLabel {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.jobSelect {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  min-height: 36px;
+  font-size: var(--font-size-body);
+  max-width: 320px;
+}
+
+.measureHeader {
+  margin-bottom: var(--space-6);
+}
+
+.measureName {
+  font-size: var(--font-size-section);
+  font-weight: var(--font-weight-semibold);
+  margin-bottom: var(--space-1);
+}
+
+.period,
+.cdr {
+  font-size: var(--font-size-body);
+  color: var(--color-text-secondary);
+}
+
+/* Population cards */
+.cardsRow {
+  display: flex;
+  gap: var(--space-4);
+  margin-bottom: var(--space-6);
+  flex-wrap: wrap;
+}
+
+.card {
+  flex: 1;
+  min-width: 160px;
+  padding: var(--space-5);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-primary);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.card.accent {
+  border-color: var(--color-accent);
+  background: var(--color-accent-light);
+}
+
+.cardLabel {
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.cardCount {
+  font-size: 32px;
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Performance Rate */
+.performanceRate {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-3);
+  margin-bottom: var(--space-4);
+  padding: var(--space-4) var(--space-5);
+  background: var(--color-bg-secondary);
+  border-radius: var(--radius-lg);
+}
+
+.perfLabel {
+  font-size: var(--font-size-emphasis);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+}
+
+.perfValue {
+  font-size: var(--font-size-page);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-accent);
+}
+
+.exclusions {
+  font-size: var(--font-size-body);
+  color: var(--color-text-secondary);
+  margin-bottom: var(--space-6);
+}
+
+/* Patient table */
+.tableWrapper {
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-primary);
+  margin-top: var(--space-6);
+}
+
+.patientId {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
+.boolCell {
+  text-align: center;
+}
+
+.check {
+  color: var(--color-success);
+  font-weight: var(--font-weight-semibold);
+}
+
+.cross {
+  color: var(--color-text-tertiary);
+}
+
+.detailBtn {
+  padding: var(--space-1) var(--space-3);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-accent);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm);
+  min-height: 32px;
+  transition: background var(--transition);
+}
+
+.detailBtn:hover {
+  background: var(--color-accent-light);
+}
+
+.emptyRow {
+  text-align: center;
+  color: var(--color-text-tertiary);
+  padding: var(--space-12) var(--space-4) !important;
+}
+
+.emptyState {
+  text-align: center;
+  padding: var(--space-12);
+  color: var(--color-text-secondary);
+}
+
+.emptyHint {
+  margin-top: var(--space-2);
+  color: var(--color-text-tertiary);
+  font-size: var(--font-size-sm);
+}
+
+.skeletonCard {
+  flex: 1;
+  min-width: 160px;
+  height: 90px;
+  border-radius: var(--radius-lg);
+}
+
+.skeletonCell {
+  height: 18px;
+  width: 70%;
+}
+
+.errorState {
+  padding: var(--space-8);
+  background: var(--color-error-light);
+  border-radius: var(--radius-lg);
+  text-align: center;
+}
+
+.errorState p:first-child {
+  font-size: var(--font-size-emphasis);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-error);
+}
+
+.errorDetail {
+  color: var(--color-text-secondary);
+  margin-top: var(--space-2);
+  margin-bottom: var(--space-4);
+}
+
+.retryBtn {
+  padding: var(--space-2) var(--space-5);
+  background: var(--color-bg-primary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-weight: var(--font-weight-semibold);
+  min-height: 44px;
+}
+
+.retryBtn:hover {
+  background: var(--color-bg-secondary);
+}
+
+@media (max-width: 767px) {
+  .title {
+    font-size: var(--font-size-section);
+  }
+
+  .cardsRow {
+    flex-direction: column;
+  }
+
+  .card {
+    min-width: auto;
+  }
+
+  .jobSelector {
+    margin-left: 0;
+    width: 100%;
+  }
+
+  .jobSelect {
+    max-width: 100%;
+    flex: 1;
+  }
+}

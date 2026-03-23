@@ -1,0 +1,328 @@
+"""Job orchestrator — the core $gather workflow.
+
+Fetches patients from the CDR, pushes their data to the measure engine,
+evaluates the measure, and stores results.
+"""
+
+import asyncio
+import logging
+from datetime import datetime, timezone
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.config import settings
+from app.db import async_session
+from app.models.config import CDRConfig
+from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
+from app.services.fhir_client import (
+    BatchQueryStrategy,
+    _build_auth_headers,
+    evaluate_measure,
+    push_resources,
+    wipe_patient_data,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _extract_populations(measure_report: dict[str, Any]) -> dict[str, bool]:
+    """Parse a MeasureReport and return population boolean flags."""
+    populations = {
+        "initial_population": False,
+        "denominator": False,
+        "numerator": False,
+        "denominator_exclusion": False,
+        "numerator_exclusion": False,
+    }
+    code_map = {
+        "initial-population": "initial_population",
+        "denominator": "denominator",
+        "numerator": "numerator",
+        "denominator-exclusion": "denominator_exclusion",
+        "numerator-exclusion": "numerator_exclusion",
+    }
+    for group in measure_report.get("group", []):
+        for pop in group.get("population", []):
+            code_coding = pop.get("code", {}).get("coding", [])
+            for coding in code_coding:
+                code = coding.get("code", "")
+                if code in code_map:
+                    count = pop.get("count", 0)
+                    populations[code_map[code]] = count > 0
+    return populations
+
+
+def _extract_patient_name(patient_resource: dict[str, Any]) -> str | None:
+    """Extract a display name from a Patient FHIR resource."""
+    for name_obj in patient_resource.get("name", []):
+        parts = []
+        given = name_obj.get("given", [])
+        if given:
+            parts.extend(given)
+        family = name_obj.get("family")
+        if family:
+            parts.append(family)
+        if parts:
+            return " ".join(parts)
+    return None
+
+
+async def run_job(job_id: int) -> None:
+    """Execute the full $gather workflow for a job."""
+    async with async_session() as session:
+        job = await session.get(Job, job_id)
+        if not job:
+            logger.error("Job not found", extra={"job_id": job_id})
+            return
+        if job.status == JobStatus.cancelled:
+            logger.info("Job already cancelled", extra={"job_id": job_id})
+            return
+
+        job.status = JobStatus.running
+        await session.commit()
+
+    try:
+        # Step 1: Wipe patient data from measure engine (cleanup from prior job)
+        logger.info("Wiping prior patient data from measure engine", extra={"job_id": job_id})
+        await wipe_patient_data()
+
+        # Step 2: Resolve CDR connection settings
+        auth_headers = await _get_cdr_auth_headers(job_id)
+        cdr_url = await _get_cdr_url(job_id)
+
+        # Step 3: Fetch all patients from CDR
+        strategy = BatchQueryStrategy()
+        logger.info("Gathering patients from CDR", extra={"job_id": job_id, "cdr_url": cdr_url})
+        patients = await strategy.gather_patients(cdr_url, auth_headers)
+
+        if not patients:
+            async with async_session() as session:
+                job = await session.get(Job, job_id)
+                if job:
+                    job.status = JobStatus.complete
+                    job.total_patients = 0
+                    job.completed_at = datetime.now(timezone.utc)
+                    await session.commit()
+            logger.info("No patients found, job complete", extra={"job_id": job_id})
+            return
+
+        # Step 4: Update total and create batches
+        patient_map: dict[str, dict[str, Any]] = {p["id"]: p for p in patients}
+        patient_ids = list(patient_map.keys())
+        batch_size = settings.BATCH_SIZE
+
+        async with async_session() as session:
+            job = await session.get(Job, job_id)
+            if not job:
+                return
+            job.total_patients = len(patient_ids)
+            batches_data: list[Batch] = []
+            for i in range(0, len(patient_ids), batch_size):
+                chunk = patient_ids[i : i + batch_size]
+                batch = Batch(
+                    job_id=job_id,
+                    batch_number=len(batches_data) + 1,
+                    patient_ids=chunk,
+                    status=BatchStatus.pending,
+                )
+                session.add(batch)
+                batches_data.append(batch)
+            await session.commit()
+            batch_ids = [b.id for b in batches_data]
+
+        # Step 5: Process batches with concurrency control
+        semaphore = asyncio.Semaphore(settings.MAX_WORKERS)
+
+        async def process_batch(batch_id: int) -> None:
+            async with semaphore:
+                await _process_single_batch(
+                    job_id=job_id,
+                    batch_id=batch_id,
+                    patient_map=patient_map,
+                    cdr_url=cdr_url,
+                    auth_headers=auth_headers,
+                )
+
+        # Check for cancellation before starting
+        async with async_session() as session:
+            job = await session.get(Job, job_id)
+            if job and job.status == JobStatus.cancelled:
+                return
+
+        await asyncio.gather(*[process_batch(bid) for bid in batch_ids])
+
+        # Step 6: Finalize job
+        async with async_session() as session:
+            job = await session.get(Job, job_id)
+            if not job:
+                return
+            if job.status == JobStatus.cancelled:
+                return
+            job.status = JobStatus.complete
+            job.completed_at = datetime.now(timezone.utc)
+            await session.commit()
+
+        logger.info("Job complete", extra={"job_id": job_id})
+
+    except Exception as exc:
+        logger.exception("Job failed", extra={"job_id": job_id})
+        async with async_session() as session:
+            job = await session.get(Job, job_id)
+            if job:
+                job.status = JobStatus.failed
+                job.error_message = str(exc)[:2000]
+                job.completed_at = datetime.now(timezone.utc)
+                await session.commit()
+
+
+async def _get_cdr_auth_headers(job_id: int) -> dict[str, str]:
+    """Resolve auth headers from the active CDR config."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1)
+        )
+        config = result.scalar_one_or_none()
+        if config:
+            return _build_auth_headers(config.auth_type, config.auth_credentials)
+    return {}
+
+
+async def _get_cdr_url(job_id: int) -> str:
+    """Resolve the CDR URL for a job."""
+    async with async_session() as session:
+        job = await session.get(Job, job_id)
+        if job:
+            return job.cdr_url
+    return settings.DEFAULT_CDR_URL
+
+
+async def _process_single_batch(
+    job_id: int,
+    batch_id: int,
+    patient_map: dict[str, dict[str, Any]],
+    cdr_url: str,
+    auth_headers: dict[str, str],
+) -> None:
+    """Process a single batch: gather data, push, evaluate, store results."""
+    async with async_session() as session:
+        batch = await session.get(Batch, batch_id)
+        if not batch:
+            return
+        patient_ids: list[str] = batch.patient_ids  # type: ignore[assignment]
+        batch.status = BatchStatus.running
+        await session.commit()
+
+    strategy = BatchQueryStrategy()
+    retry_count = 0
+
+    while retry_count <= settings.MAX_RETRIES:
+        try:
+            processed = 0
+            failed = 0
+
+            for patient_id in patient_ids:
+                # Check for cancellation periodically
+                async with async_session() as session:
+                    job = await session.get(Job, job_id)
+                    if job and job.status == JobStatus.cancelled:
+                        return
+
+                try:
+                    # Gather patient data from CDR
+                    resources = await strategy.gather_patient_data(
+                        cdr_url, patient_id, auth_headers
+                    )
+
+                    # Push to measure engine
+                    if resources:
+                        await push_resources(resources)
+
+                    # Evaluate measure
+                    async with async_session() as session:
+                        job = await session.get(Job, job_id)
+                        if not job:
+                            return
+                        measure_id = job.measure_id
+                        period_start = job.period_start
+                        period_end = job.period_end
+
+                    measure_report = await evaluate_measure(
+                        measure_id, patient_id, period_start, period_end
+                    )
+
+                    # Extract populations and store result
+                    populations = _extract_populations(measure_report)
+                    patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
+
+                    async with async_session() as session:
+                        result = MeasureResult(
+                            job_id=job_id,
+                            patient_id=patient_id,
+                            patient_name=patient_name,
+                            measure_report=measure_report,
+                            populations=populations,
+                        )
+                        session.add(result)
+                        await session.commit()
+
+                    processed += 1
+
+                except Exception as patient_exc:
+                    logger.warning(
+                        "Failed to process patient",
+                        extra={
+                            "job_id": job_id,
+                            "batch_id": batch_id,
+                            "patient_id": patient_id,
+                            "error": str(patient_exc),
+                        },
+                    )
+                    failed += 1
+
+            # Update batch and job counters
+            async with async_session() as session:
+                batch = await session.get(Batch, batch_id)
+                if batch:
+                    batch.status = BatchStatus.complete
+                    batch.completed_at = datetime.now(timezone.utc)
+                    await session.commit()
+
+                job = await session.get(Job, job_id)
+                if job:
+                    job.processed_patients = job.processed_patients + processed
+                    job.failed_patients = job.failed_patients + failed
+                    await session.commit()
+
+            return  # Success — exit retry loop
+
+        except Exception as batch_exc:
+            retry_count += 1
+            logger.warning(
+                "Batch failed, retrying",
+                extra={
+                    "job_id": job_id,
+                    "batch_id": batch_id,
+                    "retry": retry_count,
+                    "error": str(batch_exc),
+                },
+            )
+            if retry_count > settings.MAX_RETRIES:
+                async with async_session() as session:
+                    batch = await session.get(Batch, batch_id)
+                    if batch:
+                        batch.status = BatchStatus.failed
+                        batch.retry_count = retry_count
+                        batch.error_message = str(batch_exc)[:2000]
+                        batch.completed_at = datetime.now(timezone.utc)
+                        await session.commit()
+
+                    job = await session.get(Job, job_id)
+                    if job:
+                        job.failed_patients = job.failed_patients + len(patient_ids)
+                        await session.commit()
+                return
+
+            # Exponential backoff before retry
+            await asyncio.sleep(2**retry_count)
