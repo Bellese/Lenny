@@ -67,6 +67,19 @@ services:
       retries: 10
       start_period: 60s
 
+  seed:
+    build: ./seed
+    depends_on:
+      hapi-fhir-cdr:
+        condition: service_healthy
+      hapi-fhir-measure:
+        condition: service_healthy
+    environment:
+      - CDR_URL=http://hapi-fhir-cdr:8080/fhir
+      - MEASURE_URL=http://hapi-fhir-measure:8080/fhir
+      - SEED_DIR=/seed
+    restart: "no"
+
 volumes:
   pgdata:
   cdrdata:

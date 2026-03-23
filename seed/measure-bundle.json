@@ -1,0 +1,174 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "fullUrl": "http://example.org/fhir/Library/cms122-logic",
+      "resource": {
+        "resourceType": "Library",
+        "id": "cms122-logic",
+        "url": "http://example.org/fhir/Library/cms122-logic",
+        "version": "12.0.0",
+        "name": "CMS122Logic",
+        "title": "CMS122 Diabetes HbA1c Poor Control Logic Library",
+        "status": "active",
+        "type": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/library-type",
+              "code": "logic-library",
+              "display": "Logic Library"
+            }
+          ]
+        },
+        "description": "CQL logic library for CMS122v12 - Diabetes: Hemoglobin A1c (HbA1c) Poor Control (> 9%). Defines population criteria for identifying patients aged 18-75 with diabetes whose most recent HbA1c is greater than 9%.",
+        "content": [
+          {
+            "contentType": "text/cql",
+            "data": "bGlicmFyeSBDTVMxMjJMb2dpYyB2ZXJzaW9uICcxMi4wLjAnCgp1c2luZyBGSElSIHZlcnNpb24gJzQuMC4xJwoKaW5jbHVkZSBGSElSSGVscGVycyB2ZXJzaW9uICc0LjAuMScKCmNvZGVzeXN0ZW0gIklDRC0xMC1DTSI6ICdodHRwOi8vaGw3Lm9yZy9maGlyL3NpZC9pY2QtMTAtY20nCmNvZGVzeXN0ZW0gIkxPSU5DIjogJ2h0dHA6Ly9sb2luYy5vcmcnCmNvZGVzeXN0ZW0gIlNOT01FRENUIjogJ2h0dHA6Ly9zbm9tZWQuaW5mby9zY3QnCgp2YWx1ZXNldCAiRGlhYmV0ZXMiOiAnaHR0cDovL2N0cy5ubG0ubmloLmdvdi9maGlyL1ZhbHVlU2V0LzIuMTYuODQwLjEuMTEzODgzLjMuNDY0LjEwMDMuMTAzLjEyLjEwMDEnCnZhbHVlc2V0ICJIYkExYyBMYWJvcmF0b3J5IFRlc3QiOiAnaHR0cDovL2N0cy5ubG0ubmloLmdvdi9maGlyL1ZhbHVlU2V0LzIuMTYuODQwLjEuMTEzODgzLjMuNDY0LjEwMDMuMTk4LjEyLjEwMTMnCnZhbHVlc2V0ICJIb3NwaWNlIENhcmUgQW1idWxhdG9yeSI6ICdodHRwOi8vY3RzLm5sbS5uaWguZ292L2ZoaXIvVmFsdWVTZXQvMi4xNi44NDAuMS4xMTM4ODMuMy41MjYuMy4xNTg0Jwp2YWx1ZXNldCAiQWR2YW5jZWQgSWxsbmVzcyI6ICdodHRwOi8vY3RzLm5sbS5uaWguZ292L2ZoaXIvVmFsdWVTZXQvMi4xNi44NDAuMS4xMTM4ODMuMy40NjQuMTAwMy4xMTAuMTIuMTA4MicKCnBhcmFtZXRlciAiTWVhc3VyZW1lbnQgUGVyaW9kIiBJbnRlcnZhbDxEYXRlVGltZT4KICBkZWZhdWx0IEludGVydmFsW0AyMDI1LTAxLTAxVDAwOjAwOjAwLjAsIEAyMDI1LTEyLTMxVDIzOjU5OjU5Ljk5OV0KCmNvbnRleHQgUGF0aWVudAoKZGVmaW5lICJJbml0aWFsIFBvcHVsYXRpb24iOgogIEFnZUluWWVhcnNBdChkYXRlIGZyb20gc3RhcnQgb2YgIk1lYXN1cmVtZW50IFBlcmlvZCIpID49IDE4CiAgICBhbmQgQWdlSW5ZZWFyc0F0KGRhdGUgZnJvbSBzdGFydCBvZiAiTWVhc3VyZW1lbnQgUGVyaW9kIikgPD0gNzUKICAgIGFuZCBleGlzdHMoCiAgICAgIFtDb25kaXRpb246ICJEaWFiZXRlcyJdIERpYWJldGVzCiAgICAgICAgd2hlcmUgRGlhYmV0ZXMuY2xpbmljYWxTdGF0dXMgfiBUb0NvbmNlcHQoR2xvYmFsLiJhY3RpdmUiKQogICAgKQoKZGVmaW5lICJEZW5vbWluYXRvciI6CiAgIkluaXRpYWwgUG9wdWxhdGlvbiIKCmRlZmluZSAiTnVtZXJhdG9yIjoKICAiTW9zdCBSZWNlbnQgSGJBMWMiLnZhbHVlID4gOSAnJScKCmRlZmluZSAiRGVub21pbmF0b3IgRXhjbHVzaW9uIjoKICBleGlzdHMoCiAgICBbRW5jb3VudGVyOiAiSG9zcGljZSBDYXJlIEFtYnVsYXRvcnkiXSBIb3NwaWNlRW5jb3VudGVyCiAgICAgIHdoZXJlIEhvc3BpY2VFbmNvdW50ZXIucGVyaW9kIG92ZXJsYXBzICJNZWFzdXJlbWVudCBQZXJpb2QiCiAgKQogICAgb3IgZXhpc3RzKAogICAgICBbQ29uZGl0aW9uOiAiQWR2YW5jZWQgSWxsbmVzcyJdIEFkdmFuY2VkSWxsbmVzcwogICAgICAgIHdoZXJlIEFkdmFuY2VkSWxsbmVzcy5jbGluaWNhbFN0YXR1cyB+IFRvQ29uY2VwdChHbG9iYWwuImFjdGl2ZSIpCiAgICApCgpkZWZpbmUgIk1vc3QgUmVjZW50IEhiQTFjIjoKICBMYXN0KAogICAgW09ic2VydmF0aW9uOiAiSGJBMWMgTGFib3JhdG9yeSBUZXN0Il0gSGJBMWNUZXN0CiAgICAgIHdoZXJlIEhiQTFjVGVzdC5zdGF0dXMgaW4geyAnZmluYWwnLCAnYW1lbmRlZCcsICdjb3JyZWN0ZWQnIH0KICAgICAgICBhbmQgSGJBMWNUZXN0LmVmZmVjdGl2ZSBkdXJpbmcgIk1lYXN1cmVtZW50IFBlcmlvZCIKICAgICAgc29ydCBieSBlZmZlY3RpdmUKICApCg=="
+          }
+        ],
+        "relatedArtifact": [
+          {
+            "type": "depends-on",
+            "display": "FHIR model information",
+            "resource": "http://fhir.org/guides/cqf/common/Library/FHIR-ModelInfo|4.0.1"
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Library/cms122-logic"
+      }
+    },
+    {
+      "fullUrl": "http://example.org/fhir/Measure/cms122-diabetes-hba1c",
+      "resource": {
+        "resourceType": "Measure",
+        "id": "cms122-diabetes-hba1c",
+        "url": "http://example.org/fhir/Measure/cms122-diabetes-hba1c",
+        "version": "12.0.0",
+        "name": "CMS122v12",
+        "title": "Diabetes: Hemoglobin A1c (HbA1c) Poor Control (> 9%)",
+        "status": "active",
+        "experimental": false,
+        "date": "2025-01-01",
+        "publisher": "National Committee for Quality Assurance (NCQA)",
+        "description": "Percentage of patients 18-75 years of age with diabetes who had hemoglobin A1c > 9.0% during the measurement period. A lower rate indicates better quality of care, as it means fewer patients have poorly controlled diabetes.",
+        "purpose": "Diabetes is the seventh leading cause of death in the United States. Poorly controlled diabetes can lead to complications including heart disease, stroke, blindness, kidney failure, and lower-limb amputation. This measure identifies patients with poor glycemic control (HbA1c > 9%) to target interventions.",
+        "effectivePeriod": {
+          "start": "2025-01-01",
+          "end": "2025-12-31"
+        },
+        "library": [
+          "http://example.org/fhir/Library/cms122-logic"
+        ],
+        "scoring": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/measure-scoring",
+              "code": "proportion",
+              "display": "Proportion"
+            }
+          ]
+        },
+        "type": [
+          {
+            "coding": [
+              {
+                "system": "http://terminology.hl7.org/CodeSystem/measure-type",
+                "code": "process",
+                "display": "Process"
+              }
+            ]
+          }
+        ],
+        "improvementNotation": {
+          "coding": [
+            {
+              "system": "http://terminology.hl7.org/CodeSystem/measure-improvement-notation",
+              "code": "decrease",
+              "display": "Decreased score indicates improvement"
+            }
+          ],
+          "text": "A lower rate indicates better performance (fewer patients with poor HbA1c control)"
+        },
+        "group": [
+          {
+            "id": "group-1",
+            "population": [
+              {
+                "code": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/measure-population",
+                      "code": "initial-population",
+                      "display": "Initial Population"
+                    }
+                  ]
+                },
+                "description": "Patients 18-75 years of age with diabetes (ICD-10 E11.*) during the measurement period",
+                "criteria": {
+                  "language": "text/cql-identifier",
+                  "expression": "Initial Population"
+                }
+              },
+              {
+                "code": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/measure-population",
+                      "code": "denominator",
+                      "display": "Denominator"
+                    }
+                  ]
+                },
+                "description": "Equals Initial Population",
+                "criteria": {
+                  "language": "text/cql-identifier",
+                  "expression": "Denominator"
+                }
+              },
+              {
+                "code": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/measure-population",
+                      "code": "denominator-exclusion",
+                      "display": "Denominator Exclusion"
+                    }
+                  ]
+                },
+                "description": "Patients in hospice care or with advanced illness and frailty",
+                "criteria": {
+                  "language": "text/cql-identifier",
+                  "expression": "Denominator Exclusion"
+                }
+              },
+              {
+                "code": {
+                  "coding": [
+                    {
+                      "system": "http://terminology.hl7.org/CodeSystem/measure-population",
+                      "code": "numerator",
+                      "display": "Numerator"
+                    }
+                  ]
+                },
+                "description": "Patients whose most recent HbA1c level (performed during the measurement period) is > 9.0%",
+                "criteria": {
+                  "language": "text/cql-identifier",
+                  "expression": "Numerator"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "request": {
+        "method": "PUT",
+        "url": "Measure/cms122-diabetes-hba1c"
+      }
+    }
+  ]
+}
