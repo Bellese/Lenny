@@ -106,6 +106,8 @@ export default function ResultsPage() {
     setPatientDetail(null);
   }, []);
 
+  const selectedJob = jobs.find(j => String(j.id) === String(selectedJobId));
+
   // Extract aggregate data — API returns { populations: {...}, patients: [...], ... }
   const populations = results?.populations || {};
   const patients = results?.patients || [];
@@ -119,8 +121,6 @@ export default function ResultsPage() {
   const numerator = populations.numerator;
   const denomExclusion = populations.denominator_exclusion;
   const performanceRate = results?.performance_rate;
-
-  const selectedJob = jobs.find(j => String(j.id) === String(selectedJobId));
 
   return (
     <div className={styles.page}>
