@@ -240,7 +240,12 @@ async def test_run_job_cdr_unreachable(test_session, session_factory):
 
 
 async def test_run_job_partial_patient_failure(test_session, session_factory, mock_measure_report):
-    """run_job: some patients fail but results for successful ones are preserved."""
+    """run_job: if evaluate fails for one patient, results for others are preserved.
+
+    The 2-phase approach pushes all patients first (Phase 1), then evaluates
+    all patients (Phase 2).  A failure during evaluation for one patient
+    should not prevent other patients from being evaluated.
+    """
     job_id = await _setup_job(test_session)
 
     patients = [
@@ -248,20 +253,10 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
         {"resourceType": "Patient", "id": "p2", "name": [{"given": ["Bob"], "family": "Bad"}]},
     ]
 
-    call_count = 0
-
-    async def mock_gather_patient_data(self_or_cdr, *args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        # Determine the patient_id from the arguments
-        if len(args) >= 2:
-            patient_id = args[1] if isinstance(args[0], str) else args[0]
-        else:
-            patient_id = args[0] if args else kwargs.get("patient_id", "")
-        # Return data for p1, but fail for p2
-        if "p2" in str(patient_id) or call_count == 2:
-            raise Exception("Patient data fetch failed")
-        return [{"resourceType": "Patient", "id": "p1"}]
+    async def mock_evaluate(measure_id, patient_id, period_start, period_end):
+        if patient_id == "p2":
+            raise Exception("Evaluation failed for p2")
+        return mock_measure_report
 
     with (
         _make_session_factory_patch(session_factory),
@@ -277,13 +272,14 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
         patch.object(
             __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
             "gather_patient_data",
-            side_effect=mock_gather_patient_data,
+            new_callable=AsyncMock,
+            return_value=[{"resourceType": "Patient", "id": "p1"}],
         ),
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
         patch(
             "app.services.orchestrator.evaluate_measure",
             new_callable=AsyncMock,
-            return_value=mock_measure_report,
+            side_effect=mock_evaluate,
         ),
     ):
         await run_job(job_id)

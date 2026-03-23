@@ -205,7 +205,15 @@ async def _process_single_batch(
     cdr_url: str,
     auth_headers: dict[str, str],
 ) -> None:
-    """Process a single batch: gather data, push, evaluate, store results."""
+    """Process a single batch in two phases.
+
+    Phase 1 — GATHER & PUSH: Fetch each patient's data from the CDR and push
+    it to the measure engine.  After all patients are pushed, pause briefly so
+    HAPI FHIR's asynchronous search indexes catch up.
+
+    Phase 2 — EVALUATE: Call $evaluate-measure for each patient.  Because all
+    patient data is already indexed, CQL evaluation sees the correct resources.
+    """
     async with async_session() as session:
         batch = await session.get(Batch, batch_id)
         if not batch:
@@ -222,37 +230,68 @@ async def _process_single_batch(
             processed = 0
             failed = 0
 
+            # Read job params once
+            async with async_session() as session:
+                job = await session.get(Job, job_id)
+                if not job:
+                    return
+                measure_id = job.measure_id
+                period_start = job.period_start
+                period_end = job.period_end
+
+            # ----------------------------------------------------------
+            # Phase 1: Gather all patient data and push to measure engine
+            # ----------------------------------------------------------
             for patient_id in patient_ids:
-                # Check for cancellation periodically
                 async with async_session() as session:
                     job = await session.get(Job, job_id)
                     if job and job.status == JobStatus.cancelled:
                         return
 
                 try:
-                    # Gather patient data from CDR
                     resources = await strategy.gather_patient_data(
                         cdr_url, patient_id, auth_headers
                     )
-
-                    # Push to measure engine
                     if resources:
                         await push_resources(resources)
+                    logger.info(
+                        f"Pushed {len(resources)} resources for {patient_id[:8]}",
+                        extra={"job_id": job_id, "patient_id": patient_id},
+                    )
+                except Exception as push_exc:
+                    logger.warning(
+                        "Failed to gather/push patient data",
+                        extra={
+                            "job_id": job_id,
+                            "batch_id": batch_id,
+                            "patient_id": patient_id,
+                            "error": str(push_exc),
+                        },
+                    )
 
-                    # Evaluate measure
-                    async with async_session() as session:
-                        job = await session.get(Job, job_id)
-                        if not job:
-                            return
-                        measure_id = job.measure_id
-                        period_start = job.period_start
-                        period_end = job.period_end
+            # Wait for HAPI FHIR search indexes to catch up.
+            # CQL evaluation relies on FHIR search internally; HAPI
+            # indexes transactions asynchronously.
+            logger.info(
+                "All patient data pushed — waiting for HAPI indexing",
+                extra={"job_id": job_id, "batch_id": batch_id},
+            )
+            await asyncio.sleep(5.0)
 
+            # ----------------------------------------------------------
+            # Phase 2: Evaluate each patient
+            # ----------------------------------------------------------
+            for patient_id in patient_ids:
+                async with async_session() as session:
+                    job = await session.get(Job, job_id)
+                    if job and job.status == JobStatus.cancelled:
+                        return
+
+                try:
                     measure_report = await evaluate_measure(
                         measure_id, patient_id, period_start, period_end
                     )
 
-                    # Extract populations and store result
                     populations = _extract_populations(measure_report)
                     patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
 
@@ -271,7 +310,7 @@ async def _process_single_batch(
 
                 except Exception as patient_exc:
                     logger.warning(
-                        "Failed to process patient",
+                        "Failed to evaluate patient",
                         extra={
                             "job_id": job_id,
                             "batch_id": batch_id,
