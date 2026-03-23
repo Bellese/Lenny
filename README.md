@@ -8,7 +8,7 @@ A free, open-source utility for calculating FHIR-based digital quality measures 
 docker compose up
 ```
 
-Open http://localhost:3000. A demo measure and test patients are pre-loaded — you can run your first calculation immediately.
+Open http://localhost:3001. A demo measure and test patients are pre-loaded — you can run your first calculation immediately.
 
 ## Architecture
 
@@ -16,7 +16,7 @@ MCT2 runs 5 Docker containers:
 
 | Service | Role | Port |
 |---------|------|------|
-| **frontend** | React web UI | 3000 |
+| **frontend** | React web UI | 3001 |
 | **backend** | FastAPI orchestrator | 8000 |
 | **db** | PostgreSQL (job tracking, results) | 5432 (internal) |
 | **hapi-fhir-cdr** | Default clinical data repository | 8080 (internal) |
