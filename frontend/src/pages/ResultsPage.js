@@ -106,19 +106,19 @@ export default function ResultsPage() {
     setPatientDetail(null);
   }, []);
 
-  // Extract aggregate data
-  const aggregate = results?.aggregate || results?.summary || results || {};
-  const patients = results?.patients || results?.individual_results || results?.results || [];
-  const measureName = results?.measure_name || results?.measure || aggregate?.measure_name || '';
-  const period = results?.period_start && results?.period_end
-    ? `${results.period_start} to ${results.period_end}`
+  // Extract aggregate data — API returns { populations: {...}, patients: [...], ... }
+  const populations = results?.populations || {};
+  const patients = results?.patients || [];
+  const measureName = results?.measure_name || selectedJob?.measure_name || selectedJob?.measure_id || '';
+  const period = selectedJob?.period_start && selectedJob?.period_end
+    ? `${selectedJob.period_start} to ${selectedJob.period_end}`
     : '';
 
-  const initialPop = aggregate.initial_population ?? aggregate.initialPopulation;
-  const denominator = aggregate.denominator;
-  const numerator = aggregate.numerator;
-  const denomExclusion = aggregate.denominator_exclusion ?? aggregate.denominatorExclusion;
-  const performanceRate = aggregate.performance_rate ?? aggregate.performanceRate;
+  const initialPop = populations.initial_population;
+  const denominator = populations.denominator;
+  const numerator = populations.numerator;
+  const denomExclusion = populations.denominator_exclusion;
+  const performanceRate = results?.performance_rate;
 
   const selectedJob = jobs.find(j => String(j.id) === String(selectedJobId));
 
@@ -263,13 +263,13 @@ export default function ResultsPage() {
                       </td>
                       <td>{patient.patient_name || patient.name || '--'}</td>
                       <td className={styles.boolCell}>
-                        {patient.initial_population ? <CheckMark /> : <CrossMark />}
+                        {patient.populations?.initial_population ? <CheckMark /> : <CrossMark />}
                       </td>
                       <td className={styles.boolCell}>
-                        {patient.denominator ? <CheckMark /> : <CrossMark />}
+                        {patient.populations?.denominator ? <CheckMark /> : <CrossMark />}
                       </td>
                       <td className={styles.boolCell}>
-                        {patient.numerator ? <CheckMark /> : <CrossMark />}
+                        {patient.populations?.numerator ? <CheckMark /> : <CrossMark />}
                       </td>
                       <td>
                         <button
