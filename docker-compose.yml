@@ -15,18 +15,19 @@ services:
       db:
         condition: service_healthy
       hapi-fhir-cdr:
-        condition: service_healthy
+        condition: service_started
       hapi-fhir-measure:
-        condition: service_healthy
+        condition: service_started
     environment:
-      - DATABASE_URL=postgresql://mct2:mct2@db:5432/mct2
+      - DATABASE_URL=postgresql+asyncpg://mct2:mct2@db:5432/mct2
       - MEASURE_ENGINE_URL=http://hapi-fhir-measure:8080/fhir
       - DEFAULT_CDR_URL=http://hapi-fhir-cdr:8080/fhir
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
       interval: 10s
       timeout: 5s
-      retries: 5
+      retries: 15
+      start_period: 30s
 
   db:
     image: postgres:16-alpine
@@ -47,12 +48,6 @@ services:
     environment:
       - hapi.fhir.server_address=http://hapi-fhir-cdr:8080/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/fhir/metadata"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
 
   hapi-fhir-measure:
     image: hapiproject/hapi:v7.6.0
@@ -60,20 +55,14 @@ services:
     environment:
       - hapi.fhir.server_address=http://hapi-fhir-measure:8080/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/fhir/metadata"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
 
   seed:
     build: ./seed
     depends_on:
       hapi-fhir-cdr:
-        condition: service_healthy
+        condition: service_started
       hapi-fhir-measure:
-        condition: service_healthy
+        condition: service_started
     environment:
       - CDR_URL=http://hapi-fhir-cdr:8080/fhir
       - MEASURE_URL=http://hapi-fhir-measure:8080/fhir

@@ -28,12 +28,6 @@ services:
     environment:
       - hapi.fhir.server_address=http://hapi-fhir-cdr:8080/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/fhir/metadata"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
 
   hapi-fhir-measure:
     image: hapiproject/hapi:v7.6.0
@@ -42,12 +36,6 @@ services:
     environment:
       - hapi.fhir.server_address=http://hapi-fhir-measure:8080/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/fhir/metadata"]
-      interval: 10s
-      timeout: 10s
-      retries: 10
-      start_period: 60s
 
 volumes:
   test_pgdata:
