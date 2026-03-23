@@ -114,9 +114,12 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
                 resp = await client.get(url, headers=auth_headers)
                 resp.raise_for_status()
                 bundle = resp.json()
+                # Skip Group and MeasureReport resources — they reference
+                # other patients and are not needed for evaluation
+                _SKIP_TYPES = {"Group", "MeasureReport"}
                 for entry in bundle.get("entry", []):
                     resource = entry.get("resource")
-                    if resource:
+                    if resource and resource.get("resourceType") not in _SKIP_TYPES:
                         resources.append(resource)
                 url = None
                 for link in bundle.get("link", []):

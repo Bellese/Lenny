@@ -99,6 +99,6 @@ verify_data "$MEASURE_URL" "Library" "Measure Engine"
 # Done
 log "============================================"
 log "  MCT2 demo data loaded successfully!"
-log "  CDR:     20 patients with clinical data"
+log "  CDR:     55 patients with clinical data"
 log "  Engine:  1 measure (CMS122 - Diabetes HbA1c)"
 log "============================================"
