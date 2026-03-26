@@ -212,8 +212,9 @@ export default function ResultsPage() {
           {/* Population cards */}
           <div className={styles.cardsRow}>
             <PopulationCard label="Initial Population" count={initialPop} variant="default" />
-            <PopulationCard label="Denominator" count={denominator} variant="default" />
             <PopulationCard label="Numerator" count={numerator} variant="accent" />
+            <PopulationCard label="Denominator" count={denominator} variant="default" />
+            <PopulationCard label="Denominator Exclusions" count={denomExclusion} variant="default" />
           </div>
 
           {/* Performance Rate */}
@@ -222,17 +223,10 @@ export default function ResultsPage() {
               <span className={styles.perfLabel}>Performance Rate</span>
               <span className={styles.perfValue}>
                 {typeof performanceRate === 'number'
-                  ? `${(performanceRate * (performanceRate <= 1 ? 100 : 1)).toFixed(1)}%`
+                  ? `${performanceRate.toFixed(1)}%`
                   : performanceRate}
               </span>
             </div>
-          )}
-
-          {/* Denominator Exclusions */}
-          {denomExclusion !== undefined && denomExclusion !== null && (
-            <p className={styles.exclusions}>
-              Denominator Exclusions: {denomExclusion.toLocaleString()}
-            </p>
           )}
 
           {/* Patient list */}

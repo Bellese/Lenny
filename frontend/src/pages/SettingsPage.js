@@ -279,17 +279,17 @@ export default function SettingsPage() {
             />
             <StatusIndicator
               label="Measure Engine"
-              status={health?.measure_engine_connected ?? health?.measure_engine}
+              status={health?.measure_engine?.status}
               detail={health?.measure_engine_url}
             />
             <StatusIndicator
               label="CDR"
-              status={health?.cdr_connected ?? health?.cdr}
+              status={health?.cdr?.status}
               detail={health?.cdr_response_time ? `${health.cdr_response_time}ms` : null}
             />
             <StatusIndicator
               label="Database"
-              status={health?.database_connected ?? health?.database}
+              status={health?.database?.status}
             />
           </div>
         </section>
