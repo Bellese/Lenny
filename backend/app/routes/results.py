@@ -67,11 +67,11 @@ async def get_results(
             }
         )
 
-    # Performance rate = numerator / (denominator - denominator_exclusion)
-    effective_denominator = pops["denominator"] - pops["denominator_exclusion"]
+    # Performance rate = numerator / denominator
+    # The denominator already excludes denominator-exclusion patients.
     performance_rate = None
-    if effective_denominator > 0:
-        performance_rate = round(pops["numerator"] / effective_denominator * 100, 1)
+    if pops["denominator"] > 0:
+        performance_rate = round(pops["numerator"] / pops["denominator"] * 100, 1)
 
     return {
         "job_id": job_id,

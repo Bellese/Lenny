@@ -63,13 +63,20 @@ verify_data() {
   local url="$1"
   local resource_type="$2"
   local name="$3"
+  local attempt=1
 
-  count=$(curl -s "$url/${resource_type}?_summary=count" | sed -n 's/.*"total":\([0-9]*\).*/\1/p')
-  if [ -n "$count" ] && [ "$count" -gt 0 ]; then
-    log "Verified: $count $resource_type resource(s) found on $name."
-  else
-    log "WARNING: Could not verify $resource_type resources on $name (count: ${count:-unknown})."
-  fi
+  while [ "$attempt" -le "$MAX_RETRIES" ]; do
+    count=$(curl -s "$url/${resource_type}?_summary=count" | sed -n 's/.*"total":\([0-9]*\).*/\1/p')
+    if [ -n "$count" ] && [ "$count" -gt 0 ]; then
+      log "Verified: $count $resource_type resource(s) found on $name."
+      return 0
+    fi
+    log "Waiting for $resource_type indexing on $name (attempt $attempt/$MAX_RETRIES)..."
+    sleep "$RETRY_INTERVAL"
+    attempt=$((attempt + 1))
+  done
+
+  log "WARNING: Could not verify $resource_type resources on $name after $MAX_RETRIES attempts."
 }
 
 # ============================================================
