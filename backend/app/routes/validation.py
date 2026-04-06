@@ -6,7 +6,7 @@ import os
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
-from sqlalchemy import select, func
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -38,8 +38,8 @@ async def upload_bundle(
     if not file.filename or not file.filename.lower().endswith(".json"):
         raise HTTPException(status_code=400, detail="File must be a .json file")
 
-    # Read and validate content
-    content = await file.read()
+    # Read and validate content — cap read to MAX_UPLOAD_SIZE+1 to avoid OOM on huge uploads
+    content = await file.read(MAX_UPLOAD_SIZE + 1)
     if len(content) > MAX_UPLOAD_SIZE:
         raise HTTPException(status_code=413, detail="File exceeds 100MB size limit")
 
@@ -201,8 +201,12 @@ async def get_validation_run(
         select(ValidationResult)
         .where(ValidationResult.validation_run_id == run_id)
         .order_by(
-            # Custom sort: fail=0, error=1, pass=2
-            ValidationResult.status.asc(),
+            # Explicit priority: failures first, then errors, then passes
+            case(
+                (ValidationResult.status == "fail", 0),
+                (ValidationResult.status == "error", 1),
+                else_=2,
+            ),
             ValidationResult.measure_url.asc(),
         )
     )

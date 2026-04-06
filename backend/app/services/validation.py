@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -302,8 +303,9 @@ async def process_bundle_upload(upload_id: int) -> None:
             if not upload:
                 return
 
-            with open(upload.file_path, "r") as f:
-                bundle_json = json.load(f)
+            bundle_json = await asyncio.to_thread(
+                lambda: json.loads(Path(upload.file_path).read_bytes())
+            )
 
             summary = await triage_test_bundle(bundle_json, upload.filename, session)
 
@@ -429,10 +431,16 @@ async def run_validation(validation_run_id: int) -> None:
                     await push_resources(resources)
 
         all_patient_refs = [er.patient_ref for er in expected_results]
-        await asyncio.gather(
+        gather_results = await asyncio.gather(
             *[gather_and_push(pr) for pr in all_patient_refs],
             return_exceptions=True,
         )
+        failed_gathers = sum(1 for r in gather_results if isinstance(r, BaseException))
+        if failed_gathers:
+            logger.warning(
+                "Patient data gather partial failure — validation may reflect incomplete data",
+                extra={"failed": failed_gathers, "total": len(all_patient_refs), "run_id": validation_run_id},
+            )
 
         # Wait for HAPI indexing
         await asyncio.sleep(5)

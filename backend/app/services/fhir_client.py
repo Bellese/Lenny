@@ -323,7 +323,7 @@ async def get_group_members(
     group_id: str,
     auth_headers: dict[str, str],
 ) -> list[dict[str, Any]]:
-    """Fetch Patient resources for all members of a Group."""
+    """Fetch Patient resources for all members of a Group (concurrent)."""
     async with httpx.AsyncClient(timeout=60.0) as client:
         # Fetch the Group resource
         resp = await client.get(
@@ -332,22 +332,35 @@ async def get_group_members(
         resp.raise_for_status()
         group = resp.json()
 
-        # Extract Patient references from members
-        patients: list[dict[str, Any]] = []
+        # Extract Patient IDs from members
+        patient_ids: list[tuple[str, str]] = []  # (patient_id, original_ref)
         for member in group.get("member", []):
             ref = member.get("entity", {}).get("reference", "")
             if ref.startswith("Patient/"):
                 patient_id = ref.split("/", 1)[1]
+                patient_ids.append((patient_id, ref))
+
+        # Fetch all patients concurrently with a semaphore to avoid overwhelming the CDR
+        semaphore = asyncio.Semaphore(10)
+
+        async def fetch_patient(patient_id: str, ref: str) -> dict[str, Any] | None:
+            async with semaphore:
                 patient_resp = await client.get(
                     f"{cdr_url}/Patient/{patient_id}", headers=auth_headers
                 )
                 if patient_resp.status_code == 200:
-                    patients.append(patient_resp.json())
-                else:
-                    logger.warning(
-                        "Could not fetch group member",
-                        extra={"group_id": group_id, "patient_ref": ref},
-                    )
+                    return patient_resp.json()
+                logger.warning(
+                    "Could not fetch group member",
+                    extra={"group_id": group_id, "patient_ref": ref},
+                )
+                return None
+
+        results = await asyncio.gather(
+            *[fetch_patient(pid, ref) for pid, ref in patient_ids],
+            return_exceptions=True,
+        )
+        patients = [r for r in results if isinstance(r, dict)]
 
     logger.info(
         "Gathered group members",
