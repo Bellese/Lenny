@@ -20,6 +20,7 @@ from app.services.fhir_client import (
     BatchQueryStrategy,
     _build_auth_headers,
     evaluate_measure,
+    get_group_members,
     push_resources,
     wipe_patient_data,
 )
@@ -92,10 +93,18 @@ async def run_job(job_id: int) -> None:
         auth_headers = await _get_cdr_auth_headers(job_id)
         cdr_url = await _get_cdr_url(job_id)
 
-        # Step 3: Fetch all patients from CDR
-        strategy = BatchQueryStrategy()
-        logger.info("Gathering patients from CDR", extra={"job_id": job_id, "cdr_url": cdr_url})
-        patients = await strategy.gather_patients(cdr_url, auth_headers)
+        # Step 3: Fetch patients from CDR (optionally filtered by Group)
+        async with async_session() as session:
+            job_for_group = await session.get(Job, job_id)
+            group_id = job_for_group.group_id if job_for_group else None
+
+        if group_id:
+            logger.info("Gathering patients from Group", extra={"job_id": job_id, "group_id": group_id})
+            patients = await get_group_members(cdr_url, group_id, auth_headers)
+        else:
+            strategy = BatchQueryStrategy()
+            logger.info("Gathering patients from CDR", extra={"job_id": job_id, "cdr_url": cdr_url})
+            patients = await strategy.gather_patients(cdr_url, auth_headers)
 
         if not patients:
             async with async_session() as session:

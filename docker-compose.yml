@@ -43,27 +43,28 @@ services:
       retries: 5
 
   hapi-fhir-cdr:
-    image: hapiproject/hapi:v7.4.0
+    image: hapiproject/hapi:v8.6.0-1
     user: root
     volumes: ["cdrdata:/data/hapi"]
     environment:
       - hapi.fhir.server_address=http://hapi-fhir-cdr:8080/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
+      - hapi.fhir.client_id_strategy=ANY
+      - hapi.fhir.allow_external_references=true
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
-      - spring.jpa.properties.hibernate.dialect=ca.uhn.fhir.jpa.model.dialect.HapiFhirH2Dialect
 
   hapi-fhir-measure:
-    image: hapiproject/hapi:v7.4.0
+    image: hapiproject/hapi:v8.6.0-1
     user: root
     volumes: ["measuredata:/data/hapi"]
     environment:
       - hapi.fhir.server_address=http://hapi-fhir-measure:8080/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
+      - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.cr.enabled=true
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
-      - spring.jpa.properties.hibernate.dialect=ca.uhn.fhir.jpa.model.dialect.HapiFhirH2Dialect
 
   seed:
     build: ./seed

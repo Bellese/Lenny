@@ -12,6 +12,7 @@ from app.config import settings
 from app.db import get_session
 from app.models.config import CDRConfig
 from app.models.job import Job, JobStatus
+from app.services.fhir_client import _build_auth_headers, list_groups
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -28,6 +29,7 @@ class JobCreate(BaseModel):
     period_start: str
     period_end: str
     cdr_url: str | None = None  # if omitted, use active CDR config or default
+    group_id: str | None = None  # if set, only evaluate patients in this FHIR Group
 
 
 class JobResponse(BaseModel):
@@ -37,6 +39,7 @@ class JobResponse(BaseModel):
     period_start: str
     period_end: str
     cdr_url: str
+    group_id: str | None
     status: str
     total_patients: int
     processed_patients: int
@@ -78,6 +81,7 @@ def _job_to_response(job: Job) -> dict:
         "period_start": job.period_start,
         "period_end": job.period_end,
         "cdr_url": job.cdr_url,
+        "group_id": job.group_id,
         "status": job.status.value if isinstance(job.status, JobStatus) else job.status,
         "total_patients": job.total_patients,
         "processed_patients": job.processed_patients,
@@ -106,6 +110,31 @@ def _batch_to_response(batch) -> dict:
 # ---------------------------------------------------------------------------
 
 
+@router.get("/groups")
+async def get_groups(
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """List FHIR Group resources from the CDR."""
+    result = await session.execute(
+        select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1)
+    )
+    config = result.scalar_one_or_none()
+    cdr_url = config.cdr_url if config else settings.DEFAULT_CDR_URL
+    auth_headers = _build_auth_headers(
+        config.auth_type, config.auth_credentials
+    ) if config else {}
+
+    try:
+        groups = await list_groups(cdr_url, auth_headers)
+        return {"groups": groups}
+    except Exception as exc:
+        logger.exception("Failed to fetch groups from CDR")
+        raise HTTPException(
+            status_code=502,
+            detail=f"Cannot reach CDR to list groups: {exc}",
+        )
+
+
 @router.post("", response_model=JobResponse, status_code=201)
 async def create_job(
     body: JobCreate,
@@ -127,6 +156,7 @@ async def create_job(
         period_start=body.period_start,
         period_end=body.period_end,
         cdr_url=cdr_url,
+        group_id=body.group_id,
         status=JobStatus.queued,
     )
     session.add(job)

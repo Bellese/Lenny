@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import styles from './JobsPage.module.css';
-import { getJobs, getMeasures, createJob, cancelJob } from '../api/client';
+import { getJobs, getMeasures, getGroups, createJob, cancelJob } from '../api/client';
 import { useToast } from '../components/Toast';
 import ProgressBar from '../components/ProgressBar';
 
@@ -55,10 +55,11 @@ function isRunning(status) {
 export default function JobsPage() {
   const [jobs, setJobs] = useState([]);
   const [measures, setMeasures] = useState([]);
+  const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showModal, setShowModal] = useState(false);
-  const [formData, setFormData] = useState({ measure_id: '', period_start: '', period_end: '' });
+  const [formData, setFormData] = useState({ measure_id: '', group_id: '', period_start: '', period_end: '' });
   const [creating, setCreating] = useState(false);
   const pollRef = useRef(null);
   const toast = useToast();
@@ -88,10 +89,20 @@ export default function JobsPage() {
     }
   }, [formData.measure_id]);
 
+  const loadGroups = useCallback(async () => {
+    try {
+      const data = await getGroups();
+      setGroups(data.groups || []);
+    } catch {
+      // Non-blocking — groups are optional
+    }
+  }, []);
+
   useEffect(() => {
     loadJobs();
     loadMeasures();
-  }, [loadJobs, loadMeasures]);
+    loadGroups();
+  }, [loadJobs, loadMeasures, loadGroups]);
 
   // Polling for in-progress jobs
   useEffect(() => {
@@ -116,6 +127,7 @@ export default function JobsPage() {
     try {
       await createJob({
         measure_id: formData.measure_id,
+        group_id: formData.group_id || undefined,
         period_start: formData.period_start || undefined,
         period_end: formData.period_end || undefined,
       });
@@ -310,6 +322,22 @@ export default function JobsPage() {
                   {measures.map((m, i) => (
                     <option key={m.id || i} value={m.id || ''}>
                       {m.resource?.title || m.resource?.name || m.title || m.name || m.id}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className={styles.formGroup}>
+                <label htmlFor="group-select" className={styles.label}>Patient Group <span style={{fontWeight: 'normal', color: 'var(--color-text-secondary)'}}>(optional)</span></label>
+                <select
+                  id="group-select"
+                  value={formData.group_id}
+                  onChange={e => setFormData(prev => ({ ...prev, group_id: e.target.value }))}
+                  className={styles.select}
+                >
+                  <option value="">All Patients (no group filter)</option>
+                  {groups.map(g => (
+                    <option key={g.id} value={g.id}>
+                      {g.name || g.id} ({g.member_count} patients)
                     </option>
                   ))}
                 </select>

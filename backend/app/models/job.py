@@ -43,6 +43,7 @@ class Job(Base):
     period_start: Mapped[str] = mapped_column(String(10), nullable=False)
     period_end: Mapped[str] = mapped_column(String(10), nullable=False)
     cdr_url: Mapped[str] = mapped_column(String(1024), nullable=False)
+    group_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     status: Mapped[JobStatus] = mapped_column(
         Enum(JobStatus), nullable=False, default=JobStatus.queued, index=True
     )

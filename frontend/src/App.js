@@ -5,6 +5,7 @@ import MeasuresPage from './pages/MeasuresPage';
 import JobsPage from './pages/JobsPage';
 import ResultsPage from './pages/ResultsPage';
 import SettingsPage from './pages/SettingsPage';
+import ValidationPage from './pages/ValidationPage';
 import { getHealth } from './api/client';
 
 function GearIcon() {
@@ -42,6 +43,15 @@ function ResultsIcon() {
   );
 }
 
+function ValidationIcon() {
+  return (
+    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M10 2l6 3v5c0 4-3 7-6 8-3-1-6-4-6-8V5l6-3z" />
+      <path d="M7 10l2 2 4-4" />
+    </svg>
+  );
+}
+
 function HamburgerIcon() {
   return (
     <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
@@ -54,6 +64,7 @@ const NAV_ITEMS = [
   { path: '/measures', label: 'Measures', icon: MeasuresIcon },
   { path: '/jobs', label: 'Jobs', icon: JobsIcon },
   { path: '/results', label: 'Results', icon: ResultsIcon },
+  { path: '/validation', label: 'Validation', icon: ValidationIcon },
 ];
 
 export default function App() {
@@ -156,6 +167,7 @@ export default function App() {
             <Route path="/jobs" element={<JobsPage />} />
             <Route path="/results" element={<ResultsPage />} />
             <Route path="/results/:jobId" element={<ResultsPage />} />
+            <Route path="/validation" element={<ValidationPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Routes>
         </main>

@@ -289,6 +289,73 @@ async def resolve_evaluated_resource(reference: str) -> dict[str, Any]:
         return resp.json()
 
 
+async def list_groups(
+    cdr_url: str,
+    auth_headers: dict[str, str],
+) -> list[dict[str, Any]]:
+    """List all Group resources on the CDR."""
+    groups: list[dict[str, Any]] = []
+    url: str | None = f"{cdr_url}/Group?_count=100"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while url:
+            resp = await client.get(url, headers=auth_headers)
+            resp.raise_for_status()
+            bundle = resp.json()
+            for entry in bundle.get("entry", []):
+                resource = entry.get("resource", {})
+                if resource.get("resourceType") == "Group":
+                    groups.append({
+                        "id": resource.get("id"),
+                        "name": resource.get("name"),
+                        "type": resource.get("type"),
+                        "member_count": len(resource.get("member", [])),
+                    })
+            url = None
+            for link in bundle.get("link", []):
+                if link.get("relation") == "next":
+                    url = link.get("url")
+                    break
+    return groups
+
+
+async def get_group_members(
+    cdr_url: str,
+    group_id: str,
+    auth_headers: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Fetch Patient resources for all members of a Group."""
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Fetch the Group resource
+        resp = await client.get(
+            f"{cdr_url}/Group/{group_id}", headers=auth_headers
+        )
+        resp.raise_for_status()
+        group = resp.json()
+
+        # Extract Patient references from members
+        patients: list[dict[str, Any]] = []
+        for member in group.get("member", []):
+            ref = member.get("entity", {}).get("reference", "")
+            if ref.startswith("Patient/"):
+                patient_id = ref.split("/", 1)[1]
+                patient_resp = await client.get(
+                    f"{cdr_url}/Patient/{patient_id}", headers=auth_headers
+                )
+                if patient_resp.status_code == 200:
+                    patients.append(patient_resp.json())
+                else:
+                    logger.warning(
+                        "Could not fetch group member",
+                        extra={"group_id": group_id, "patient_ref": ref},
+                    )
+
+    logger.info(
+        "Gathered group members",
+        extra={"group_id": group_id, "count": len(patients)},
+    )
+    return patients
+
+
 async def list_measures() -> dict[str, Any]:
     """List all Measure resources on the measure engine."""
     url = f"{settings.MEASURE_ENGINE_URL}/Measure?_count=100"

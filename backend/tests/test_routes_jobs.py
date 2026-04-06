@@ -158,3 +158,32 @@ async def test_cancel_already_complete_job(client, test_session):
     assert resp.status_code == 409
     data = resp.json()["detail"]
     assert data["issue"][0]["code"] == "conflict"
+
+
+async def test_create_job_with_group_id(client):
+    """POST /jobs with group_id stores it on the job."""
+    payload = {
+        "measure_id": "measure-1",
+        "period_start": "2024-01-01",
+        "period_end": "2024-12-31",
+        "cdr_url": "http://example.com/fhir",
+        "group_id": "CMS349FHIRHIVScreening",
+    }
+    resp = await client.post("/jobs", json=payload)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["group_id"] == "CMS349FHIRHIVScreening"
+
+
+async def test_create_job_without_group_id(client):
+    """POST /jobs without group_id defaults to null."""
+    payload = {
+        "measure_id": "measure-1",
+        "period_start": "2024-01-01",
+        "period_end": "2024-12-31",
+        "cdr_url": "http://example.com/fhir",
+    }
+    resp = await client.post("/jobs", json=payload)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["group_id"] is None
