@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db import engine
 from app.models import Base
-from app.routes import health, jobs, measures, results, settings
+from app.routes import health, jobs, measures, results, settings, validation
 from app.services.worker import request_shutdown, worker_loop
 
 # ---------------------------------------------------------------------------
@@ -104,3 +104,4 @@ app.include_router(jobs.router)
 app.include_router(measures.router)
 app.include_router(results.router)
 app.include_router(settings.router)
+app.include_router(validation.router)

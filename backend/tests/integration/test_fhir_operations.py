@@ -14,7 +14,7 @@ from app.services.fhir_client import (
     evaluate_measure,
     upload_measure_bundle,
     wipe_patient_data,
-    test_connection,
+    verify_fhir_connection,
 )
 from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL
 
@@ -40,7 +40,7 @@ async def test_list_measures(measure_url):
         for e in entries
         if e.get("resource", {}).get("resourceType") == "Measure"
     ]
-    assert "cms122-diabetes-hba1c" in measure_ids, (
+    assert "CMS122FHIRDiabetesAssessGT9Pct" in measure_ids, (
         f"Expected CMS122 measure in {measure_ids}"
     )
 
@@ -116,7 +116,7 @@ async def test_gather_patients(cdr_url):
 async def test_gather_patient_data(cdr_url):
     """Gathering clinical data for one patient should return Condition and Observation resources."""
     strategy = BatchQueryStrategy()
-    resources = await strategy.gather_patient_data(cdr_url, "pt-001", auth_headers={})
+    resources = await strategy.gather_patient_data(cdr_url, "6f0553ac-e12a-4af5-ad27-05339f4b4ec0", auth_headers={})
 
     assert len(resources) > 0, "Expected at least some resources for pt-001"
     resource_types = {r["resourceType"] for r in resources}
@@ -184,7 +184,7 @@ async def test_evaluate_measure(measure_url, cdr_url):
 
     # First push a patient + data to the measure engine
     strategy = BatchQueryStrategy()
-    resources = await strategy.gather_patient_data(cdr_url, "pt-001", auth_headers={})
+    resources = await strategy.gather_patient_data(cdr_url, "6f0553ac-e12a-4af5-ad27-05339f4b4ec0", auth_headers={})
 
     with patch("app.config.settings.MEASURE_ENGINE_URL", measure_url):
         if resources:
@@ -192,8 +192,8 @@ async def test_evaluate_measure(measure_url, cdr_url):
 
         try:
             report = await evaluate_measure(
-                measure_id="cms122-diabetes-hba1c",
-                patient_id="pt-001",
+                measure_id="CMS122FHIRDiabetesAssessGT9Pct",
+                patient_id="6f0553ac-e12a-4af5-ad27-05339f4b4ec0",
                 period_start="2025-01-01",
                 period_end="2025-12-31",
             )
@@ -247,8 +247,11 @@ async def test_wipe_patient_data(measure_url):
 # ---------------------------------------------------------------------------
 
 
-async def test_test_connection_real_server(cdr_url):
-    """test_connection against the live CDR should return success."""
-    result = await test_connection(cdr_url)
+async def test_test_connection_real_server(cdr_url, measure_url):
+    """test_connection against the live CDR and measure engine should return success."""
+    result = await verify_fhir_connection(cdr_url)
     assert result["status"] == "connected"
     assert result["fhir_version"] is not None
+
+    result = await verify_fhir_connection(measure_url)
+    assert result["status"] == "connected"

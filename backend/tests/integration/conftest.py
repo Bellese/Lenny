@@ -137,7 +137,10 @@ async def _truncate_tables(integration_session_factory):
     """Truncate job/batch/result tables between tests (keep HAPI data loaded)."""
     yield
     async with integration_session_factory() as session:
-        for table in ("measure_results", "batches", "jobs", "cdr_configs"):
+        for table in (
+            "validation_results", "validation_runs", "expected_results",
+            "bundle_uploads", "measure_results", "batches", "jobs", "cdr_configs",
+        ):
             await session.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
         await session.commit()
 
@@ -161,7 +164,7 @@ async def integration_client(integration_session_factory):
     from httpx import ASGITransport, AsyncClient
 
     from app.db import get_session
-    from app.routes import health, jobs, measures, results, settings
+    from app.routes import health, jobs, measures, results, settings, validation
 
     test_app = FastAPI()
     test_app.include_router(health.router)
@@ -169,6 +172,7 @@ async def integration_client(integration_session_factory):
     test_app.include_router(measures.router)
     test_app.include_router(results.router)
     test_app.include_router(settings.router)
+    test_app.include_router(validation.router)
 
     async def _override_get_session():
         async with integration_session_factory() as session:

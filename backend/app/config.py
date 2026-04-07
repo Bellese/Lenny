@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     BATCH_SIZE: int = 100
     MAX_WORKERS: int = 4
     MAX_RETRIES: int = 3
+    HAPI_INDEX_WAIT_SECONDS: int = 5  # Wait after pushing patients before evaluating measures
     LOG_LEVEL: str = "INFO"
 
     model_config = {"env_prefix": "", "case_sensitive": True}

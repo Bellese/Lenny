@@ -66,7 +66,7 @@ verify_data() {
   local attempt=1
 
   while [ "$attempt" -le "$MAX_RETRIES" ]; do
-    count=$(curl -s "$url/${resource_type}?_summary=count" | sed -n 's/.*"total":\([0-9]*\).*/\1/p')
+    count=$(curl -s "$url/${resource_type}?_summary=count" | sed -n 's/.*"total" *: *\([0-9]*\).*/\1/p')
     if [ -n "$count" ] && [ "$count" -gt 0 ]; then
       log "Verified: $count $resource_type resource(s) found on $name."
       return 0

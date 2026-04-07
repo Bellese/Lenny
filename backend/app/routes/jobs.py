@@ -1,10 +1,12 @@
 """Job management endpoints."""
 
 import logging
+import re
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +14,7 @@ from app.config import settings
 from app.db import get_session
 from app.models.config import CDRConfig
 from app.models.job import Job, JobStatus
+from app.services.fhir_client import _build_auth_headers, list_groups
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -22,28 +25,41 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 # ---------------------------------------------------------------------------
 
 
+_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,256}$")
+
+
 class JobCreate(BaseModel):
     measure_id: str
-    measure_name: str | None = None
+    measure_name: Optional[str] = None
     period_start: str
     period_end: str
-    cdr_url: str | None = None  # if omitted, use active CDR config or default
+    cdr_url: Optional[str] = None  # if omitted, use active CDR config or default
+    group_id: Optional[str] = None  # if set, only evaluate patients in this FHIR Group
+
+    @field_validator("group_id")
+    @classmethod
+    def validate_group_id(cls, v: Optional[str]) -> Optional[str]:
+        """Reject group_id values that could rewrite the CDR URL path."""
+        if v is not None and not _GROUP_ID_RE.match(v):
+            raise ValueError("group_id must be alphanumeric with hyphens, underscores, or dots only")
+        return v
 
 
 class JobResponse(BaseModel):
     id: int
     measure_id: str
-    measure_name: str | None
+    measure_name: Optional[str]
     period_start: str
     period_end: str
     cdr_url: str
+    group_id: Optional[str]
     status: str
     total_patients: int
     processed_patients: int
     failed_patients: int
     created_at: str
-    completed_at: str | None
-    error_message: str | None
+    completed_at: Optional[str]
+    error_message: Optional[str]
 
     model_config = {"from_attributes": True}
 
@@ -54,9 +70,9 @@ class BatchResponse(BaseModel):
     patient_ids: list[str]
     status: str
     retry_count: int
-    error_message: str | None
+    error_message: Optional[str]
     created_at: str
-    completed_at: str | None
+    completed_at: Optional[str]
 
     model_config = {"from_attributes": True}
 
@@ -78,6 +94,7 @@ def _job_to_response(job: Job) -> dict:
         "period_start": job.period_start,
         "period_end": job.period_end,
         "cdr_url": job.cdr_url,
+        "group_id": job.group_id,
         "status": job.status.value if isinstance(job.status, JobStatus) else job.status,
         "total_patients": job.total_patients,
         "processed_patients": job.processed_patients,
@@ -106,6 +123,31 @@ def _batch_to_response(batch) -> dict:
 # ---------------------------------------------------------------------------
 
 
+@router.get("/groups")
+async def get_groups(
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """List FHIR Group resources from the CDR."""
+    result = await session.execute(
+        select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1)
+    )
+    config = result.scalar_one_or_none()
+    cdr_url = config.cdr_url if config else settings.DEFAULT_CDR_URL
+    auth_headers = _build_auth_headers(
+        config.auth_type, config.auth_credentials
+    ) if config else {}
+
+    try:
+        groups = await list_groups(cdr_url, auth_headers)
+        return {"groups": groups}
+    except Exception as exc:
+        logger.exception("Failed to fetch groups from CDR")
+        raise HTTPException(
+            status_code=502,
+            detail="Cannot reach CDR to list groups. Check CDR connectivity in Settings.",
+        )
+
+
 @router.post("", response_model=JobResponse, status_code=201)
 async def create_job(
     body: JobCreate,
@@ -127,6 +169,7 @@ async def create_job(
         period_start=body.period_start,
         period_end=body.period_end,
         cdr_url=cdr_url,
+        group_id=body.group_id,
         status=JobStatus.queued,
     )
     session.add(job)

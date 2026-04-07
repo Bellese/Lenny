@@ -70,7 +70,7 @@ async def client(session_factory) -> AsyncGenerator[AsyncClient, None]:
     starting the background worker and hitting the real Postgres.
     """
     from fastapi import FastAPI
-    from app.routes import health, jobs, measures, results, settings
+    from app.routes import health, jobs, measures, results, settings, validation
     from app.db import get_session
 
     # Build a minimal app without the lifespan (no worker, no real DB init)
@@ -80,6 +80,7 @@ async def client(session_factory) -> AsyncGenerator[AsyncClient, None]:
     test_app.include_router(measures.router)
     test_app.include_router(results.router)
     test_app.include_router(settings.router)
+    test_app.include_router(validation.router)
 
     async def _override_get_session():
         async with session_factory() as session:
@@ -200,5 +201,102 @@ def mock_measure_report():
         "evaluatedResource": [
             {"reference": "Patient/patient-1"},
             {"reference": "Condition/cond-1"},
+        ],
+    }
+
+
+@pytest.fixture
+def mock_test_bundle_with_expected():
+    """A test bundle with Measure, Library, Patient, and isTestCase MeasureReport."""
+    return {
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [
+            {
+                "resource": {
+                    "resourceType": "Measure",
+                    "id": "CMS124",
+                    "url": "https://example.com/Measure/CMS124",
+                    "name": "CMS124Test",
+                    "status": "active",
+                },
+                "request": {"method": "PUT", "url": "Measure/CMS124"},
+            },
+            {
+                "resource": {
+                    "resourceType": "Library",
+                    "id": "lib-1",
+                    "url": "https://example.com/Library/lib-1",
+                    "status": "active",
+                },
+                "request": {"method": "PUT", "url": "Library/lib-1"},
+            },
+            {
+                "resource": {
+                    "resourceType": "Patient",
+                    "id": "test-patient-1",
+                    "name": [{"given": ["Alice"], "family": "Test"}],
+                },
+                "request": {"method": "PUT", "url": "Patient/test-patient-1"},
+            },
+            {
+                "resource": {
+                    "resourceType": "Observation",
+                    "id": "obs-1",
+                    "subject": {"reference": "Patient/test-patient-1"},
+                    "code": {"coding": [{"code": "test-obs"}]},
+                },
+                "request": {"method": "PUT", "url": "Observation/obs-1"},
+            },
+            {
+                "resource": {
+                    "resourceType": "MeasureReport",
+                    "id": "expected-report-1",
+                    "status": "complete",
+                    "type": "individual",
+                    "measure": "https://example.com/Measure/CMS124",
+                    "contained": [
+                        {
+                            "resourceType": "Parameters",
+                            "id": "params-1",
+                            "parameter": [
+                                {"name": "subject", "valueString": "test-patient-1"}
+                            ],
+                        }
+                    ],
+                    "extension": [
+                        {
+                            "url": "http://hl7.org/fhir/StructureDefinition/cqf-inputParameters",
+                            "valueReference": {"reference": "#params-1"},
+                        },
+                        {
+                            "url": "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-testCaseDescription",
+                            "valueMarkdown": "Female 24yo, cervical cytology 2yrs prior",
+                        },
+                    ],
+                    "modifierExtension": [
+                        {
+                            "url": "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase",
+                            "valueBoolean": True,
+                        }
+                    ],
+                    "period": {"start": "2026-01-01", "end": "2026-12-31"},
+                    "group": [
+                        {
+                            "population": [
+                                {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
+                                {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
+                                {"code": {"coding": [{"code": "denominator-exclusion"}]}, "count": 0},
+                                {"code": {"coding": [{"code": "numerator"}]}, "count": 1},
+                            ]
+                        }
+                    ],
+                    "evaluatedResource": [
+                        {"reference": "Patient/test-patient-1"},
+                        {"reference": "Observation/obs-1"},
+                    ],
+                },
+                "request": {"method": "PUT", "url": "MeasureReport/expected-report-1"},
+            },
         ],
     }

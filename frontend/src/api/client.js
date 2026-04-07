@@ -64,6 +64,11 @@ export function uploadMeasure(file) {
   });
 }
 
+// Groups
+export function getGroups() {
+  return request('/jobs/groups');
+}
+
 // Jobs
 export function getJobs() {
   return request('/jobs');
@@ -117,4 +122,37 @@ export function testConnection(data) {
     method: 'POST',
     body: JSON.stringify(data),
   });
+}
+
+// Validation
+export function uploadTestBundle(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+  return request('/validation/upload-bundle', {
+    method: 'POST',
+    body: formData,
+  });
+}
+
+export function getUploads() {
+  return request('/validation/uploads');
+}
+
+export function getExpectedResults() {
+  return request('/validation/expected');
+}
+
+export function startValidationRun(options = {}) {
+  return request('/validation/run', {
+    method: 'POST',
+    body: JSON.stringify(options),
+  });
+}
+
+export function getValidationRuns() {
+  return request('/validation/runs');
+}
+
+export function getValidationRun(runId) {
+  return request(`/validation/runs/${runId}`);
 }

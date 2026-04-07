@@ -20,3 +20,16 @@
 **Cons:** Receiving endpoints vary by program (MSSP, MIPS, etc.). Auth and format requirements differ across programs.
 **Context:** MeasureReports are already stored in PostgreSQL. Submission is a POST to an external endpoint with program-specific configuration. May want to support DEQM (Data Exchange for Quality Measures) IG profiles.
 **Depends on:** v1 result inspection working.
+
+## CI/CD Validation Pipeline
+**What:** Add CLI/API command that runs validation and outputs structured pass/fail report for CI/CD.
+**Why:** Enables automated regression detection before deploy. Required for formal CMS certification workflow.
+**Pros:** Catches measure calculation regressions pre-deploy. Reuses the validation service.
+**Cons:** Requires CLI harness or standalone script. Low priority until certification is imminent.
+**Context:** The validation service (`services/validation.py`) and ExpectedResult/ValidationRun models provide all the backend logic. This TODO adds a CLI entry point or API endpoint that returns structured JSON/HTML for CI pipelines.
+**Depends on:** ~~Validation dashboard feature (`feature/expected-results-compare` branch).~~ **Now unblocked.**
+
+## Orchestrator Group Filtering Unit Test
+**What:** Add a unit test to `tests/test_services_orchestrator.py` verifying that `run_job` with `group_id` set calls `get_group_members()` instead of `gather_patients()`.
+**Why:** Deferred from plan `iridescent-kindling-whistle.md` during ship. Integration tests cover this path (12/12 pass) but explicit unit isolation is good practice.
+**Priority:** P3 — low urgency, integration tests already cover it.

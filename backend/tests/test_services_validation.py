@@ -1,0 +1,262 @@
+"""Tests for validation service — bundle triage, population extraction, comparison."""
+
+import pytest
+
+from app.services.validation import (
+    _extract_population_counts,
+    _extract_test_case_info,
+    _is_test_case_measure_report,
+    _classify_bundle_entries,
+    compare_populations,
+)
+
+
+# ---------------------------------------------------------------------------
+# _extract_population_counts
+# ---------------------------------------------------------------------------
+
+
+class TestExtractPopulationCounts:
+    def test_happy_path(self, mock_measure_report):
+        result = _extract_population_counts(mock_measure_report)
+        assert result == {
+            "initial-population": 1,
+            "denominator": 1,
+            "numerator": 1,
+            "denominator-exclusion": 0,
+            "numerator-exclusion": 0,
+        }
+
+    def test_empty_groups(self):
+        result = _extract_population_counts({"group": []})
+        assert result == {}
+
+    def test_missing_groups(self):
+        result = _extract_population_counts({})
+        assert result == {}
+
+    def test_zero_counts(self):
+        report = {
+            "group": [{
+                "population": [
+                    {"code": {"coding": [{"code": "initial-population"}]}, "count": 0},
+                    {"code": {"coding": [{"code": "denominator"}]}, "count": 0},
+                ]
+            }]
+        }
+        result = _extract_population_counts(report)
+        assert result["initial-population"] == 0
+        assert result["denominator"] == 0
+
+    def test_unknown_code_skipped(self):
+        report = {
+            "group": [{
+                "population": [
+                    {"code": {"coding": [{"code": "unknown-code"}]}, "count": 5},
+                    {"code": {"coding": [{"code": "numerator"}]}, "count": 1},
+                ]
+            }]
+        }
+        result = _extract_population_counts(report)
+        assert "unknown-code" not in result
+        assert result["numerator"] == 1
+
+    def test_multiple_groups_merged(self):
+        report = {
+            "group": [
+                {"population": [
+                    {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
+                ]},
+                {"population": [
+                    {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
+                ]},
+            ]
+        }
+        result = _extract_population_counts(report)
+        assert result["initial-population"] == 1
+        assert result["denominator"] == 1
+
+
+# ---------------------------------------------------------------------------
+# compare_populations
+# ---------------------------------------------------------------------------
+
+
+class TestComparePopulations:
+    def test_all_match(self):
+        expected = {"initial-population": 1, "denominator": 1, "numerator": 0}
+        actual = {"initial-population": 1, "denominator": 1, "numerator": 0}
+        passed, mismatches = compare_populations(expected, actual)
+        assert passed is True
+        assert mismatches == []
+
+    def test_single_mismatch(self):
+        expected = {"initial-population": 1, "denominator": 1, "numerator": 1}
+        actual = {"initial-population": 1, "denominator": 1, "numerator": 0}
+        passed, mismatches = compare_populations(expected, actual)
+        assert passed is False
+        assert mismatches == ["numerator"]
+
+    def test_multiple_mismatches(self):
+        expected = {"initial-population": 1, "denominator": 1, "numerator": 1}
+        actual = {"initial-population": 0, "denominator": 0, "numerator": 0}
+        passed, mismatches = compare_populations(expected, actual)
+        assert passed is False
+        assert len(mismatches) == 3
+
+    def test_absent_actual_treated_as_zero(self):
+        expected = {"initial-population": 1, "numerator": 0}
+        actual = {}
+        passed, mismatches = compare_populations(expected, actual)
+        assert passed is False
+        assert "initial-population" in mismatches
+        # numerator: expected 0, actual 0 (absent=0) → match
+        assert "numerator" not in mismatches
+
+    def test_extra_actual_codes_ignored(self):
+        expected = {"numerator": 1}
+        actual = {"numerator": 1, "denominator": 1, "initial-population": 1}
+        passed, mismatches = compare_populations(expected, actual)
+        assert passed is True
+
+    def test_empty_expected(self):
+        passed, mismatches = compare_populations({}, {"numerator": 1})
+        assert passed is True
+        assert mismatches == []
+
+
+# ---------------------------------------------------------------------------
+# _is_test_case_measure_report
+# ---------------------------------------------------------------------------
+
+
+class TestIsTestCase:
+    def test_valid_test_case(self):
+        resource = {
+            "resourceType": "MeasureReport",
+            "modifierExtension": [{
+                "url": "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase",
+                "valueBoolean": True,
+            }],
+        }
+        assert _is_test_case_measure_report(resource) is True
+
+    def test_not_test_case(self):
+        resource = {"resourceType": "MeasureReport"}
+        assert _is_test_case_measure_report(resource) is False
+
+    def test_false_value(self):
+        resource = {
+            "resourceType": "MeasureReport",
+            "modifierExtension": [{
+                "url": "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase",
+                "valueBoolean": False,
+            }],
+        }
+        assert _is_test_case_measure_report(resource) is False
+
+
+# ---------------------------------------------------------------------------
+# _extract_test_case_info
+# ---------------------------------------------------------------------------
+
+
+class TestExtractTestCaseInfo:
+    def test_extracts_all_fields(self, mock_test_bundle_with_expected):
+        # Get the MeasureReport entry
+        mr = None
+        for entry in mock_test_bundle_with_expected["entry"]:
+            if entry["resource"]["resourceType"] == "MeasureReport":
+                mr = entry["resource"]
+                break
+        assert mr is not None
+        info = _extract_test_case_info(mr)
+        assert info is not None
+        assert info["measure_url"] == "https://example.com/Measure/CMS124"
+        assert info["patient_ref"] == "test-patient-1"
+        assert info["test_description"] == "Female 24yo, cervical cytology 2yrs prior"
+        assert info["period_start"] == "2026-01-01"
+        assert info["period_end"] == "2026-12-31"
+        assert info["expected_populations"]["initial-population"] == 1
+        assert info["expected_populations"]["numerator"] == 1
+
+    def test_missing_measure_url(self):
+        mr = {"resourceType": "MeasureReport", "period": {"start": "2026-01-01", "end": "2026-12-31"}}
+        assert _extract_test_case_info(mr) is None
+
+    def test_missing_patient_ref(self):
+        mr = {
+            "resourceType": "MeasureReport",
+            "measure": "https://example.com/Measure/X",
+            "period": {"start": "2026-01-01", "end": "2026-12-31"},
+        }
+        assert _extract_test_case_info(mr) is None
+
+    def test_missing_period(self):
+        mr = {
+            "resourceType": "MeasureReport",
+            "measure": "https://example.com/Measure/X",
+            "contained": [{
+                "resourceType": "Parameters",
+                "parameter": [{"name": "subject", "valueString": "p1"}],
+            }],
+        }
+        assert _extract_test_case_info(mr) is None
+
+
+# ---------------------------------------------------------------------------
+# _classify_bundle_entries
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyBundleEntries:
+    def test_classifies_correctly(self, mock_test_bundle_with_expected):
+        measure_defs, clinical, test_cases = _classify_bundle_entries(
+            mock_test_bundle_with_expected
+        )
+        # Measure + Library = 2 measure defs
+        assert len(measure_defs) == 2
+        assert measure_defs[0]["resourceType"] == "Measure"
+        assert measure_defs[1]["resourceType"] == "Library"
+        # Patient + Observation = 2 clinical
+        assert len(clinical) == 2
+        # 1 test case MeasureReport
+        assert len(test_cases) == 1
+        assert test_cases[0]["patient_ref"] == "test-patient-1"
+
+    def test_empty_bundle(self):
+        measure_defs, clinical, test_cases = _classify_bundle_entries(
+            {"resourceType": "Bundle", "entry": []}
+        )
+        assert len(measure_defs) == 0
+        assert len(clinical) == 0
+        assert len(test_cases) == 0
+
+    def test_skips_entries_without_resource(self):
+        bundle = {
+            "resourceType": "Bundle",
+            "entry": [
+                {"request": {"method": "DELETE", "url": "Patient/1"}},
+                {"resource": {"resourceType": "Patient", "id": "p1"}},
+            ],
+        }
+        measure_defs, clinical, test_cases = _classify_bundle_entries(bundle)
+        assert len(clinical) == 1
+
+    def test_non_test_case_measure_report_skipped(self):
+        bundle = {
+            "resourceType": "Bundle",
+            "entry": [
+                {
+                    "resource": {
+                        "resourceType": "MeasureReport",
+                        "id": "regular-report",
+                        "status": "complete",
+                    }
+                }
+            ],
+        }
+        measure_defs, clinical, test_cases = _classify_bundle_entries(bundle)
+        assert len(measure_defs) == 0
+        assert len(clinical) == 0
+        assert len(test_cases) == 0

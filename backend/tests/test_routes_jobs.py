@@ -158,3 +158,60 @@ async def test_cancel_already_complete_job(client, test_session):
     assert resp.status_code == 409
     data = resp.json()["detail"]
     assert data["issue"][0]["code"] == "conflict"
+
+
+async def test_create_job_with_group_id(client):
+    """POST /jobs with group_id stores it on the job."""
+    payload = {
+        "measure_id": "measure-1",
+        "period_start": "2024-01-01",
+        "period_end": "2024-12-31",
+        "cdr_url": "http://example.com/fhir",
+        "group_id": "CMS349FHIRHIVScreening",
+    }
+    resp = await client.post("/jobs", json=payload)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["group_id"] == "CMS349FHIRHIVScreening"
+
+
+async def test_create_job_without_group_id(client):
+    """POST /jobs without group_id defaults to null."""
+    payload = {
+        "measure_id": "measure-1",
+        "period_start": "2024-01-01",
+        "period_end": "2024-12-31",
+        "cdr_url": "http://example.com/fhir",
+    }
+    resp = await client.post("/jobs", json=payload)
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["group_id"] is None
+
+
+async def test_get_groups_success(client):
+    """GET /jobs/groups returns list of groups from CDR."""
+    from unittest.mock import patch, AsyncMock
+
+    mock_groups = [
+        {"id": "CMS122FHIRDiabetes", "name": "CMS122 Diabetes", "type": "person", "member_count": 20},
+        {"id": "CMS349FHIRHIVScreening", "name": "CMS349 HIV Screening", "type": "person", "member_count": 36},
+    ]
+    with patch("app.routes.jobs.list_groups", new=AsyncMock(return_value=mock_groups)):
+        resp = await client.get("/jobs/groups")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "groups" in data
+    assert len(data["groups"]) == 2
+    assert data["groups"][0]["id"] == "CMS122FHIRDiabetes"
+
+
+async def test_get_groups_cdr_unreachable(client):
+    """GET /jobs/groups returns 502 when CDR is unreachable."""
+    import httpx
+    from unittest.mock import patch, AsyncMock
+
+    with patch("app.routes.jobs.list_groups", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
+        resp = await client.get("/jobs/groups")
+    assert resp.status_code == 502
+    assert "CDR" in resp.json()["detail"]

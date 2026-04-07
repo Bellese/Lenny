@@ -4,8 +4,9 @@ Handles all HTTP communication with HAPI FHIR servers (CDR and measure engine).
 """
 
 import abc
+import asyncio
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -15,7 +16,7 @@ from app.models.config import AuthType
 logger = logging.getLogger(__name__)
 
 
-def _build_auth_headers(auth_type: str, auth_credentials: dict | None) -> dict[str, str]:
+def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:
     """Build HTTP auth headers from CDR config."""
     if auth_type == AuthType.none or not auth_credentials:
         return {}
@@ -76,7 +77,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
     ) -> list[dict[str, Any]]:
         """Fetch all Patient resources from the CDR, following pagination."""
         patients: list[dict[str, Any]] = []
-        url: str | None = f"{cdr_url}/Patient?_count=100"
+        url: Optional[str] = f"{cdr_url}/Patient?_count=100"
         async with httpx.AsyncClient(timeout=60.0) as client:
             while url:
                 logger.info("Fetching patients", extra={"url": url})
@@ -104,7 +105,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
     ) -> list[dict[str, Any]]:
         """Fetch all resources for a patient using $everything."""
         resources: list[dict[str, Any]] = []
-        url: str | None = f"{cdr_url}/Patient/{patient_id}/$everything?_count=200"
+        url: Optional[str] = f"{cdr_url}/Patient/{patient_id}/$everything?_count=200"
         async with httpx.AsyncClient(timeout=120.0) as client:
             while url:
                 logger.info(
@@ -140,7 +141,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
 
 async def push_resources(
     resources: list[dict[str, Any]],
-    target_url: str | None = None,
+    target_url: Optional[str] = None,
 ) -> None:
     """POST a transaction Bundle of resources to the measure engine."""
     base = target_url or settings.MEASURE_ENGINE_URL
@@ -254,7 +255,7 @@ async def wipe_patient_data() -> None:
 
 async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str) -> None:
     """Delete all resources of a given type one by one."""
-    url: str | None = f"{settings.MEASURE_ENGINE_URL}/{resource_type}?_count=100"
+    url: Optional[str] = f"{settings.MEASURE_ENGINE_URL}/{resource_type}?_count=100"
     while url:
         resp = await client.get(url)
         if resp.status_code != 200:
@@ -289,6 +290,86 @@ async def resolve_evaluated_resource(reference: str) -> dict[str, Any]:
         return resp.json()
 
 
+async def list_groups(
+    cdr_url: str,
+    auth_headers: dict[str, str],
+) -> list[dict[str, Any]]:
+    """List all Group resources on the CDR."""
+    groups: list[dict[str, Any]] = []
+    url: Optional[str] = f"{cdr_url}/Group?_count=100"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while url:
+            resp = await client.get(url, headers=auth_headers)
+            resp.raise_for_status()
+            bundle = resp.json()
+            for entry in bundle.get("entry", []):
+                resource = entry.get("resource", {})
+                if resource.get("resourceType") == "Group":
+                    groups.append({
+                        "id": resource.get("id"),
+                        "name": resource.get("name"),
+                        "type": resource.get("type"),
+                        "member_count": len(resource.get("member", [])),
+                    })
+            url = None
+            for link in bundle.get("link", []):
+                if link.get("relation") == "next":
+                    url = link.get("url")
+                    break
+    return groups
+
+
+async def get_group_members(
+    cdr_url: str,
+    group_id: str,
+    auth_headers: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Fetch Patient resources for all members of a Group (concurrent)."""
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        # Fetch the Group resource
+        resp = await client.get(
+            f"{cdr_url}/Group/{group_id}", headers=auth_headers
+        )
+        resp.raise_for_status()
+        group = resp.json()
+
+        # Extract Patient IDs from members
+        patient_ids: list[tuple[str, str]] = []  # (patient_id, original_ref)
+        for member in group.get("member", []):
+            ref = member.get("entity", {}).get("reference", "")
+            if ref.startswith("Patient/"):
+                patient_id = ref.split("/", 1)[1]
+                patient_ids.append((patient_id, ref))
+
+        # Fetch all patients concurrently with a semaphore to avoid overwhelming the CDR
+        semaphore = asyncio.Semaphore(10)
+
+        async def fetch_patient(patient_id: str, ref: str) -> Optional[dict[str, Any]]:
+            async with semaphore:
+                patient_resp = await client.get(
+                    f"{cdr_url}/Patient/{patient_id}", headers=auth_headers
+                )
+                if patient_resp.status_code == 200:
+                    return patient_resp.json()
+                logger.warning(
+                    "Could not fetch group member",
+                    extra={"group_id": group_id, "patient_ref": ref},
+                )
+                return None
+
+        results = await asyncio.gather(
+            *[fetch_patient(pid, ref) for pid, ref in patient_ids],
+            return_exceptions=True,
+        )
+        patients = [r for r in results if isinstance(r, dict)]
+
+    logger.info(
+        "Gathered group members",
+        extra={"group_id": group_id, "count": len(patients)},
+    )
+    return patients
+
+
 async def list_measures() -> dict[str, Any]:
     """List all Measure resources on the measure engine."""
     url = f"{settings.MEASURE_ENGINE_URL}/Measure?_count=100"
@@ -298,10 +379,10 @@ async def list_measures() -> dict[str, Any]:
         return resp.json()
 
 
-async def test_connection(
+async def verify_fhir_connection(
     fhir_url: str,
     auth_type: str = "none",
-    auth_credentials: dict | None = None,
+    auth_credentials: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Test connectivity to a FHIR server by fetching its metadata."""
     headers = _build_auth_headers(auth_type, auth_credentials)

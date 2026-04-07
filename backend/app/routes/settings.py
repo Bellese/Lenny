@@ -1,3 +1,4 @@
+from typing import Optional
 """CDR settings management endpoints."""
 
 import logging
@@ -10,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_session
 from app.models.config import AuthType, CDRConfig
-from app.services.fhir_client import test_connection
+from app.services.fhir_client import verify_fhir_connection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 
 class CDRSettingsResponse(BaseModel):
-    id: int | None = None
+    id: Optional[int] = None
     cdr_url: str
     auth_type: str
     is_active: bool
@@ -33,13 +34,13 @@ class CDRSettingsResponse(BaseModel):
 class CDRSettingsUpdate(BaseModel):
     cdr_url: str
     auth_type: str = "none"
-    auth_credentials: dict | None = None
+    auth_credentials: Optional[dict] = None
 
 
 class TestConnectionRequest(BaseModel):
     cdr_url: str
     auth_type: str = "none"
-    auth_credentials: dict | None = None
+    auth_credentials: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +139,7 @@ async def update_settings(
 async def test_cdr_connection(body: TestConnectionRequest) -> dict:
     """Test connectivity to a FHIR server."""
     try:
-        result = await test_connection(
+        result = await verify_fhir_connection(
             fhir_url=body.cdr_url,
             auth_type=body.auth_type,
             auth_credentials=body.auth_credentials,
