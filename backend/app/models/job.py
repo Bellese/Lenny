@@ -2,6 +2,7 @@
 
 import enum
 from datetime import datetime
+from typing import List, Optional
 
 from sqlalchemy import (
     JSON,
@@ -39,11 +40,11 @@ class Job(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     measure_id: Mapped[str] = mapped_column(String(512), nullable=False)
-    measure_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    measure_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     period_start: Mapped[str] = mapped_column(String(10), nullable=False)
     period_end: Mapped[str] = mapped_column(String(10), nullable=False)
     cdr_url: Mapped[str] = mapped_column(String(1024), nullable=False)
-    group_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    group_id: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     status: Mapped[JobStatus] = mapped_column(
         Enum(JobStatus), nullable=False, default=JobStatus.queued, index=True
     )
@@ -53,10 +54,10 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    completed_at: Mapped[datetime | None] = mapped_column(
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     batches: Mapped[list["Batch"]] = relationship(
         "Batch", back_populates="job", cascade="all, delete-orphan", lazy="selectin"
@@ -74,16 +75,16 @@ class Batch(Base):
         Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
     )
     batch_number: Mapped[int] = mapped_column(Integer, nullable=False)
-    patient_ids: Mapped[dict | list] = mapped_column(JSON, nullable=False)
+    patient_ids: Mapped[List] = mapped_column(JSON, nullable=False)
     status: Mapped[BatchStatus] = mapped_column(
         Enum(BatchStatus), nullable=False, default=BatchStatus.pending
     )
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    completed_at: Mapped[datetime | None] = mapped_column(
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
@@ -98,7 +99,7 @@ class MeasureResult(Base):
         Integer, ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True
     )
     patient_id: Mapped[str] = mapped_column(String(256), nullable=False)
-    patient_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    patient_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     measure_report: Mapped[dict] = mapped_column(JSON, nullable=False)
     populations: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(

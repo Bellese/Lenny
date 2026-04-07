@@ -2,6 +2,7 @@
 
 import enum
 from datetime import datetime
+from typing import List, Optional
 
 from sqlalchemy import (
     JSON,
@@ -38,11 +39,11 @@ class BundleUpload(Base):
     measures_loaded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     patients_loaded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expected_results_loaded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    completed_at: Mapped[datetime | None] = mapped_column(
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
@@ -56,7 +57,7 @@ class ExpectedResult(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     measure_url: Mapped[str] = mapped_column(String(1024), nullable=False, index=True)
     patient_ref: Mapped[str] = mapped_column(String(256), nullable=False)
-    test_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    test_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     expected_populations: Mapped[dict] = mapped_column(JSON, nullable=False)
     period_start: Mapped[str] = mapped_column(String(10), nullable=False)
     period_end: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -73,16 +74,16 @@ class ValidationRun(Base):
     status: Mapped[ValidationStatus] = mapped_column(
         Enum(ValidationStatus), nullable=False, default=ValidationStatus.queued, index=True
     )
-    measure_urls: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    measure_urls: Mapped[Optional[List]] = mapped_column(JSON, nullable=True)
     measures_tested: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     patients_tested: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     patients_passed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     patients_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    completed_at: Mapped[datetime | None] = mapped_column(
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
@@ -102,12 +103,12 @@ class ValidationResult(Base):
     )
     measure_url: Mapped[str] = mapped_column(String(1024), nullable=False)
     patient_ref: Mapped[str] = mapped_column(String(256), nullable=False)
-    patient_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    patient_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     expected_populations: Mapped[dict] = mapped_column(JSON, nullable=False)
-    actual_populations: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    actual_populations: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(10), nullable=False)  # "pass", "fail", "error"
-    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    mismatches: Mapped[dict | list | None] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mismatches: Mapped[Optional[List]] = mapped_column(JSON, nullable=True)
 
     validation_run: Mapped["ValidationRun"] = relationship(
         "ValidationRun", back_populates="results"
