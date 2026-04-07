@@ -4,6 +4,7 @@ Handles all HTTP communication with HAPI FHIR servers (CDR and measure engine).
 """
 
 import abc
+import asyncio
 import logging
 from typing import Any, Optional
 
