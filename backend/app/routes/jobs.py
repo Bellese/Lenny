@@ -132,7 +132,7 @@ async def get_groups(
         logger.exception("Failed to fetch groups from CDR")
         raise HTTPException(
             status_code=502,
-            detail=f"Cannot reach CDR to list groups: {exc}",
+            detail="Cannot reach CDR to list groups. Check CDR connectivity in Settings.",
         )
 
 

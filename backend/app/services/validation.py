@@ -7,6 +7,7 @@ running validation against expected results, and comparing population counts.
 import asyncio
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -38,6 +39,21 @@ logger = logging.getLogger(__name__)
 
 # Resource types that belong on the measure engine (measure definitions)
 _MEASURE_DEF_TYPES = {"Measure", "Library", "ValueSet", "CodeSystem"}
+
+_URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+_AUTH_RE = re.compile(r"(Authorization|Bearer|Basic|password|token|secret)[=:\s]\S+", re.IGNORECASE)
+
+
+def _sanitize_error(exc: Exception) -> str:
+    """Return a sanitized exception message safe to store and return to clients.
+
+    Strips embedded URLs, auth headers, and credentials. Full details are
+    logged server-side before this function is called.
+    """
+    msg = str(exc)[:2000]
+    msg = _URL_RE.sub("[url]", msg)
+    msg = _AUTH_RE.sub(r"\1=[redacted]", msg)
+    return msg
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +339,7 @@ async def process_bundle_upload(upload_id: int) -> None:
             upload = await session.get(BundleUpload, upload_id)
             if upload:
                 upload.status = ValidationStatus.failed
-                upload.error_message = str(exc)[:2000]
+                upload.error_message = _sanitize_error(exc)
                 upload.completed_at = datetime.now(timezone.utc)
                 await session.commit()
 
@@ -495,7 +511,7 @@ async def run_validation(validation_run_id: int) -> None:
                     expected_populations=er.expected_populations,
                     actual_populations=None,
                     status="error",
-                    error_message=str(exc)[:2000],
+                    error_message=_sanitize_error(exc),
                     mismatches=[],
                 )
 
@@ -546,6 +562,6 @@ async def run_validation(validation_run_id: int) -> None:
             run = await session.get(ValidationRun, validation_run_id)
             if run:
                 run.status = ValidationStatus.failed
-                run.error_message = str(exc)[:2000]
+                run.error_message = _sanitize_error(exc)
                 run.completed_at = datetime.now(timezone.utc)
                 await session.commit()

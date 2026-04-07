@@ -8,6 +8,7 @@ import time
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from pydantic import BaseModel
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +25,11 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/validation", tags=["validation"])
 
 MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
+
+
+class ValidationRunCreate(BaseModel):
+    """Optional filter for starting a validation run."""
+    measure_urls: Optional[list[str]] = None
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "uploads")
 
 
@@ -58,9 +64,15 @@ async def upload_bundle(
     # Save file to disk (off the event loop to avoid blocking on large uploads)
     await asyncio.to_thread(os.makedirs, UPLOAD_DIR, exist_ok=True)
     timestamp = int(time.time())
-    safe_filename = f"{timestamp}-{file.filename}"
+    # Sanitize filename to prevent path traversal (e.g. ../../etc/cron.d/evil.json)
+    safe_filename = f"{timestamp}-{os.path.basename(file.filename)}"
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
-    await asyncio.to_thread(lambda: open(file_path, "wb").write(content))
+
+    def _write_file() -> None:
+        with open(file_path, "wb") as f:
+            f.write(content)
+
+    await asyncio.to_thread(_write_file)
 
     # Create queued upload record
     upload = BundleUpload(
@@ -128,7 +140,7 @@ async def list_expected_results(session: AsyncSession = Depends(get_session)) ->
 
 @router.post("/run")
 async def start_validation_run(
-    body: Optional[dict] = None,
+    body: Optional[ValidationRunCreate] = None,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Start a new validation run.
@@ -137,8 +149,8 @@ async def start_validation_run(
     """
     # Check that expected results exist
     query = select(func.count(ExpectedResult.id))
-    if body and body.get("measure_urls"):
-        query = query.where(ExpectedResult.measure_url.in_(body["measure_urls"]))
+    if body and body.measure_urls:
+        query = query.where(ExpectedResult.measure_url.in_(body.measure_urls))
     result = await session.execute(query)
     count = result.scalar()
     if not count:
@@ -149,7 +161,7 @@ async def start_validation_run(
 
     run = ValidationRun(
         status=ValidationStatus.queued,
-        measure_urls=body.get("measure_urls") if body else None,
+        measure_urls=body.measure_urls if body else None,
     )
     session.add(run)
     await session.commit()
