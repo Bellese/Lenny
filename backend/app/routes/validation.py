@@ -1,10 +1,11 @@
-from typing import Optional
 """Validation endpoints — upload test bundles, run validation, view results."""
 
+import asyncio
 import json
 import logging
 import os
 import time
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlalchemy import case, func, select
@@ -54,13 +55,12 @@ async def upload_bundle(
             status_code=400, detail="JSON is not a FHIR Bundle (missing resourceType: Bundle)"
         )
 
-    # Save file to disk
-    os.makedirs(UPLOAD_DIR, exist_ok=True)
+    # Save file to disk (off the event loop to avoid blocking on large uploads)
+    await asyncio.to_thread(os.makedirs, UPLOAD_DIR, exist_ok=True)
     timestamp = int(time.time())
     safe_filename = f"{timestamp}-{file.filename}"
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
-    with open(file_path, "wb") as f:
-        f.write(content)
+    await asyncio.to_thread(lambda: open(file_path, "wb").write(content))
 
     # Create queued upload record
     upload = BundleUpload(

@@ -327,7 +327,7 @@ export default function JobsPage() {
                 </select>
               </div>
               <div className={styles.formGroup}>
-                <label htmlFor="group-select" className={styles.label}>Patient Group <span style={{fontWeight: 'normal', color: 'var(--color-text-secondary)'}}>(optional)</span></label>
+                <label htmlFor="group-select" className={styles.label}>Patient Group <span className={styles.labelHint}>(optional)</span></label>
                 <select
                   id="group-select"
                   value={formData.group_id}

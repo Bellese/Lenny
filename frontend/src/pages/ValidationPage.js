@@ -198,8 +198,8 @@ export default function ValidationPage() {
               </tr>
             </thead>
             <tbody>
-              {expected.measures.map((m, i) => (
-                <tr key={i}>
+              {expected.measures.map((m) => (
+                <tr key={m.measure_url}>
                   <td className={styles.measureUrl}>{m.measure_url}</td>
                   <td>{m.patient_count}</td>
                   <td>{m.period_start} to {m.period_end}</td>

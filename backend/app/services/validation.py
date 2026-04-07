@@ -13,6 +13,7 @@ from typing import Any, Optional
 
 import httpx
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -225,32 +226,27 @@ async def triage_test_bundle(
     if measure_defs:
         await push_resources(measure_defs)
 
-    # Upsert expected results
+    # Upsert expected results atomically (avoids TOCTOU on concurrent uploads)
     for tc in test_cases:
-        # Check for existing record
-        result = await session.execute(
-            select(ExpectedResult).where(
-                ExpectedResult.measure_url == tc["measure_url"],
-                ExpectedResult.patient_ref == tc["patient_ref"],
-            )
+        stmt = pg_insert(ExpectedResult).values(
+            measure_url=tc["measure_url"],
+            patient_ref=tc["patient_ref"],
+            test_description=tc["test_description"],
+            expected_populations=tc["expected_populations"],
+            period_start=tc["period_start"],
+            period_end=tc["period_end"],
+            source_bundle=filename,
+        ).on_conflict_do_update(
+            constraint="uq_measure_patient",
+            set_={
+                "test_description": tc["test_description"],
+                "expected_populations": tc["expected_populations"],
+                "period_start": tc["period_start"],
+                "period_end": tc["period_end"],
+                "source_bundle": filename,
+            },
         )
-        existing = result.scalar_one_or_none()
-        if existing:
-            existing.test_description = tc["test_description"]
-            existing.expected_populations = tc["expected_populations"]
-            existing.period_start = tc["period_start"]
-            existing.period_end = tc["period_end"]
-            existing.source_bundle = filename
-        else:
-            session.add(ExpectedResult(
-                measure_url=tc["measure_url"],
-                patient_ref=tc["patient_ref"],
-                test_description=tc["test_description"],
-                expected_populations=tc["expected_populations"],
-                period_start=tc["period_start"],
-                period_end=tc["period_end"],
-                source_bundle=filename,
-            ))
+        await session.execute(stmt)
     await session.commit()
 
     # Push clinical data to CDR — only if using the default bundled CDR
@@ -442,16 +438,16 @@ async def run_validation(validation_run_id: int) -> None:
                 extra={"failed": failed_gathers, "total": len(all_patient_refs), "run_id": validation_run_id},
             )
 
-        # Wait for HAPI indexing
-        await asyncio.sleep(5)
+        # Wait for HAPI indexing (configurable via HAPI_INDEX_WAIT_SECONDS env var)
+        await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
 
-        # Phase 2: Evaluate and compare
+        # Phase 2: Evaluate and compare (shared client avoids N connection pools)
         total_passed = 0
         total_failed = 0
         total_errors = 0
         all_results: list[ValidationResult] = []
 
-        async def evaluate_and_compare(er: ExpectedResult) -> ValidationResult:
+        async def evaluate_and_compare(er: ExpectedResult, http_client: httpx.AsyncClient) -> ValidationResult:
             info = measure_info[er.measure_url]
             try:
                 report = await evaluate_measure(
@@ -468,12 +464,11 @@ async def run_validation(validation_run_id: int) -> None:
                     ref_str = eval_ref.get("reference", "")
                     if ref_str.startswith("Patient/"):
                         try:
-                            async with httpx.AsyncClient(timeout=10.0) as client:
-                                resp = await client.get(
-                                    f"{settings.MEASURE_ENGINE_URL}/{ref_str}"
-                                )
-                                if resp.status_code == 200:
-                                    patient_name = _extract_patient_name(resp.json())
+                            resp = await http_client.get(
+                                f"{settings.MEASURE_ENGINE_URL}/{ref_str}"
+                            )
+                            if resp.status_code == 200:
+                                patient_name = _extract_patient_name(resp.json())
                         except Exception:
                             pass
                         break
@@ -504,12 +499,13 @@ async def run_validation(validation_run_id: int) -> None:
                     mismatches=[],
                 )
 
-        async def eval_with_semaphore(er: ExpectedResult) -> ValidationResult:
-            async with semaphore:
-                return await evaluate_and_compare(er)
+        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            async def eval_with_semaphore(er: ExpectedResult) -> ValidationResult:
+                async with semaphore:
+                    return await evaluate_and_compare(er, http_client)
 
-        result_coros = [eval_with_semaphore(er) for er in expected_results]
-        all_results = await asyncio.gather(*result_coros)
+            result_coros = [eval_with_semaphore(er) for er in expected_results]
+            all_results = list(await asyncio.gather(*result_coros))
 
         for vr in all_results:
             if vr.status == "pass":
