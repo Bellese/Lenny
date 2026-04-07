@@ -32,9 +32,24 @@ MCT2 runs 5 Docker containers:
 ## Usage
 
 1. **Measures** — View loaded measures or upload new FHIR Measure bundles
-2. **Jobs** — Create a calculation job: select a measure, set the measurement period, click Calculate
+2. **Jobs** — Create a calculation job: select a measure, set the measurement period, optionally filter by FHIR Group, click Calculate
 3. **Results** — Inspect aggregate population summaries and drill into individual patient results
-4. **Settings** — Configure your organization's clinical data repository (CDR) connection
+4. **Validation** — Upload a FHIR test bundle with expected population results; MCT2 runs the measure and compares actual vs. expected populations, reporting pass/fail per patient
+5. **Settings** — Configure your organization's clinical data repository (CDR) connection
+
+## Validation Pipeline
+
+MCT2 includes a validation workflow for verifying measure logic against known test cases:
+
+1. Upload a FHIR Bundle containing test patients and a `Parameters` resource that declares expected population membership (`initialPopulation`, `denominator`, `numerator`, etc.)
+2. MCT2 runs `$evaluate-measure` against the test patients and compares results to the expected values
+3. Results are displayed per patient with pass/fail status and any discrepancies highlighted
+
+This is useful for measure developers and quality teams who need to confirm that a newly loaded measure produces correct output before running it against production data.
+
+## FHIR Group-Based Patient Filtering
+
+When creating a calculation job, you can optionally select a FHIR Group resource from the connected CDR. When a Group is selected, MCT2 fetches only the patients in that Group rather than all patients in the CDR. Use this to scope calculations to a specific panel, care team, or cohort.
 
 ## Connecting Your CDR
 
