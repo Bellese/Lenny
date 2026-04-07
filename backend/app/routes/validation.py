@@ -1,3 +1,4 @@
+from typing import Optional
 """Validation endpoints — upload test bundles, run validation, view results."""
 
 import json
@@ -127,7 +128,7 @@ async def list_expected_results(session: AsyncSession = Depends(get_session)) ->
 
 @router.post("/run")
 async def start_validation_run(
-    body: dict | None = None,
+    body: Optional[dict] = None,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Start a new validation run.

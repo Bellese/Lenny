@@ -1,3 +1,4 @@
+from typing import Optional
 """Async background worker that polls PostgreSQL for queued jobs and validation tasks.
 
 Runs as a background task within the FastAPI lifespan — no Celery needed.
@@ -33,7 +34,7 @@ async def worker_loop() -> None:
         found_work = False
         try:
             # --- Priority 1: Production Jobs ---
-            job_id: int | None = None
+            job_id: Optional[int] = None
             async with async_session() as session:
                 result = await session.execute(
                     select(Job.id)
@@ -68,7 +69,7 @@ async def worker_loop() -> None:
 
             # --- Priority 2: Bundle Uploads ---
             if not found_work:
-                upload_id: int | None = None
+                upload_id: Optional[int] = None
                 async with async_session() as session:
                     result = await session.execute(
                         select(BundleUpload.id)
@@ -106,7 +107,7 @@ async def worker_loop() -> None:
 
             # --- Priority 3: Validation Runs ---
             if not found_work:
-                run_id: int | None = None
+                run_id: Optional[int] = None
                 async with async_session() as session:
                     result = await session.execute(
                         select(ValidationRun.id)

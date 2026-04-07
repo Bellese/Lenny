@@ -1,3 +1,4 @@
+from typing import Optional
 """Job management endpoints."""
 
 import logging
@@ -25,28 +26,28 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 class JobCreate(BaseModel):
     measure_id: str
-    measure_name: str | None = None
+    measure_name: Optional[str] = None
     period_start: str
     period_end: str
-    cdr_url: str | None = None  # if omitted, use active CDR config or default
-    group_id: str | None = None  # if set, only evaluate patients in this FHIR Group
+    cdr_url: Optional[str] = None  # if omitted, use active CDR config or default
+    group_id: Optional[str] = None  # if set, only evaluate patients in this FHIR Group
 
 
 class JobResponse(BaseModel):
     id: int
     measure_id: str
-    measure_name: str | None
+    measure_name: Optional[str]
     period_start: str
     period_end: str
     cdr_url: str
-    group_id: str | None
+    group_id: Optional[str]
     status: str
     total_patients: int
     processed_patients: int
     failed_patients: int
     created_at: str
-    completed_at: str | None
-    error_message: str | None
+    completed_at: Optional[str]
+    error_message: Optional[str]
 
     model_config = {"from_attributes": True}
 
@@ -57,9 +58,9 @@ class BatchResponse(BaseModel):
     patient_ids: list[str]
     status: str
     retry_count: int
-    error_message: str | None
+    error_message: Optional[str]
     created_at: str
-    completed_at: str | None
+    completed_at: Optional[str]
 
     model_config = {"from_attributes": True}
 

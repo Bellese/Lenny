@@ -1,3 +1,4 @@
+from typing import Optional
 """CDR settings management endpoints."""
 
 import logging
@@ -22,7 +23,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 
 class CDRSettingsResponse(BaseModel):
-    id: int | None = None
+    id: Optional[int] = None
     cdr_url: str
     auth_type: str
     is_active: bool
@@ -33,13 +34,13 @@ class CDRSettingsResponse(BaseModel):
 class CDRSettingsUpdate(BaseModel):
     cdr_url: str
     auth_type: str = "none"
-    auth_credentials: dict | None = None
+    auth_credentials: Optional[dict] = None
 
 
 class TestConnectionRequest(BaseModel):
     cdr_url: str
     auth_type: str = "none"
-    auth_credentials: dict | None = None
+    auth_credentials: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------

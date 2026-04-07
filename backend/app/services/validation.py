@@ -9,7 +9,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 from sqlalchemy import select
@@ -66,7 +66,7 @@ def _extract_population_counts(measure_report: dict[str, Any]) -> dict[str, int]
     return populations
 
 
-def _extract_patient_name(patient_resource: dict[str, Any]) -> str | None:
+def _extract_patient_name(patient_resource: dict[str, Any]) -> Optional[str]:
     """Extract a display name from a Patient FHIR resource."""
     for name_obj in patient_resource.get("name", []):
         parts = []
@@ -116,7 +116,7 @@ def _is_test_case_measure_report(resource: dict[str, Any]) -> bool:
 
 def _extract_test_case_info(
     measure_report: dict[str, Any],
-) -> dict[str, Any] | None:
+) -> Optional[dict[str, Any]]:
     """Extract expected result info from a test case MeasureReport.
 
     Returns dict with measure_url, patient_ref, test_description,
@@ -337,7 +337,7 @@ async def process_bundle_upload(upload_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_measure_id(measure_url: str) -> str | None:
+async def _resolve_measure_id(measure_url: str) -> Optional[str]:
     """Resolve a canonical measure URL to a HAPI FHIR resource ID."""
     url = f"{settings.MEASURE_ENGINE_URL}/Measure?url={measure_url}&_count=1"
     async with httpx.AsyncClient(timeout=30.0) as client:

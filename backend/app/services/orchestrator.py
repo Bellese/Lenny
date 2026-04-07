@@ -7,7 +7,7 @@ evaluates the measure, and stores results.
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -55,7 +55,7 @@ def _extract_populations(measure_report: dict[str, Any]) -> dict[str, bool]:
     return populations
 
 
-def _extract_patient_name(patient_resource: dict[str, Any]) -> str | None:
+def _extract_patient_name(patient_resource: dict[str, Any]) -> Optional[str]:
     """Extract a display name from a Patient FHIR resource."""
     for name_obj in patient_resource.get("name", []):
         parts = []

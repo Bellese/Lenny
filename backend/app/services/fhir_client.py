@@ -5,7 +5,7 @@ Handles all HTTP communication with HAPI FHIR servers (CDR and measure engine).
 
 import abc
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import httpx
 
@@ -15,7 +15,7 @@ from app.models.config import AuthType
 logger = logging.getLogger(__name__)
 
 
-def _build_auth_headers(auth_type: str, auth_credentials: dict | None) -> dict[str, str]:
+def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:
     """Build HTTP auth headers from CDR config."""
     if auth_type == AuthType.none or not auth_credentials:
         return {}
@@ -76,7 +76,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
     ) -> list[dict[str, Any]]:
         """Fetch all Patient resources from the CDR, following pagination."""
         patients: list[dict[str, Any]] = []
-        url: str | None = f"{cdr_url}/Patient?_count=100"
+        url: Optional[str] = f"{cdr_url}/Patient?_count=100"
         async with httpx.AsyncClient(timeout=60.0) as client:
             while url:
                 logger.info("Fetching patients", extra={"url": url})
@@ -104,7 +104,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
     ) -> list[dict[str, Any]]:
         """Fetch all resources for a patient using $everything."""
         resources: list[dict[str, Any]] = []
-        url: str | None = f"{cdr_url}/Patient/{patient_id}/$everything?_count=200"
+        url: Optional[str] = f"{cdr_url}/Patient/{patient_id}/$everything?_count=200"
         async with httpx.AsyncClient(timeout=120.0) as client:
             while url:
                 logger.info(
@@ -140,7 +140,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
 
 async def push_resources(
     resources: list[dict[str, Any]],
-    target_url: str | None = None,
+    target_url: Optional[str] = None,
 ) -> None:
     """POST a transaction Bundle of resources to the measure engine."""
     base = target_url or settings.MEASURE_ENGINE_URL
@@ -254,7 +254,7 @@ async def wipe_patient_data() -> None:
 
 async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str) -> None:
     """Delete all resources of a given type one by one."""
-    url: str | None = f"{settings.MEASURE_ENGINE_URL}/{resource_type}?_count=100"
+    url: Optional[str] = f"{settings.MEASURE_ENGINE_URL}/{resource_type}?_count=100"
     while url:
         resp = await client.get(url)
         if resp.status_code != 200:
@@ -295,7 +295,7 @@ async def list_groups(
 ) -> list[dict[str, Any]]:
     """List all Group resources on the CDR."""
     groups: list[dict[str, Any]] = []
-    url: str | None = f"{cdr_url}/Group?_count=100"
+    url: Optional[str] = f"{cdr_url}/Group?_count=100"
     async with httpx.AsyncClient(timeout=30.0) as client:
         while url:
             resp = await client.get(url, headers=auth_headers)
@@ -343,7 +343,7 @@ async def get_group_members(
         # Fetch all patients concurrently with a semaphore to avoid overwhelming the CDR
         semaphore = asyncio.Semaphore(10)
 
-        async def fetch_patient(patient_id: str, ref: str) -> dict[str, Any] | None:
+        async def fetch_patient(patient_id: str, ref: str) -> Optional[dict[str, Any]]:
             async with semaphore:
                 patient_resp = await client.get(
                     f"{cdr_url}/Patient/{patient_id}", headers=auth_headers
@@ -381,7 +381,7 @@ async def list_measures() -> dict[str, Any]:
 async def test_connection(
     fhir_url: str,
     auth_type: str = "none",
-    auth_credentials: dict | None = None,
+    auth_credentials: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Test connectivity to a FHIR server by fetching its metadata."""
     headers = _build_auth_headers(auth_type, auth_credentials)
