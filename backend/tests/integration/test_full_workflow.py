@@ -24,7 +24,7 @@ pytestmark = pytest.mark.integration
 async def _create_job(db_session, **overrides) -> Job:
     """Insert a Job row and return it."""
     defaults = {
-        "measure_id": "cms122-diabetes-hba1c",
+        "measure_id": "CMS122FHIRDiabetesAssessGT9Pct",
         "measure_name": "CMS122 Diabetes HbA1c Poor Control",
         "period_start": "2025-01-01",
         "period_end": "2025-12-31",
@@ -44,13 +44,13 @@ async def _create_job(db_session, **overrides) -> Job:
 # ---------------------------------------------------------------------------
 
 
-async def test_create_and_run_job(integration_client, db_session):
+async def test_create_and_run_job(integration_client, db_session, integration_session_factory):
     """POST /jobs to create a job, run it, and verify results are stored."""
     # Create via API
     resp = await integration_client.post(
         "/jobs",
         json={
-            "measure_id": "cms122-diabetes-hba1c",
+            "measure_id": "CMS122FHIRDiabetesAssessGT9Pct",
             "measure_name": "CMS122 Diabetes HbA1c Poor Control",
             "period_start": "2025-01-01",
             "period_end": "2025-12-31",
@@ -63,6 +63,7 @@ async def test_create_and_run_job(integration_client, db_session):
     assert job_data["status"] == "queued"
 
     # Run the job directly (the orchestrator normally runs in background)
+    # Patch async_session in orchestrator to use test DB instead of production DB
     with (
         patch("app.config.settings.MEASURE_ENGINE_URL", TEST_MEASURE_URL),
         patch("app.config.settings.DEFAULT_CDR_URL", TEST_CDR_URL),
@@ -72,6 +73,7 @@ async def test_create_and_run_job(integration_client, db_session):
         patch("app.services.fhir_client.settings.DEFAULT_CDR_URL", TEST_CDR_URL),
         patch("app.services.orchestrator.settings.MAX_RETRIES", 1),
         patch("app.services.orchestrator.settings.BATCH_SIZE", 100),
+        patch("app.services.orchestrator.async_session", integration_session_factory),
     ):
         await run_job(job_id)
 
@@ -97,7 +99,7 @@ async def test_create_and_run_job(integration_client, db_session):
 # ---------------------------------------------------------------------------
 
 
-async def test_results_aggregate_populations(integration_client, db_session):
+async def test_results_aggregate_populations(integration_client, db_session, integration_session_factory):
     """After a completed job, verify the aggregate endpoint returns population counts.
 
     Note: exact counts depend on whether CQL evaluation succeeds. If the
@@ -109,7 +111,7 @@ async def test_results_aggregate_populations(integration_client, db_session):
     resp = await integration_client.post(
         "/jobs",
         json={
-            "measure_id": "cms122-diabetes-hba1c",
+            "measure_id": "CMS122FHIRDiabetesAssessGT9Pct",
             "period_start": "2025-01-01",
             "period_end": "2025-12-31",
             "cdr_url": TEST_CDR_URL,
@@ -127,6 +129,7 @@ async def test_results_aggregate_populations(integration_client, db_session):
         patch("app.services.fhir_client.settings.DEFAULT_CDR_URL", TEST_CDR_URL),
         patch("app.services.orchestrator.settings.MAX_RETRIES", 1),
         patch("app.services.orchestrator.settings.BATCH_SIZE", 100),
+        patch("app.services.orchestrator.async_session", integration_session_factory),
     ):
         await run_job(job_id)
 
@@ -189,7 +192,7 @@ async def test_patient_drill_down(integration_client, db_session):
 
     # Create a job to hang the result on
     job = Job(
-        measure_id="cms122-diabetes-hba1c",
+        measure_id="CMS122FHIRDiabetesAssessGT9Pct",
         period_start="2025-01-01",
         period_end="2025-12-31",
         cdr_url=TEST_CDR_URL,
@@ -224,7 +227,7 @@ async def test_partial_failure_handling(integration_client, db_session):
     """If a batch is marked as failed, the results endpoint still returns partial data."""
     # Create a completed job with one result
     job = Job(
-        measure_id="cms122-diabetes-hba1c",
+        measure_id="CMS122FHIRDiabetesAssessGT9Pct",
         period_start="2025-01-01",
         period_end="2025-12-31",
         cdr_url=TEST_CDR_URL,

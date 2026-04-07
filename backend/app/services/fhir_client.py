@@ -378,7 +378,7 @@ async def list_measures() -> dict[str, Any]:
         return resp.json()
 
 
-async def test_connection(
+async def verify_fhir_connection(
     fhir_url: str,
     auth_type: str = "none",
     auth_credentials: Optional[dict] = None,

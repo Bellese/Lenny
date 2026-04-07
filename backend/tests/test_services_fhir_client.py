@@ -12,7 +12,7 @@ from app.services.fhir_client import (
     list_measures,
     push_resources,
     resolve_evaluated_resource,
-    test_connection as fhir_test_connection,
+    verify_fhir_connection as fhir_test_connection,
     upload_measure_bundle,
     wipe_patient_data,
 )

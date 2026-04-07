@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_session
 from app.models.config import AuthType, CDRConfig
-from app.services.fhir_client import test_connection
+from app.services.fhir_client import verify_fhir_connection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -139,7 +139,7 @@ async def update_settings(
 async def test_cdr_connection(body: TestConnectionRequest) -> dict:
     """Test connectivity to a FHIR server."""
     try:
-        result = await test_connection(
+        result = await verify_fhir_connection(
             fhir_url=body.cdr_url,
             auth_type=body.auth_type,
             auth_credentials=body.auth_credentials,
