@@ -1,0 +1,5 @@
+The open source tooling delivered as part of Project Launch Pad can be valuable to Bellese for several reasons, some of which have potential to generate revenue.  Here are a few that are evident as we get started:
+
+* It is reasonable to expect we could offer paid engagement for consulting, integration and customization services directly related to the use of the Project Launch Pad dQM utility in each customers.    
+* Assuming that we finalize a partnership with NCQA to maintain the Digital Content Services (DCS) tool, the development of an open source dQM utility will result in Bellese maintaining the leading public and private dQM on ramps.  Both tools would positioned to service the needs of organizations starting their dqM modernization journey and, as a result, Bellese would become a guide/supporter for these companies.    
+* PLPaaS \- We could host the project launch pad tool to reduce barrier to use to nearly zero, maybe adopt a freemium model where certain features/services would cost extra, but base functionality (maybe that of the open source tool) would remain free.
