@@ -96,7 +96,7 @@ async def test_test_connection_success(client):
         "software": "HAPI FHIR",
     }
     with patch(
-        "app.routes.settings.test_connection",
+        "app.routes.settings.verify_fhir_connection",
         new_callable=AsyncMock,
         return_value=mock_result,
     ):
@@ -114,7 +114,7 @@ async def test_test_connection_success(client):
 async def test_test_connection_failure(client):
     """POST /settings/test-connection returns 502 when connection fails."""
     with patch(
-        "app.routes.settings.test_connection",
+        "app.routes.settings.verify_fhir_connection",
         new_callable=AsyncMock,
         side_effect=ConnectionError("Connection refused"),
     ):
