@@ -1,11 +1,12 @@
-from typing import Optional
 """Job management endpoints."""
 
 import logging
+import re
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,6 +25,9 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 # ---------------------------------------------------------------------------
 
 
+_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,256}$")
+
+
 class JobCreate(BaseModel):
     measure_id: str
     measure_name: Optional[str] = None
@@ -31,6 +35,14 @@ class JobCreate(BaseModel):
     period_end: str
     cdr_url: Optional[str] = None  # if omitted, use active CDR config or default
     group_id: Optional[str] = None  # if set, only evaluate patients in this FHIR Group
+
+    @field_validator("group_id")
+    @classmethod
+    def validate_group_id(cls, v: Optional[str]) -> Optional[str]:
+        """Reject group_id values that could rewrite the CDR URL path."""
+        if v is not None and not _GROUP_ID_RE.match(v):
+            raise ValueError("group_id must be alphanumeric with hyphens, underscores, or dots only")
+        return v
 
 
 class JobResponse(BaseModel):
