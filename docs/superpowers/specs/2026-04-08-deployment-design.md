@@ -167,7 +167,7 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ## EC2 provisioning (one-time manual setup)
 
 **Launch instance:**
-- Amazon Linux 2023, t3.small (2 vCPU / 2 GB RAM), 30 GB gp3 EBS
+- Amazon Linux 2023, t3.medium (2 vCPU / 4 GB RAM), 30 GB gp3 EBS — t3.small (2 GB) proved insufficient; two HAPI FHIR JVMs exhaust available memory
 - Assign Elastic IP before sharing any URL
 - Security group: inbound 22 (SSH, your IP only), 80 (HTTP, 0.0.0.0/0), 443 (HTTPS, 0.0.0.0/0)
 
