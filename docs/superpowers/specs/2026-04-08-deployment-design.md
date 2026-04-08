@@ -205,18 +205,6 @@ Integration tests are deferred — they require the full Docker stack in CI and 
 
 ---
 
-## Key dates
-
-| Date | Milestone |
-|------|-----------|
-| ~May 1 | Connectathon measure list confirmed by PO |
-| May 8 | URL live, PO feedback loop running |
-| May 13 | Pre-demo smoke test completed |
-| May 15–17 | Connectathon |
-| May 17+ | ECS Fargate migration begins (H2 → PostgreSQL) |
-
----
-
 ## Data loss risk
 
 If the EC2 instance is **terminated** (not just stopped), Docker volume data (HAPI H2 files, Postgres data) is lost. Acceptable for May. Mitigated post-connectathon by migrating HAPI to PostgreSQL with durable storage.
