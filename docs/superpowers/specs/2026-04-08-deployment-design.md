@@ -63,7 +63,7 @@ services:
     build:
       context: ./frontend
       args:
-        REACT_APP_API_URL: https://api.${EC2_PUBLIC_IP//./-}.nip.io
+        REACT_APP_API_URL: https://api.${CADDY_HOST}
 
   caddy:
     image: caddy:2-alpine
