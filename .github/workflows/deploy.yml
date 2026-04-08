@@ -1,0 +1,47 @@
+name: Test and Deploy
+
+on:
+  push:
+    branches: [master]
+
+jobs:
+  test-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5
+        with:
+          python-version: "3.10"
+
+      - name: Run backend unit tests
+        working-directory: backend
+        run: |
+          pip install -r requirements.txt
+          python -m pytest tests/ --ignore=tests/integration -v
+
+      - name: Check frontend build
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Deploy to EC2
+        if: success()
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2  # v1
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            cd /opt/leonard
+            git fetch origin
+            git checkout ${{ github.sha }}
+            export EC2_PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
+            export CADDY_HOST="${EC2_PUBLIC_IP//./-}.nip.io"
+            export POSTGRES_PASSWORD="${{ secrets.POSTGRES_PASSWORD }}"
+            docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+            sleep 15 && curl -f https://api.${CADDY_HOST}/health || exit 1
+            docker compose ps
