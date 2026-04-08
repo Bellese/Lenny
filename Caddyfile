@@ -1,0 +1,19 @@
+(security_headers) {
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "strict-origin-when-cross-origin"
+        -Server
+    }
+}
+
+{$CADDY_HOST} {
+    import security_headers
+    reverse_proxy frontend:3001
+}
+
+api.{$CADDY_HOST} {
+    import security_headers
+    reverse_proxy backend:8000
+}
