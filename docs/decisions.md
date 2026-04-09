@@ -48,6 +48,16 @@ This log records significant technical and process choices with their rationale.
 
 ---
 
+## ADR-007: Test infrastructure — ruff, pytest-cov, and CI gate (2026-04-09)
+
+**Decision:** Add ruff for linting/formatting, pytest-cov with a 70% coverage floor, and a 4-job GitHub Actions PR gate (unit tests + coverage, lint, integration tests, frontend build).
+
+**Why:** The project was accreting tests without any enforcement mechanism. A CI gate prevents regressions from merging silently. 70% is the initial floor — high enough to catch uncovered code, low enough not to block early-stage feature work. Ruff replaces ad-hoc formatting decisions with a single enforced standard. Test deps are split into `requirements-test.txt` to keep the production image lean.
+
+**Alternatives considered:** Black + flake8 (more tools, more config), 80% coverage floor (too aggressive for current codebase state), no CI gate (status quo, unacceptable as the team grows).
+
+---
+
 ## ADR-006: gstack + superpowers skill chaining (2026-04-07)
 
 **Decision:** Use gstack for the outer loop (ideation, shipping, QA, browsing) and superpowers for the inner loop (TDD, worktrees, subagent-driven execution). One tool is recommended per workflow phase.
