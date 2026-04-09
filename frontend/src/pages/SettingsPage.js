@@ -92,6 +92,7 @@ export default function SettingsPage() {
   const handleTestConnection = async () => {
     setTesting(true);
     setTestResult(null);
+    let succeeded = false;
     try {
       const result = await testConnection({
         cdr_url: settings.cdr_url,
@@ -101,6 +102,7 @@ export default function SettingsPage() {
         token: settings.auth_type === 'bearer' ? settings.token : undefined,
       });
       setTestResult({ success: true, message: result.message || 'Connected successfully', response_time: result.response_time });
+      succeeded = true;
     } catch (err) {
       setTestResult({
         success: false,
@@ -109,6 +111,9 @@ export default function SettingsPage() {
       });
     } finally {
       setTesting(false);
+    }
+    if (succeeded) {
+      await loadHealth();
     }
   };
 

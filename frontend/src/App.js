@@ -81,7 +81,7 @@ export default function App() {
   const checkHealth = useCallback(async () => {
     try {
       const health = await getHealth();
-      setCdrStatus(health?.cdr_connected ? 'connected' : 'disconnected');
+      setCdrStatus(health?.cdr?.status ?? 'unknown');
     } catch {
       setCdrStatus('unknown');
     }
