@@ -12,6 +12,7 @@ from app.config import settings
 from app.db import get_session
 from app.models.config import AuthType, CDRConfig
 from app.services.fhir_client import verify_fhir_connection
+from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
@@ -158,7 +159,7 @@ async def test_cdr_connection(body: TestConnectionRequest) -> dict:
                     {
                         "severity": "error",
                         "code": "exception",
-                        "diagnostics": f"Connection failed: {exc}",
+                        "diagnostics": f"Connection failed: {sanitize_error(exc)}",
                     }
                 ],
             },

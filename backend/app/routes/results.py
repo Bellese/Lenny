@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.models.job import MeasureResult
 from app.services.fhir_client import resolve_evaluated_resource
+from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/results", tags=["results"])
@@ -164,7 +165,7 @@ async def get_evaluated_resources(
                 "Failed to resolve evaluated resource",
                 extra={"reference": ref, "error": str(exc)},
             )
-            errors.append({"reference": ref, "error": str(exc)[:200]})
+            errors.append({"reference": ref, "error": sanitize_error(exc)[:200]})
 
     return {
         "result_id": result_id,

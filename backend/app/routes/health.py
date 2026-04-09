@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_session
+from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
@@ -29,7 +30,7 @@ async def health_check(session: AsyncSession = Depends(get_session)) -> dict:
         await session.execute(text("SELECT 1"))
         status["database"] = {"status": "connected"}
     except Exception as exc:
-        status["database"] = {"status": "disconnected", "error": str(exc)[:200]}
+        status["database"] = {"status": "disconnected", "error": sanitize_error(exc)[:200]}
         status["status"] = "degraded"
 
     # Measure engine check
@@ -45,7 +46,7 @@ async def health_check(session: AsyncSession = Depends(get_session)) -> dict:
                 }
                 status["status"] = "degraded"
     except Exception as exc:
-        status["measure_engine"] = {"status": "disconnected", "error": str(exc)[:200]}
+        status["measure_engine"] = {"status": "disconnected", "error": sanitize_error(exc)[:200]}
         status["status"] = "degraded"
 
     # CDR check
@@ -61,7 +62,7 @@ async def health_check(session: AsyncSession = Depends(get_session)) -> dict:
                 }
                 status["status"] = "degraded"
     except Exception as exc:
-        status["cdr"] = {"status": "disconnected", "error": str(exc)[:200]}
+        status["cdr"] = {"status": "disconnected", "error": sanitize_error(exc)[:200]}
         status["status"] = "degraded"
 
     return status
