@@ -5,6 +5,11 @@ __pycache__/
 .venv/
 venv/
 
+# Coverage
+.coverage
+coverage.json
+htmlcov/
+
 # Node
 node_modules/
 frontend/build/
