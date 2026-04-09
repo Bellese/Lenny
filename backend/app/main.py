@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.config import settings as app_settings
 from app.db import engine
 from app.models import Base
 from app.routes import health, jobs, measures, results, settings, validation
@@ -89,10 +90,13 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow frontend dev server and docker compose frontend
+# CORS — restricted in production via ALLOWED_ORIGINS env var; defaults to wildcard for local dev
+origins = ["*"] if app_settings.ALLOWED_ORIGINS == "*" else [
+    o.strip() for o in app_settings.ALLOWED_ORIGINS.split(",") if o.strip()
+]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
