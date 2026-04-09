@@ -24,7 +24,7 @@ jobs:
         working-directory: backend
         run: |
           pip install -r requirements.txt -r requirements-test.txt
-          python -m pytest tests/ --ignore=tests/integration -v
+          python -m pytest tests/ --ignore=tests/integration --cov=app --cov-fail-under=70 -v
 
       - name: Check frontend build
         working-directory: frontend

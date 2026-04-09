@@ -412,9 +412,7 @@ class TestTriageTestBundle:
 
                 test_session.execute = _execute_interceptor
 
-                result = await triage_test_bundle(
-                    mock_test_bundle_with_expected, "test.json", test_session
-                )
+                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         # Measure + Library = 2 measure defs → push_resources called once for defs
         assert result["measures_loaded"] == 1  # only Measure type counts
@@ -447,15 +445,14 @@ class TestTriageTestBundle:
 
                 test_session.execute = _execute_interceptor
 
-                result = await triage_test_bundle(
-                    mock_test_bundle_with_expected, "test.json", test_session
-                )
+                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         # clinical data NOT pushed (external CDR in use) → patients_loaded == 0
         assert result["patients_loaded"] == 0
         # Measure defs are still pushed (to measure engine)
         push_calls_for_defs = [
-            call for call in mock_push.call_args_list
+            call
+            for call in mock_push.call_args_list
             if any(r.get("resourceType") in {"Measure", "Library"} for r in call.args[0])
         ]
         assert len(push_calls_for_defs) == 1
@@ -466,8 +463,22 @@ class TestTriageTestBundle:
             "resourceType": "Bundle",
             "type": "transaction",
             "entry": [
-                {"resource": {"resourceType": "Measure", "id": "m1", "url": "http://example.com/m1", "status": "active"}},
-                {"resource": {"resourceType": "Library", "id": "lib1", "url": "http://example.com/lib1", "status": "active"}},
+                {
+                    "resource": {
+                        "resourceType": "Measure",
+                        "id": "m1",
+                        "url": "http://example.com/m1",
+                        "status": "active",
+                    }
+                },  # noqa: E501
+                {
+                    "resource": {
+                        "resourceType": "Library",
+                        "id": "lib1",
+                        "url": "http://example.com/lib1",
+                        "status": "active",
+                    }
+                },  # noqa: E501
             ],
         }
         with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
@@ -507,7 +518,10 @@ class TestProcessBundleUpload:
 
     async def test_happy_path_sets_status_complete(self, test_session):
         """Happy path: found upload, file readable, triage succeeds → status complete."""
-        import json, tempfile, os
+        import json
+        import os
+        import tempfile
+
         from app.models.validation import BundleUpload, ValidationStatus
 
         # Create a minimal bundle JSON file on disk
@@ -529,9 +543,6 @@ class TestProcessBundleUpload:
             upload_id = upload.id
 
             # Patch async_session to use our test_session
-            call_count = 0
-            sessions_used = []
-
             def make_ctx():
                 ctx = MagicMock()
                 ctx.__aenter__ = AsyncMock(return_value=test_session)
@@ -541,7 +552,11 @@ class TestProcessBundleUpload:
             triage_summary = {"measures_loaded": 1, "patients_loaded": 1, "expected_results_loaded": 1}
 
             with patch("app.services.validation.async_session", side_effect=lambda: make_ctx()):
-                with patch("app.services.validation.triage_test_bundle", new_callable=AsyncMock, return_value=triage_summary):
+                with patch(  # noqa: E501
+                    "app.services.validation.triage_test_bundle",
+                    new_callable=AsyncMock,
+                    return_value=triage_summary,
+                ):
                     await process_bundle_upload(upload_id)
 
             # Refresh the record from the session to check status
@@ -565,9 +580,7 @@ class TestResolveMeasureId:
         """When measure engine returns a matching entry, the HAPI ID is returned."""
         bundle_response = {
             "resourceType": "Bundle",
-            "entry": [
-                {"resource": {"resourceType": "Measure", "id": "hapi-measure-123"}}
-            ],
+            "entry": [{"resource": {"resourceType": "Measure", "id": "hapi-measure-123"}}],
         }
         mock_resp = MagicMock()
         mock_resp.raise_for_status = MagicMock()

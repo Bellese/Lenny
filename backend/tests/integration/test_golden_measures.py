@@ -35,7 +35,7 @@ def _load_golden_bundles() -> list[tuple[str, dict]]:
     bundles = []
     for bundle_path in sorted(GOLDEN_DIR.glob("*/bundle.json")):
         name = bundle_path.parent.name
-        with open(bundle_path) as f:
+        with open(bundle_path, encoding="utf-8") as f:
             bundles.append((name, json.load(f)))
     return bundles
 
