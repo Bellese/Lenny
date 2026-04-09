@@ -122,3 +122,41 @@ async def test_health_cdr_unreachable(client, mock_fhir_metadata):
     assert data["cdr"]["status"] == "disconnected"
     assert "error" in data["cdr"]
     assert data["measure_engine"]["status"] == "connected"
+
+
+async def test_health_error_does_not_leak_internal_hostname(client, mock_fhir_metadata):
+    """Regression: internal hostnames must not appear in HTTP response bodies.
+
+    When the measure engine raises an exception whose message contains an
+    internal Docker-network hostname (hapi-fhir-measure:8080), sanitize_error()
+    must strip it before it reaches the client.
+    """
+    cdr_response = httpx.Response(200, json=mock_fhir_metadata)
+
+    call_count = 0
+
+    async def mock_get(url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.ConnectError(
+                "Connection refused connecting to http://hapi-fhir-measure:8080/fhir/metadata"
+            )
+        return cdr_response
+
+    with patch("app.routes.health.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get("/health")
+
+    assert resp.status_code == 200
+    body = resp.text
+    assert "hapi-fhir-measure" not in body
+    assert "8080" not in body
+    data = resp.json()
+    assert data["status"] == "degraded"
+    assert data["measure_engine"]["status"] == "disconnected"
+    assert "error" in data["measure_engine"]

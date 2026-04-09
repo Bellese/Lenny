@@ -8,7 +8,46 @@ from app.services.validation import (
     _is_test_case_measure_report,
     _classify_bundle_entries,
     compare_populations,
+    sanitize_error,
 )
+
+
+# ---------------------------------------------------------------------------
+# sanitize_error
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeError:
+    def test_url_replaced_with_placeholder(self):
+        exc = Exception("Failed to connect to http://example.com/fhir/Patient")
+        result = sanitize_error(exc)
+        assert "http://example.com" not in result
+        assert "[url]" in result
+
+    def test_internal_hostname_url_stripped(self):
+        exc = Exception(
+            "HTTPStatusError: 404 Not Found for url http://hapi-fhir-measure:8080/fhir/Measure/$evaluate-measure"
+        )
+        result = sanitize_error(exc)
+        assert "hapi-fhir-measure:8080" not in result
+        assert "[url]" in result
+
+    def test_auth_header_redacted(self):
+        exc = Exception("Request failed: Authorization: Bearer supersecrettoken123")
+        result = sanitize_error(exc)
+        assert "supersecrettoken123" not in result
+        assert "redacted" in result
+
+    def test_safe_message_unchanged(self):
+        exc = Exception("Measure not found on engine")
+        result = sanitize_error(exc)
+        assert result == "Measure not found on engine"
+
+    def test_very_long_message_truncated(self):
+        long_msg = "x" * 5000
+        exc = Exception(long_msg)
+        result = sanitize_error(exc)
+        assert len(result) <= 2000
 
 
 # ---------------------------------------------------------------------------
