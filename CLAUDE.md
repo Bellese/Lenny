@@ -23,10 +23,11 @@ cd frontend && npm start
 - **Python:** 3.10+, `X | None` union syntax OK, type hints required
 - **React:** plain JavaScript (not TypeScript), PascalCase components, co-located CSS Modules (`Foo.module.css`)
 - **Config:** all values via environment variables (`backend/app/config.py`) — never hardcoded
+- **PRs:** use `.github/pull_request_template.md` sections (`gh pr create` does not auto-populate — build the body explicitly)
 
 ## Workflow
 
-Branches: `feature/*` or `fix/*` off `master`, merged via PR.
+Branches: `feature/*`, `fix/*`, or `chore/*` off `master`, merged via PR. Always work in a git worktree (`git worktree add ../mct2-<branch> -b <branch> origin/master`) — never commit directly on the current branch.
 Work items: GitHub Issues on the [project board](https://github.com/orgs/Bellese/projects/33/views/3).
 
 Follow this lifecycle for each issue. Update the issue after each phase before moving on.
@@ -49,6 +50,12 @@ See `docs/workflow.md` for full details and board attribute guidance.
 New backend features require tests in `backend/tests/`. Match existing naming (`test_routes_*.py`, `test_services_*.py`). Integration tests go in `backend/tests/integration/` and use the `@pytest.mark.integration` marker.
 
 Frontend has no test suite yet.
+
+## AWS
+
+- **Profile:** `leonard` (account `439475769170`). Always use `AWS_PROFILE=leonard` for any AWS CLI commands.
+- EC2 instance: `i-0f00585639d2f3ef1`, t3.medium (4 GB RAM), Elastic IP `98.89.219.217`, region `us-east-1`
+- Live URLs: `https://98-89-219-217.nip.io` (UI), `https://api.98-89-219-217.nip.io` (API)
 
 ## Do NOT
 
