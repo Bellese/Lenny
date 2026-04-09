@@ -1,0 +1,71 @@
+{
+  "resourceType": "Bundle",
+  "type": "transaction",
+  "entry": [
+    {
+      "resource": {
+        "resourceType": "Library",
+        "id": "golden-lib-001",
+        "url": "http://golden-test.example.com/Library/golden-lib-001",
+        "version": "1.0.0",
+        "name": "GoldenTestLibrary",
+        "title": "Golden Test Library",
+        "status": "active",
+        "type": {
+          "coding": [{"system": "http://terminology.hl7.org/CodeSystem/library-type", "code": "logic-library"}]
+        },
+        "content": [
+          {
+            "contentType": "text/cql",
+            "data": "bGlicmFyeSBHb2xkZW5UZXN0TGlicmFyeSB2ZXJzaW9uICcxLjAuMCcKCnVzaW5nIEZISVIgdmVyc2lvbiAnNC4wLjEnCgpjb250ZXh0IFBhdGllbnQKCmRlZmluZSAiSW5pdGlhbFBvcHVsYXRpb24iOgogIHRydWUKCmRlZmluZSAiRGVub21pbmF0b3IiOgogIHRydWUKCmRlZmluZSAiTnVtZXJhdG9yIjoKICB0cnVl"
+          }
+        ]
+      },
+      "request": {"method": "PUT", "url": "Library/golden-lib-001"}
+    },
+    {
+      "resource": {
+        "resourceType": "Measure",
+        "id": "golden-measure-001",
+        "url": "http://golden-test.example.com/Measure/golden-measure-001",
+        "version": "1.0.0",
+        "name": "GoldenMeasure001",
+        "title": "Golden Test Measure 001",
+        "status": "active",
+        "library": ["http://golden-test.example.com/Library/golden-lib-001"],
+        "scoring": {
+          "coding": [{"system": "http://terminology.hl7.org/CodeSystem/measure-scoring", "code": "proportion"}]
+        },
+        "group": [
+          {
+            "population": [
+              {
+                "code": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/measure-population", "code": "initial-population"}]},
+                "criteria": {"language": "text/cql", "expression": "InitialPopulation"}
+              },
+              {
+                "code": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/measure-population", "code": "denominator"}]},
+                "criteria": {"language": "text/cql", "expression": "Denominator"}
+              },
+              {
+                "code": {"coding": [{"system": "http://terminology.hl7.org/CodeSystem/measure-population", "code": "numerator"}]},
+                "criteria": {"language": "text/cql", "expression": "Numerator"}
+              }
+            ]
+          }
+        ]
+      },
+      "request": {"method": "PUT", "url": "Measure/golden-measure-001"}
+    },
+    {
+      "resource": {
+        "resourceType": "Patient",
+        "id": "golden-patient-001",
+        "name": [{"given": ["Golden"], "family": "TestPatient"}],
+        "gender": "unknown",
+        "birthDate": "1990-01-01"
+      },
+      "request": {"method": "PUT", "url": "Patient/golden-patient-001"}
+    }
+  ]
+}
