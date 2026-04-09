@@ -23,7 +23,7 @@ jobs:
       - name: Run backend unit tests
         working-directory: backend
         run: |
-          pip install -r requirements.txt
+          pip install -r requirements.txt -r requirements-test.txt
           python -m pytest tests/ --ignore=tests/integration -v
 
       - name: Check frontend build
