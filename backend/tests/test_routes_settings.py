@@ -136,18 +136,15 @@ async def test_test_connection_failure_does_not_leak_hostname():
     an internal Docker-network hostname (hapi-fhir-cdr:8080), sanitize_error()
     must strip it before the client sees it.
     """
-    from httpx import AsyncClient, ASGITransport
+    from httpx import ASGITransport, AsyncClient
+
     from app.main import app
 
-    async with AsyncClient(
-        transport=ASGITransport(app=app), base_url="http://test"
-    ) as ac:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         with patch(
             "app.routes.settings.verify_fhir_connection",
             new_callable=AsyncMock,
-            side_effect=ConnectionError(
-                "Cannot connect to http://hapi-fhir-cdr:8080/fhir"
-            ),
+            side_effect=ConnectionError("Cannot connect to http://hapi-fhir-cdr:8080/fhir"),
         ):
             resp = await ac.post(
                 "/settings/test-connection",

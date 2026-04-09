@@ -1,5 +1,6 @@
-from typing import Optional
 """CDR settings management endpoints."""
+
+from __future__ import annotations
 
 import logging
 
@@ -24,7 +25,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 
 class CDRSettingsResponse(BaseModel):
-    id: Optional[int] = None
+    id: int | None = None
     cdr_url: str
     auth_type: str
     is_active: bool
@@ -35,13 +36,13 @@ class CDRSettingsResponse(BaseModel):
 class CDRSettingsUpdate(BaseModel):
     cdr_url: str
     auth_type: str = "none"
-    auth_credentials: Optional[dict] = None
+    auth_credentials: dict | None = None
 
 
 class TestConnectionRequest(BaseModel):
     cdr_url: str
     auth_type: str = "none"
-    auth_credentials: Optional[dict] = None
+    auth_credentials: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -54,18 +55,14 @@ async def get_settings(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Return the active CDR configuration."""
-    result = await session.execute(
-        select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1)
-    )
+    result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
     config = result.scalar_one_or_none()
 
     if config:
         return {
             "id": config.id,
             "cdr_url": config.cdr_url,
-            "auth_type": config.auth_type.value
-            if isinstance(config.auth_type, AuthType)
-            else config.auth_type,
+            "auth_type": config.auth_type.value if isinstance(config.auth_type, AuthType) else config.auth_type,
             "is_active": config.is_active,
         }
 
@@ -106,9 +103,7 @@ async def update_settings(
         )
 
     # Deactivate existing configs
-    result = await session.execute(
-        select(CDRConfig).where(CDRConfig.is_active.is_(True))
-    )
+    result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)))
     existing_configs = result.scalars().all()
     for cfg in existing_configs:
         cfg.is_active = False
@@ -129,9 +124,7 @@ async def update_settings(
     return {
         "id": new_config.id,
         "cdr_url": new_config.cdr_url,
-        "auth_type": new_config.auth_type.value
-        if isinstance(new_config.auth_type, AuthType)
-        else new_config.auth_type,
+        "auth_type": new_config.auth_type.value if isinstance(new_config.auth_type, AuthType) else new_config.auth_type,
         "is_active": new_config.is_active,
     }
 

@@ -1,6 +1,6 @@
 """Tests for the FHIR client service (fhir_client.py)."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -12,9 +12,11 @@ from app.services.fhir_client import (
     list_measures,
     push_resources,
     resolve_evaluated_resource,
-    verify_fhir_connection as fhir_test_connection,
     upload_measure_bundle,
     wipe_patient_data,
+)
+from app.services.fhir_client import (
+    verify_fhir_connection as fhir_test_connection,
 )
 
 pytestmark = pytest.mark.asyncio

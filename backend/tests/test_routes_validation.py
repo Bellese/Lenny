@@ -4,10 +4,8 @@ import io
 import json
 
 import pytest
-import pytest_asyncio
 
 from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
-
 
 # ---------------------------------------------------------------------------
 # POST /validation/upload-bundle
@@ -18,9 +16,7 @@ class TestUploadBundle:
     @pytest.mark.asyncio
     async def test_upload_valid_bundle(self, client, mock_test_bundle_with_expected, tmp_path, monkeypatch):
         # Monkeypatch UPLOAD_DIR to use tmp_path
-        monkeypatch.setattr(
-            "app.routes.validation.UPLOAD_DIR", str(tmp_path)
-        )
+        monkeypatch.setattr("app.routes.validation.UPLOAD_DIR", str(tmp_path))
         content = json.dumps(mock_test_bundle_with_expected).encode()
         response = await client.post(
             "/validation/upload-bundle",
@@ -163,22 +159,26 @@ class TestListExpectedResults:
 
     @pytest.mark.asyncio
     async def test_with_results(self, client, test_session):
-        test_session.add(ExpectedResult(
-            measure_url="https://example.com/Measure/CMS122",
-            patient_ref="p1",
-            expected_populations={"numerator": 1},
-            period_start="2026-01-01",
-            period_end="2026-12-31",
-            source_bundle="test.json",
-        ))
-        test_session.add(ExpectedResult(
-            measure_url="https://example.com/Measure/CMS122",
-            patient_ref="p2",
-            expected_populations={"numerator": 0},
-            period_start="2026-01-01",
-            period_end="2026-12-31",
-            source_bundle="test.json",
-        ))
+        test_session.add(
+            ExpectedResult(
+                measure_url="https://example.com/Measure/CMS122",
+                patient_ref="p1",
+                expected_populations={"numerator": 1},
+                period_start="2026-01-01",
+                period_end="2026-12-31",
+                source_bundle="test.json",
+            )
+        )
+        test_session.add(
+            ExpectedResult(
+                measure_url="https://example.com/Measure/CMS122",
+                patient_ref="p2",
+                expected_populations={"numerator": 0},
+                period_start="2026-01-01",
+                period_end="2026-12-31",
+                source_bundle="test.json",
+            )
+        )
         await test_session.commit()
 
         response = await client.get("/validation/expected")

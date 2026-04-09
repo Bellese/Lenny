@@ -34,15 +34,11 @@ Each phase uses one recommended tool. The issue gets updated before moving on.
 
 We maintain `docs/decisions.md` to record significant technical and process choices with their rationale. When you make a decision that would be non-obvious to someone joining the project next month, add it to the log.
 
-## What Comes Next
+## Reference Docs
 
-Once the team agrees on this workflow, we'll create:
-
-- `CLAUDE.md` at the repo root, with build commands, conventions, and domain terms limited to ~100 lines
-- `docs/workflow.md`, the final version of this document
-- `docs/architecture.md`, a technical reference for the service map, data flow, and configuration
-- `docs/decisions.md`, the decision log
-
-## ...and then?
-
-We learn. There are gaps in this artifact. The plan is to use both toolkits as-is, observe what works, then adapt them to fit Bellese's needs over time.
+| Doc | Contents |
+|-----|----------|
+| `CLAUDE.md` | Build commands, conventions, workflow shortcuts |
+| `docs/architecture.md` | Service map, data flow, HAPI config, environment variables |
+| `docs/testing.md` | Testing strategy, CI gate, integration test setup, golden file patterns |
+| `docs/decisions.md` | ADR log — significant technical and process choices with rationale |

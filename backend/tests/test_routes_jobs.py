@@ -191,7 +191,7 @@ async def test_create_job_without_group_id(client):
 
 async def test_get_groups_success(client):
     """GET /jobs/groups returns list of groups from CDR."""
-    from unittest.mock import patch, AsyncMock
+    from unittest.mock import AsyncMock, patch
 
     mock_groups = [
         {"id": "CMS122FHIRDiabetes", "name": "CMS122 Diabetes", "type": "person", "member_count": 20},
@@ -208,8 +208,9 @@ async def test_get_groups_success(client):
 
 async def test_get_groups_cdr_unreachable(client):
     """GET /jobs/groups returns 502 when CDR is unreachable."""
+    from unittest.mock import AsyncMock, patch
+
     import httpx
-    from unittest.mock import patch, AsyncMock
 
     with patch("app.routes.jobs.list_groups", new=AsyncMock(side_effect=httpx.ConnectError("refused"))):
         resp = await client.get("/jobs/groups")

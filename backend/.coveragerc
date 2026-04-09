@@ -1,0 +1,5 @@
+[run]
+source = app
+omit =
+    app/main.py
+    app/services/worker.py

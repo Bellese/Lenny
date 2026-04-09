@@ -1,6 +1,5 @@
 """Tests for measure endpoints (GET /measures, POST /measures/upload)."""
 
-import io
 import json
 from unittest.mock import AsyncMock, patch
 
@@ -149,9 +148,7 @@ async def test_get_measures_engine_unreachable_does_not_leak_hostname(client):
     with patch(
         "app.routes.measures.list_measures",
         new_callable=AsyncMock,
-        side_effect=ConnectionError(
-            "Cannot connect to http://hapi-fhir-measure:8080/fhir"
-        ),
+        side_effect=ConnectionError("Cannot connect to http://hapi-fhir-measure:8080/fhir"),
     ):
         resp = await client.get("/measures")
 
@@ -171,9 +168,7 @@ async def test_upload_measure_engine_rejects_does_not_leak_hostname(client):
     with patch(
         "app.routes.measures.upload_measure_bundle",
         new_callable=AsyncMock,
-        side_effect=Exception(
-            "502 Bad Gateway from http://hapi-fhir-measure:8080/fhir"
-        ),
+        side_effect=Exception("502 Bad Gateway from http://hapi-fhir-measure:8080/fhir"),
     ):
         resp = await client.post(
             "/measures/upload",

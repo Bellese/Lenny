@@ -4,8 +4,6 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-import pytest_asyncio
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -139,9 +137,7 @@ async def test_health_error_does_not_leak_internal_hostname(client, mock_fhir_me
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            raise httpx.ConnectError(
-                "Connection refused connecting to http://hapi-fhir-measure:8080/fhir/metadata"
-            )
+            raise httpx.ConnectError("Connection refused connecting to http://hapi-fhir-measure:8080/fhir/metadata")
         return cdr_response
 
     with patch("app.routes.health.httpx.AsyncClient") as mock_httpx:

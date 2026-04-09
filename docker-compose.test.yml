@@ -28,6 +28,7 @@ services:
     environment:
       - hapi.fhir.server_address=http://hapi-fhir-cdr:8080/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
+      - hapi.fhir.reuse_cached_search_results_millis=0
 
   hapi-fhir-measure:
     image: hapiproject/hapi:v7.4.0
@@ -36,6 +37,7 @@ services:
     environment:
       - hapi.fhir.server_address=http://hapi-fhir-measure:8080/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
+      - hapi.fhir.reuse_cached_search_results_millis=0
 
 volumes:
   test_pgdata:

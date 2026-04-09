@@ -61,6 +61,21 @@ By default, MCT2 uses a bundled CDR with test data. To connect to your organizat
 4. Click "Test Connection" to verify
 5. Save
 
+## Development
+
+```bash
+# Unit tests
+cd backend && python -m pytest tests/ --ignore=tests/integration -v
+
+# Unit tests with coverage (70% floor enforced by CI)
+cd backend && python -m pytest tests/ --ignore=tests/integration --cov=app --cov-report=term-missing
+
+# Lint
+cd backend && ruff check app/ tests/ && ruff format --check app/ tests/
+```
+
+See [docs/testing.md](docs/testing.md) for the full testing strategy, integration test setup, and golden file test patterns.
+
 ## License
 
 Apache 2.0

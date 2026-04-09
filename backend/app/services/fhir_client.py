@@ -236,7 +236,6 @@ async def wipe_patient_data() -> None:
     ]
     async with httpx.AsyncClient(timeout=60.0) as client:
         for rt in resource_types:
-            url = f"{settings.MEASURE_ENGINE_URL}/{rt}?_count=0"
             try:
                 # Use conditional delete: DELETE ResourceType?_lastUpdated=gt1900-01-01
                 delete_url = f"{settings.MEASURE_ENGINE_URL}/{rt}?_lastUpdated=gt1900-01-01"
@@ -305,12 +304,14 @@ async def list_groups(
             for entry in bundle.get("entry", []):
                 resource = entry.get("resource", {})
                 if resource.get("resourceType") == "Group":
-                    groups.append({
-                        "id": resource.get("id"),
-                        "name": resource.get("name"),
-                        "type": resource.get("type"),
-                        "member_count": len(resource.get("member", [])),
-                    })
+                    groups.append(
+                        {
+                            "id": resource.get("id"),
+                            "name": resource.get("name"),
+                            "type": resource.get("type"),
+                            "member_count": len(resource.get("member", [])),
+                        }
+                    )
             url = None
             for link in bundle.get("link", []):
                 if link.get("relation") == "next":
@@ -327,9 +328,7 @@ async def get_group_members(
     """Fetch Patient resources for all members of a Group (concurrent)."""
     async with httpx.AsyncClient(timeout=60.0) as client:
         # Fetch the Group resource
-        resp = await client.get(
-            f"{cdr_url}/Group/{group_id}", headers=auth_headers
-        )
+        resp = await client.get(f"{cdr_url}/Group/{group_id}", headers=auth_headers)
         resp.raise_for_status()
         group = resp.json()
 
@@ -346,9 +345,7 @@ async def get_group_members(
 
         async def fetch_patient(patient_id: str, ref: str) -> Optional[dict[str, Any]]:
             async with semaphore:
-                patient_resp = await client.get(
-                    f"{cdr_url}/Patient/{patient_id}", headers=auth_headers
-                )
+                patient_resp = await client.get(f"{cdr_url}/Patient/{patient_id}", headers=auth_headers)
                 if patient_resp.status_code == 200:
                     return patient_resp.json()
                 logger.warning(

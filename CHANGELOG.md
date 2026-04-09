@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.2.0] - 2026-04-09
+
+### Added
+- CI/CD gate: new `pr-checks.yml` GitHub Actions workflow runs unit tests (70% coverage
+  floor), ruff lint, integration tests, and frontend build on every pull request.
+- Deploy workflow now enforces the 70% coverage floor via `--cov-fail-under=70`.
+- Golden file integration test pattern: drop a `bundle.json` in `tests/integration/golden/`
+  and the measure engine evaluates it automatically on every integration run.
+- `docs/testing.md` documents the full testing strategy — coverage targets, test layers,
+  golden test format, and CI job reference.
+- `backend/requirements-test.txt` separates test-only dependencies from runtime so
+  production images stay lean.
+- `backend/ruff.toml` enforces consistent import ordering and code style across all
+  backend Python files.
+
+### Changed
+- CLAUDE.md updated with coverage and lint commands and a reference to `docs/testing.md`.
+
+### Fixed
+- Ruff auto-corrected import ordering and formatting across all backend `app/` and
+  `tests/` files. No logic changes — cosmetic only.
+
 ## [0.0.1.1] - 2026-04-09
 
 ### Fixed

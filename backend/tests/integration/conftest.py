@@ -8,7 +8,6 @@ import json
 import pathlib
 from collections.abc import AsyncGenerator
 
-import httpx
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
@@ -27,8 +26,7 @@ TEST_DATABASE_URL = "postgresql+asyncpg://mct2:mct2@localhost:5433/mct2"
 SEED_DIR = pathlib.Path(__file__).resolve().parents[3] / "seed"
 
 SKIP_MESSAGE = (
-    "Integration test infrastructure not running. "
-    "Start with: docker compose -f docker-compose.test.yml up -d"
+    "Integration test infrastructure not running. Start with: docker compose -f docker-compose.test.yml up -d"
 )
 
 
@@ -120,9 +118,7 @@ async def integration_engine():
 @pytest_asyncio.fixture(scope="session")
 async def integration_session_factory(integration_engine):
     """Return a session factory bound to the integration database."""
-    return async_sessionmaker(
-        integration_engine, class_=AsyncSession, expire_on_commit=False
-    )
+    return async_sessionmaker(integration_engine, class_=AsyncSession, expire_on_commit=False)
 
 
 @pytest_asyncio.fixture
@@ -138,8 +134,14 @@ async def _truncate_tables(integration_session_factory):
     yield
     async with integration_session_factory() as session:
         for table in (
-            "validation_results", "validation_runs", "expected_results",
-            "bundle_uploads", "measure_results", "batches", "jobs", "cdr_configs",
+            "validation_results",
+            "validation_runs",
+            "expected_results",
+            "bundle_uploads",
+            "measure_results",
+            "batches",
+            "jobs",
+            "cdr_configs",
         ):
             await session.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
         await session.commit()
@@ -157,7 +159,6 @@ async def integration_client(integration_session_factory):
     The database dependency is overridden to use the test PostgreSQL.
     Environment variables are patched so fhir_client talks to test HAPI instances.
     """
-    import os
     from unittest.mock import patch
 
     from fastapi import FastAPI

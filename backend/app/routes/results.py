@@ -24,9 +24,7 @@ async def get_results(
 
     Returns population sums across all MeasureResults and a performance rate.
     """
-    result = await session.execute(
-        select(MeasureResult).where(MeasureResult.job_id == job_id)
-    )
+    result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
     results = result.scalars().all()
 
     if not results:

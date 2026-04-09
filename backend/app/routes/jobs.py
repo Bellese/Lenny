@@ -128,19 +128,15 @@ async def get_groups(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """List FHIR Group resources from the CDR."""
-    result = await session.execute(
-        select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1)
-    )
+    result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
     config = result.scalar_one_or_none()
     cdr_url = config.cdr_url if config else settings.DEFAULT_CDR_URL
-    auth_headers = _build_auth_headers(
-        config.auth_type, config.auth_credentials
-    ) if config else {}
+    auth_headers = _build_auth_headers(config.auth_type, config.auth_credentials) if config else {}
 
     try:
         groups = await list_groups(cdr_url, auth_headers)
         return {"groups": groups}
-    except Exception as exc:
+    except Exception:
         logger.exception("Failed to fetch groups from CDR")
         raise HTTPException(
             status_code=502,
@@ -157,9 +153,7 @@ async def create_job(
     # Resolve CDR URL
     cdr_url = body.cdr_url
     if not cdr_url:
-        result = await session.execute(
-            select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1)
-        )
+        result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         config = result.scalar_one_or_none()
         cdr_url = config.cdr_url if config else settings.DEFAULT_CDR_URL
 
