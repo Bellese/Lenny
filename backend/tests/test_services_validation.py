@@ -32,6 +32,17 @@ class TestSanitizeError:
         assert "hapi-fhir-measure:8080" not in result
         assert "[url]" in result
 
+    def test_schemeless_hostport_stripped(self):
+        # httpx ConnectError can emit bare hostname:port without http:// prefix,
+        # e.g. "[Errno 111] Connection refused (while connecting to ('hapi-fhir-cdr', 8080))"
+        exc = Exception(
+            "[Errno 111] Connection refused (while connecting to hapi-fhir-cdr:8080)"
+        )
+        result = sanitize_error(exc)
+        assert "hapi-fhir-cdr" not in result
+        assert "8080" not in result
+        assert "[host]" in result
+
     def test_auth_header_redacted(self):
         exc = Exception("Request failed: Authorization: Bearer supersecrettoken123")
         result = sanitize_error(exc)
@@ -48,6 +59,25 @@ class TestSanitizeError:
         exc = Exception(long_msg)
         result = sanitize_error(exc)
         assert len(result) <= 2000
+
+    def test_http_status_code_not_mangled(self):
+        # Regression: _HOSTPORT_RE must not false-positive on "code:404" or
+        # similar non-hostname strings that contain a colon followed by digits.
+        exc = Exception("FHIR server returned HTTP status code:404, line:30")
+        result = sanitize_error(exc)
+        assert "[host]" not in result
+        assert "404" in result
+        assert "30" in result
+
+    def test_str_exc_crash_returns_fallback(self):
+        # Regression: if str(exc) raises, sanitize_error should return a safe fallback.
+        class BadExc(Exception):
+            def __str__(self):
+                raise RuntimeError("str failed")
+
+        result = sanitize_error(BadExc())
+        assert "BadExc" in result
+        assert "str() raised" in result
 
 
 # ---------------------------------------------------------------------------

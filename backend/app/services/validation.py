@@ -41,17 +41,28 @@ logger = logging.getLogger(__name__)
 _MEASURE_DEF_TYPES = {"Measure", "Library", "ValueSet", "CodeSystem"}
 
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
+# Matches Docker-style hyphenated service names followed by a port (e.g. hapi-fhir-cdr:8080).
+# Requires at least one hyphen in the hostname to avoid false positives on "code:404" or "line:100".
+_HOSTPORT_RE = re.compile(r"\b[a-z0-9][a-z0-9]*(?:-[a-z0-9]+)+:\d{2,5}\b", re.IGNORECASE)
 _AUTH_RE = re.compile(r"(Authorization|Bearer|Basic|password|token|secret)[=:\s]\S+", re.IGNORECASE)
 
 
 def sanitize_error(exc: Exception) -> str:
     """Return a sanitized exception message safe to store and return to clients.
 
-    Strips embedded URLs, auth headers, and credentials. Full details are
-    logged server-side before this function is called.
+    Strips embedded URLs, internal hostnames, auth headers, and credentials.
+    Full details are logged server-side before this function is called.
+
+    Regex application order is load-bearing: URL regex runs first (removes
+    http://hostname:port), then _HOSTPORT_RE catches bare hostname:port without
+    a scheme (common in httpx ConnectError messages).
     """
-    msg = str(exc)[:2000]
+    try:
+        msg = str(exc)[:2000]
+    except Exception:
+        msg = f"<{type(exc).__name__}: str() raised>"
     msg = _URL_RE.sub("[url]", msg)
+    msg = _HOSTPORT_RE.sub("[host]", msg)
     msg = _AUTH_RE.sub(r"\1=[redacted]", msg)
     return msg
 
