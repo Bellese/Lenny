@@ -4,6 +4,8 @@ These tests verify that the fhir_client functions work correctly
 against actual HAPI FHIR servers running in Docker.
 """
 
+import asyncio
+
 import httpx
 import pytest
 
@@ -74,14 +76,21 @@ async def test_upload_and_list_measure(measure_url):
         result = await upload_measure_bundle(bundle)
         assert result["resourceType"] == "Bundle"
 
-        # Now list and confirm it appears
-        listed = await list_measures()
-        measure_ids = [
-            e["resource"]["id"]
-            for e in listed.get("entry", [])
-            if e.get("resource", {}).get("resourceType") == "Measure"
-        ]
-        assert "test-integration-measure" in measure_ids
+        # HAPI v7 can have a brief search-index lag after a transaction even
+        # though the resource is stored synchronously. Retry for up to 5s.
+        measure_ids: list[str] = []
+        for _ in range(5):
+            listed = await list_measures()
+            measure_ids = [
+                e["resource"]["id"]
+                for e in listed.get("entry", [])
+                if e.get("resource", {}).get("resourceType") == "Measure"
+            ]
+            if "test-integration-measure" in measure_ids:
+                break
+            await asyncio.sleep(1)
+
+        assert "test-integration-measure" in measure_ids, f"Measure not found after upload. IDs present: {measure_ids}"
 
 
 # ---------------------------------------------------------------------------
