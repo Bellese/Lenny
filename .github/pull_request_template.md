@@ -19,9 +19,7 @@
 
 ## Checklist
 
-- [ ] Self-review of my own code
 - [ ] Tests added or updated (N/A for docs/infra/chore)
-- [ ] CLAUDE.md updated (if conventions changed)
 - [ ] docs/ updated (if architecture or API changed)
 - [ ] No new ADRs needed, OR I've added an entry to `docs/decisions.md`
       <!-- ADR triggers: new external dependency, schema change, changed auth/security behavior, new service, reversibility-impacting decision -->
