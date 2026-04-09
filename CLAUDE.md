@@ -23,10 +23,11 @@ cd frontend && npm start
 - **Python:** 3.10+, `X | None` union syntax OK, type hints required
 - **React:** plain JavaScript (not TypeScript), PascalCase components, co-located CSS Modules (`Foo.module.css`)
 - **Config:** all values via environment variables (`backend/app/config.py`) — never hardcoded
+- **PRs:** use `.github/pull_request_template.md` sections (`gh pr create` does not auto-populate — build the body explicitly)
 
 ## Workflow
 
-Branches: `feature/*` or `fix/*` off `master`, merged via PR.
+Branches: `feature/*`, `fix/*`, or `chore/*` off `master`, merged via PR. Always work in a git worktree (`git worktree add ../mct2-<branch> -b <branch> origin/master`) — never commit directly on the current branch.
 Work items: GitHub Issues on the [project board](https://github.com/orgs/Bellese/projects/33/views/3).
 
 Follow this lifecycle for each issue. Update the issue after each phase before moving on.
