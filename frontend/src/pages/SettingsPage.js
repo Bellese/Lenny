@@ -113,7 +113,11 @@ export default function SettingsPage() {
       setTesting(false);
     }
     if (succeeded) {
-      await loadHealth();
+      // Update CDR health state directly from the test result rather than re-fetching
+      // /health, which evaluates the *saved* config. If the user edited the URL without
+      // saving first, re-fetching would reflect the old URL and produce a contradictory
+      // "Connected successfully" + red indicator (#58).
+      setHealth(prev => prev ? { ...prev, cdr: { status: 'connected' } } : null);
     }
   };
 
@@ -129,7 +133,7 @@ export default function SettingsPage() {
         token: settings.auth_type === 'bearer' ? settings.token : undefined,
       });
       toast.success('Settings saved');
-      loadHealth();
+      await loadHealth();
     } catch (err) {
       toast.error(`Failed to save: ${err.message}`);
     } finally {
