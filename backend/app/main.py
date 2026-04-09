@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.config import settings as app_settings
+from app.config import parse_allowed_origins, settings as app_settings
 from app.db import engine
 from app.models import Base
 from app.routes import health, jobs, measures, results, settings, validation
@@ -91,13 +91,16 @@ app = FastAPI(
 )
 
 # CORS — restricted in production via ALLOWED_ORIGINS env var; defaults to wildcard for local dev
-origins = ["*"] if app_settings.ALLOWED_ORIGINS == "*" else [
-    o.strip() for o in app_settings.ALLOWED_ORIGINS.split(",") if o.strip()
-]
+origins = parse_allowed_origins(app_settings.ALLOWED_ORIGINS)
+# allow_credentials requires an explicit origin list; wildcard + credentials is invalid per spec
+allow_credentials = origins != ["*"]
+if not allow_credentials:
+    logger.warning("CORS: ALLOWED_ORIGINS is wildcard — allow_credentials disabled. "
+                   "Set ALLOWED_ORIGINS to specific origins in production.")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
-    allow_credentials=True,
+    allow_credentials=allow_credentials,
     allow_methods=["*"],
     allow_headers=["*"],
 )
