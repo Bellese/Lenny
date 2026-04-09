@@ -76,10 +76,11 @@ async def test_upload_and_list_measure(measure_url):
         result = await upload_measure_bundle(bundle)
         assert result["resourceType"] == "Bundle"
 
-        # HAPI v7 can have a brief search-index lag after a transaction even
-        # though the resource is stored synchronously. Retry for up to 5s.
+        # HAPI v7 search result cache (disabled via reuse_cached_search_results_millis=0
+        # in docker-compose.test.yml). Short retry kept as safety net for any
+        # residual indexing lag.
         measure_ids: list[str] = []
-        for _ in range(5):
+        for _ in range(3):
             listed = await list_measures()
             measure_ids = [
                 e["resource"]["id"]
