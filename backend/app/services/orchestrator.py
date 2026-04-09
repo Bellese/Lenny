@@ -10,7 +10,6 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import async_session
@@ -189,9 +188,7 @@ async def run_job(job_id: int) -> None:
 async def _get_cdr_auth_headers(job_id: int) -> dict[str, str]:
     """Resolve auth headers from the active CDR config."""
     async with async_session() as session:
-        result = await session.execute(
-            select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1)
-        )
+        result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         config = result.scalar_one_or_none()
         if config:
             return _build_auth_headers(config.auth_type, config.auth_credentials)
@@ -258,9 +255,7 @@ async def _process_single_batch(
                         return
 
                 try:
-                    resources = await strategy.gather_patient_data(
-                        cdr_url, patient_id, auth_headers
-                    )
+                    resources = await strategy.gather_patient_data(cdr_url, patient_id, auth_headers)
                     if resources:
                         await push_resources(resources)
                     logger.info(
@@ -297,9 +292,7 @@ async def _process_single_batch(
                         return
 
                 try:
-                    measure_report = await evaluate_measure(
-                        measure_id, patient_id, period_start, period_end
-                    )
+                    measure_report = await evaluate_measure(measure_id, patient_id, period_start, period_end)
 
                     populations = _extract_populations(measure_report)
                     patient_name = _extract_patient_name(patient_map.get(patient_id, {}))

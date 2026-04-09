@@ -2,7 +2,6 @@
 
 import asyncio
 from collections.abc import AsyncGenerator
-from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -41,9 +40,7 @@ async def test_engine():
 @pytest_asyncio.fixture
 async def test_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
     """Yield an async session bound to the in-memory test database."""
-    session_factory = async_sessionmaker(
-        test_engine, class_=AsyncSession, expire_on_commit=False
-    )
+    session_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
     async with session_factory() as session:
         yield session
 
@@ -51,9 +48,7 @@ async def test_session(test_engine) -> AsyncGenerator[AsyncSession, None]:
 @pytest_asyncio.fixture
 async def session_factory(test_engine):
     """Return the session factory itself (used by override)."""
-    return async_sessionmaker(
-        test_engine, class_=AsyncSession, expire_on_commit=False
-    )
+    return async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
 
 
 # ---------------------------------------------------------------------------
@@ -70,8 +65,9 @@ async def client(session_factory) -> AsyncGenerator[AsyncClient, None]:
     starting the background worker and hitting the real Postgres.
     """
     from fastapi import FastAPI
-    from app.routes import health, jobs, measures, results, settings, validation
+
     from app.db import get_session
+    from app.routes import health, jobs, measures, results, settings, validation
 
     # Build a minimal app without the lifespan (no worker, no real DB init)
     test_app = FastAPI()
@@ -170,9 +166,7 @@ def mock_measure_report():
             {
                 "population": [
                     {
-                        "code": {
-                            "coding": [{"code": "initial-population"}]
-                        },
+                        "code": {"coding": [{"code": "initial-population"}]},
                         "count": 1,
                     },
                     {
@@ -184,15 +178,11 @@ def mock_measure_report():
                         "count": 1,
                     },
                     {
-                        "code": {
-                            "coding": [{"code": "denominator-exclusion"}]
-                        },
+                        "code": {"coding": [{"code": "denominator-exclusion"}]},
                         "count": 0,
                     },
                     {
-                        "code": {
-                            "coding": [{"code": "numerator-exclusion"}]
-                        },
+                        "code": {"coding": [{"code": "numerator-exclusion"}]},
                         "count": 0,
                     },
                 ]
@@ -259,9 +249,7 @@ def mock_test_bundle_with_expected():
                         {
                             "resourceType": "Parameters",
                             "id": "params-1",
-                            "parameter": [
-                                {"name": "subject", "valueString": "test-patient-1"}
-                            ],
+                            "parameter": [{"name": "subject", "valueString": "test-patient-1"}],
                         }
                     ],
                     "extension": [

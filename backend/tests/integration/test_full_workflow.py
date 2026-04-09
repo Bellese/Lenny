@@ -4,10 +4,9 @@ These tests exercise the full API contract: create jobs, run the orchestrator
 pipeline, and verify results are stored and retrievable.
 """
 
-import pytest
 from unittest.mock import patch
 
-from sqlalchemy import select
+import pytest
 
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
 from app.services.orchestrator import run_job
@@ -81,9 +80,7 @@ async def test_create_and_run_job(integration_client, db_session, integration_se
     resp = await integration_client.get(f"/jobs/{job_id}")
     assert resp.status_code == 200
     job_detail = resp.json()
-    assert job_detail["status"] in ("complete", "failed"), (
-        f"Expected job to finish, got status: {job_detail['status']}"
-    )
+    assert job_detail["status"] in ("complete", "failed"), f"Expected job to finish, got status: {job_detail['status']}"
 
     if job_detail["status"] == "complete":
         assert job_detail["total_patients"] > 0

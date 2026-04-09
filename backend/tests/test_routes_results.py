@@ -197,9 +197,7 @@ async def test_get_evaluated_resources_error_does_not_leak_hostname(client, test
     with patch(
         "app.routes.results.resolve_evaluated_resource",
         new_callable=AsyncMock,
-        side_effect=Exception(
-            "Connection refused at http://hapi-fhir-measure:8080/fhir"
-        ),
+        side_effect=Exception("Connection refused at http://hapi-fhir-measure:8080/fhir"),
     ):
         resp = await client.get(f"/results/{result_id}/evaluated-resources")
 

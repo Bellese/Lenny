@@ -40,19 +40,13 @@ class BundleUpload(Base):
     patients_loaded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     expected_results_loaded: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class ExpectedResult(Base):
     __tablename__ = "expected_results"
-    __table_args__ = (
-        UniqueConstraint("measure_url", "patient_ref", name="uq_measure_patient"),
-    )
+    __table_args__ = (UniqueConstraint("measure_url", "patient_ref", name="uq_measure_patient"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     measure_url: Mapped[str] = mapped_column(String(1024), nullable=False, index=True)
@@ -62,9 +56,7 @@ class ExpectedResult(Base):
     period_start: Mapped[str] = mapped_column(String(10), nullable=False)
     period_end: Mapped[str] = mapped_column(String(10), nullable=False)
     source_bundle: Mapped[str] = mapped_column(String(512), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
 
 class ValidationRun(Base):
@@ -80,16 +72,11 @@ class ValidationRun(Base):
     patients_passed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     patients_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     results: Mapped[list["ValidationResult"]] = relationship(
-        "ValidationResult", back_populates="validation_run",
-        cascade="all, delete-orphan", lazy="selectin"
+        "ValidationResult", back_populates="validation_run", cascade="all, delete-orphan", lazy="selectin"
     )
 
 
@@ -98,8 +85,7 @@ class ValidationResult(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     validation_run_id: Mapped[int] = mapped_column(
-        Integer, ForeignKey("validation_runs.id", ondelete="CASCADE"),
-        nullable=False, index=True
+        Integer, ForeignKey("validation_runs.id", ondelete="CASCADE"), nullable=False, index=True
     )
     measure_url: Mapped[str] = mapped_column(String(1024), nullable=False)
     patient_ref: Mapped[str] = mapped_column(String(256), nullable=False)
@@ -110,6 +96,4 @@ class ValidationResult(Base):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     mismatches: Mapped[Optional[List]] = mapped_column(JSON, nullable=True)
 
-    validation_run: Mapped["ValidationRun"] = relationship(
-        "ValidationRun", back_populates="results"
-    )
+    validation_run: Mapped["ValidationRun"] = relationship("ValidationRun", back_populates="results")

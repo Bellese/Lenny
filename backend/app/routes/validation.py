@@ -7,7 +7,7 @@ import os
 import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,7 +29,10 @@ MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 
 class ValidationRunCreate(BaseModel):
     """Optional filter for starting a validation run."""
+
     measure_urls: Optional[list[str]] = None
+
+
 UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "uploads")
 
 
@@ -57,9 +60,7 @@ async def upload_bundle(
         raise HTTPException(status_code=400, detail="File is not valid JSON")
 
     if bundle_json.get("resourceType") != "Bundle":
-        raise HTTPException(
-            status_code=400, detail="JSON is not a FHIR Bundle (missing resourceType: Bundle)"
-        )
+        raise HTTPException(status_code=400, detail="JSON is not a FHIR Bundle (missing resourceType: Bundle)")
 
     # Save file to disk (off the event loop to avoid blocking on large uploads)
     await asyncio.to_thread(os.makedirs, UPLOAD_DIR, exist_ok=True)
@@ -94,9 +95,7 @@ async def upload_bundle(
 @router.get("/uploads")
 async def list_uploads(session: AsyncSession = Depends(get_session)) -> dict:
     """List all bundle uploads with status and counts."""
-    result = await session.execute(
-        select(BundleUpload).order_by(BundleUpload.created_at.desc())
-    )
+    result = await session.execute(select(BundleUpload).order_by(BundleUpload.created_at.desc()))
     uploads = result.scalars().all()
     return {
         "uploads": [
@@ -129,12 +128,14 @@ async def list_expected_results(session: AsyncSession = Depends(get_session)) ->
     )
     measures = []
     for row in result.all():
-        measures.append({
-            "measure_url": row.measure_url,
-            "patient_count": row.patient_count,
-            "period_start": row.period_start,
-            "period_end": row.period_end,
-        })
+        measures.append(
+            {
+                "measure_url": row.measure_url,
+                "patient_count": row.patient_count,
+                "period_start": row.period_start,
+                "period_end": row.period_end,
+            }
+        )
     return {"measures": measures, "total_measures": len(measures)}
 
 
@@ -176,9 +177,7 @@ async def start_validation_run(
 @router.get("/runs")
 async def list_validation_runs(session: AsyncSession = Depends(get_session)) -> dict:
     """List all validation runs with summary stats."""
-    result = await session.execute(
-        select(ValidationRun).order_by(ValidationRun.created_at.desc())
-    )
+    result = await session.execute(select(ValidationRun).order_by(ValidationRun.created_at.desc()))
     runs = result.scalars().all()
     return {
         "runs": [
@@ -237,15 +236,17 @@ async def get_validation_run(
                 "errors": 0,
             }
         m = measures[vr.measure_url]
-        m["patients"].append({
-            "patient_ref": vr.patient_ref,
-            "patient_name": vr.patient_name,
-            "expected_populations": vr.expected_populations,
-            "actual_populations": vr.actual_populations,
-            "status": vr.status,
-            "error_message": vr.error_message,
-            "mismatches": vr.mismatches,
-        })
+        m["patients"].append(
+            {
+                "patient_ref": vr.patient_ref,
+                "patient_name": vr.patient_name,
+                "expected_populations": vr.expected_populations,
+                "actual_populations": vr.actual_populations,
+                "status": vr.status,
+                "error_message": vr.error_message,
+                "mismatches": vr.mismatches,
+            }
+        )
         if vr.status == "pass":
             m["passed"] += 1
         elif vr.status == "fail":

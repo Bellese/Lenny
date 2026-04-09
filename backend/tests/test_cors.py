@@ -12,7 +12,6 @@ from httpx import ASGITransport, AsyncClient
 
 from app.config import parse_allowed_origins
 
-
 pytestmark = pytest.mark.asyncio
 
 

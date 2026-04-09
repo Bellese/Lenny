@@ -1,13 +1,12 @@
 """Tests for the orchestrator service (run_job and helpers)."""
 
-from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
+from app.models.job import Job, JobStatus, MeasureResult
 from app.services.orchestrator import (
     _extract_patient_name,
     _extract_populations,
@@ -107,25 +106,14 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
     patients = [
         {"resourceType": "Patient", "id": "p1", "name": [{"given": ["Alice"], "family": "Test"}]},
     ]
-    patient_bundle = {
-        "resourceType": "Bundle",
-        "entry": [{"resource": p} for p in patients],
-        "link": [],
-    }
-    everything_bundle = {
-        "resourceType": "Bundle",
-        "entry": [
-            {"resource": {"resourceType": "Patient", "id": "p1"}},
-            {"resource": {"resourceType": "Condition", "id": "c1"}},
-        ],
-        "link": [],
-    }
 
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
-        patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr.example.com/fhir"),
+        patch(
+            "app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr.example.com/fhir"
+        ),
         patch.object(
             __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
             "gather_patients",
@@ -160,9 +148,7 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
         assert job.completed_at is not None
 
         # Verify result was stored
-        result = await session.execute(
-            select(MeasureResult).where(MeasureResult.job_id == job_id)
-        )
+        result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
         results = result.scalars().all()
         assert len(results) == 1
         assert results[0].patient_id == "p1"
@@ -292,9 +278,7 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
         assert job.failed_patients == 1
 
         # Only one result should be stored
-        result = await session.execute(
-            select(MeasureResult).where(MeasureResult.job_id == job_id)
-        )
+        result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
         results = result.scalars().all()
         assert len(results) == 1
         assert results[0].patient_id == "p1"

@@ -109,9 +109,7 @@ def _extract_patient_name(patient_resource: dict[str, Any]) -> Optional[str]:
     return None
 
 
-def compare_populations(
-    expected: dict[str, int], actual: dict[str, int]
-) -> tuple[bool, list[str]]:
+def compare_populations(expected: dict[str, int], actual: dict[str, int]) -> tuple[bool, list[str]]:
     """Compare expected vs actual population counts.
 
     Only compares codes present in expected. If a code is absent from actual,
@@ -134,8 +132,7 @@ def _is_test_case_measure_report(resource: dict[str, Any]) -> bool:
     """Check if a MeasureReport has the cqfm-isTestCase modifier extension."""
     for ext in resource.get("modifierExtension", []):
         if (
-            ext.get("url")
-            == "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase"
+            ext.get("url") == "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase"
             and ext.get("valueBoolean") is True
         ):
             return True
@@ -171,10 +168,7 @@ def _extract_test_case_info(
     # Extract test description
     test_description = None
     for ext in measure_report.get("extension", []):
-        if (
-            ext.get("url")
-            == "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-testCaseDescription"
-        ):
+        if ext.get("url") == "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-testCaseDescription":
             test_description = ext.get("valueMarkdown") or ext.get("valueString")
             break
 
@@ -255,23 +249,27 @@ async def triage_test_bundle(
 
     # Upsert expected results atomically (avoids TOCTOU on concurrent uploads)
     for tc in test_cases:
-        stmt = pg_insert(ExpectedResult).values(
-            measure_url=tc["measure_url"],
-            patient_ref=tc["patient_ref"],
-            test_description=tc["test_description"],
-            expected_populations=tc["expected_populations"],
-            period_start=tc["period_start"],
-            period_end=tc["period_end"],
-            source_bundle=filename,
-        ).on_conflict_do_update(
-            constraint="uq_measure_patient",
-            set_={
-                "test_description": tc["test_description"],
-                "expected_populations": tc["expected_populations"],
-                "period_start": tc["period_start"],
-                "period_end": tc["period_end"],
-                "source_bundle": filename,
-            },
+        stmt = (
+            pg_insert(ExpectedResult)
+            .values(
+                measure_url=tc["measure_url"],
+                patient_ref=tc["patient_ref"],
+                test_description=tc["test_description"],
+                expected_populations=tc["expected_populations"],
+                period_start=tc["period_start"],
+                period_end=tc["period_end"],
+                source_bundle=filename,
+            )
+            .on_conflict_do_update(
+                constraint="uq_measure_patient",
+                set_={
+                    "test_description": tc["test_description"],
+                    "expected_populations": tc["expected_populations"],
+                    "period_start": tc["period_start"],
+                    "period_end": tc["period_end"],
+                    "source_bundle": filename,
+                },
+            )
         )
         await session.execute(stmt)
     await session.commit()
@@ -280,18 +278,14 @@ async def triage_test_bundle(
     patients_loaded = 0
     if clinical:
         # Check if active CDR config is the default bundled one
-        cdr_result = await session.execute(
-            select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1)
-        )
+        cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         active_cdr = cdr_result.scalar_one_or_none()
         cdr_url = active_cdr.cdr_url if active_cdr else settings.DEFAULT_CDR_URL
 
         if cdr_url == settings.DEFAULT_CDR_URL:
             await push_resources(clinical, target_url=settings.DEFAULT_CDR_URL)
             # Count unique Patient resources
-            patients_loaded = sum(
-                1 for r in clinical if r.get("resourceType") == "Patient"
-            )
+            patients_loaded = sum(1 for r in clinical if r.get("resourceType") == "Patient")
         else:
             logger.warning(
                 "External CDR configured — test patients NOT pushed to CDR. "
@@ -300,9 +294,7 @@ async def triage_test_bundle(
             )
 
     return {
-        "measures_loaded": sum(
-            1 for r in measure_defs if r.get("resourceType") == "Measure"
-        ),
+        "measures_loaded": sum(1 for r in measure_defs if r.get("resourceType") == "Measure"),
         "patients_loaded": patients_loaded,
         "expected_results_loaded": len(test_cases),
     }
@@ -326,9 +318,7 @@ async def process_bundle_upload(upload_id: int) -> None:
             if not upload:
                 return
 
-            bundle_json = await asyncio.to_thread(
-                lambda: json.loads(Path(upload.file_path).read_bytes())
-            )
+            bundle_json = await asyncio.to_thread(lambda: json.loads(Path(upload.file_path).read_bytes()))
 
             summary = await triage_test_bundle(bundle_json, upload.filename, session)
 
@@ -425,15 +415,11 @@ async def run_validation(validation_run_id: int) -> None:
 
         # Resolve CDR connection
         async with async_session() as session:
-            cdr_result = await session.execute(
-                select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1)
-            )
+            cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
             active_cdr = cdr_result.scalar_one_or_none()
             if active_cdr:
                 cdr_url = active_cdr.cdr_url
-                auth_headers = _build_auth_headers(
-                    active_cdr.auth_type, active_cdr.auth_credentials
-                )
+                auth_headers = _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials)
             else:
                 cdr_url = settings.DEFAULT_CDR_URL
                 auth_headers = {}
@@ -447,9 +433,7 @@ async def run_validation(validation_run_id: int) -> None:
 
         async def gather_and_push(patient_ref: str) -> None:
             async with semaphore:
-                resources = await strategy.gather_patient_data(
-                    cdr_url, patient_ref, auth_headers
-                )
+                resources = await strategy.gather_patient_data(cdr_url, patient_ref, auth_headers)
                 if resources:
                     await push_resources(resources)
 
@@ -491,18 +475,14 @@ async def run_validation(validation_run_id: int) -> None:
                     ref_str = eval_ref.get("reference", "")
                     if ref_str.startswith("Patient/"):
                         try:
-                            resp = await http_client.get(
-                                f"{settings.MEASURE_ENGINE_URL}/{ref_str}"
-                            )
+                            resp = await http_client.get(f"{settings.MEASURE_ENGINE_URL}/{ref_str}")
                             if resp.status_code == 200:
                                 patient_name = _extract_patient_name(resp.json())
                         except Exception:
                             pass
                         break
 
-                passed, mismatches = compare_populations(
-                    er.expected_populations, actual
-                )
+                passed, mismatches = compare_populations(er.expected_populations, actual)
                 return ValidationResult(
                     validation_run_id=validation_run_id,
                     measure_url=er.measure_url,
@@ -527,6 +507,7 @@ async def run_validation(validation_run_id: int) -> None:
                 )
 
         async with httpx.AsyncClient(timeout=10.0) as http_client:
+
             async def eval_with_semaphore(er: ExpectedResult) -> ValidationResult:
                 async with semaphore:
                     return await evaluate_and_compare(er, http_client)

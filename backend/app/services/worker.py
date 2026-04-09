@@ -1,9 +1,10 @@
-from typing import Optional
 """Async background worker that polls PostgreSQL for queued jobs and validation tasks.
 
 Runs as a background task within the FastAPI lifespan — no Celery needed.
 Priority order: production Jobs first, then BundleUploads, then ValidationRuns.
 """
+
+from __future__ import annotations
 
 import asyncio
 import logging
@@ -34,7 +35,7 @@ async def worker_loop() -> None:
         found_work = False
         try:
             # --- Priority 1: Production Jobs ---
-            job_id: Optional[int] = None
+            job_id: int | None = None
             async with async_session() as session:
                 result = await session.execute(
                     select(Job.id)
@@ -46,11 +47,7 @@ async def worker_loop() -> None:
                 row = result.scalar_one_or_none()
                 if row is not None:
                     job_id = row
-                    await session.execute(
-                        update(Job)
-                        .where(Job.id == job_id)
-                        .values(status=JobStatus.running)
-                    )
+                    await session.execute(update(Job).where(Job.id == job_id).values(status=JobStatus.running))
                     await session.commit()
 
             if job_id is not None:
@@ -69,7 +66,7 @@ async def worker_loop() -> None:
 
             # --- Priority 2: Bundle Uploads ---
             if not found_work:
-                upload_id: Optional[int] = None
+                upload_id: int | None = None
                 async with async_session() as session:
                     result = await session.execute(
                         select(BundleUpload.id)
@@ -107,7 +104,7 @@ async def worker_loop() -> None:
 
             # --- Priority 3: Validation Runs ---
             if not found_work:
-                run_id: Optional[int] = None
+                run_id: int | None = None
                 async with async_session() as session:
                     result = await session.execute(
                         select(ValidationRun.id)

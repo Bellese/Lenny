@@ -4,19 +4,18 @@ These tests verify that the fhir_client functions work correctly
 against actual HAPI FHIR servers running in Docker.
 """
 
-import pytest
 import httpx
+import pytest
 
 from app.services.fhir_client import (
     BatchQueryStrategy,
+    evaluate_measure,
     list_measures,
     push_resources,
-    evaluate_measure,
     upload_measure_bundle,
-    wipe_patient_data,
     verify_fhir_connection,
+    wipe_patient_data,
 )
-from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL
 
 pytestmark = pytest.mark.integration
 
@@ -35,14 +34,8 @@ async def test_list_measures(measure_url):
 
     assert bundle["resourceType"] == "Bundle"
     entries = bundle.get("entry", [])
-    measure_ids = [
-        e["resource"]["id"]
-        for e in entries
-        if e.get("resource", {}).get("resourceType") == "Measure"
-    ]
-    assert "CMS122FHIRDiabetesAssessGT9Pct" in measure_ids, (
-        f"Expected CMS122 measure in {measure_ids}"
-    )
+    measure_ids = [e["resource"]["id"] for e in entries if e.get("resource", {}).get("resourceType") == "Measure"]
+    assert "CMS122FHIRDiabetesAssessGT9Pct" in measure_ids, f"Expected CMS122 measure in {measure_ids}"
 
 
 # ---------------------------------------------------------------------------
@@ -203,9 +196,7 @@ async def test_evaluate_measure(measure_url, cdr_url):
         except httpx.HTTPStatusError as exc:
             # CQL evaluation may fail with our simplified measure — that's OK.
             # Verify the server responded (not a connection error).
-            assert exc.response.status_code >= 400, (
-                "Expected a 4xx/5xx from measure evaluation, not a connection error"
-            )
+            assert exc.response.status_code >= 400, "Expected a 4xx/5xx from measure evaluation, not a connection error"
 
 
 # ---------------------------------------------------------------------------
@@ -237,9 +228,7 @@ async def test_wipe_patient_data(measure_url):
         # Verify it's gone
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(f"{measure_url}/Patient/test-wipe-patient")
-            assert resp.status_code in (404, 410), (
-                f"Expected patient to be deleted, got status {resp.status_code}"
-            )
+            assert resp.status_code in (404, 410), f"Expected patient to be deleted, got status {resp.status_code}"
 
 
 # ---------------------------------------------------------------------------

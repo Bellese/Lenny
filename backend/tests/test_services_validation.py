@@ -1,16 +1,13 @@
 """Tests for validation service — bundle triage, population extraction, comparison."""
 
-import pytest
-
 from app.services.validation import (
+    _classify_bundle_entries,
     _extract_population_counts,
     _extract_test_case_info,
     _is_test_case_measure_report,
-    _classify_bundle_entries,
     compare_populations,
     sanitize_error,
 )
-
 
 # ---------------------------------------------------------------------------
 # sanitize_error
@@ -35,9 +32,7 @@ class TestSanitizeError:
     def test_schemeless_hostport_stripped(self):
         # httpx ConnectError can emit bare hostname:port without http:// prefix,
         # e.g. "[Errno 111] Connection refused (while connecting to ('hapi-fhir-cdr', 8080))"
-        exc = Exception(
-            "[Errno 111] Connection refused (while connecting to hapi-fhir-cdr:8080)"
-        )
+        exc = Exception("[Errno 111] Connection refused (while connecting to hapi-fhir-cdr:8080)")
         result = sanitize_error(exc)
         assert "hapi-fhir-cdr" not in result
         assert "8080" not in result
@@ -106,12 +101,14 @@ class TestExtractPopulationCounts:
 
     def test_zero_counts(self):
         report = {
-            "group": [{
-                "population": [
-                    {"code": {"coding": [{"code": "initial-population"}]}, "count": 0},
-                    {"code": {"coding": [{"code": "denominator"}]}, "count": 0},
-                ]
-            }]
+            "group": [
+                {
+                    "population": [
+                        {"code": {"coding": [{"code": "initial-population"}]}, "count": 0},
+                        {"code": {"coding": [{"code": "denominator"}]}, "count": 0},
+                    ]
+                }
+            ]
         }
         result = _extract_population_counts(report)
         assert result["initial-population"] == 0
@@ -119,12 +116,14 @@ class TestExtractPopulationCounts:
 
     def test_unknown_code_skipped(self):
         report = {
-            "group": [{
-                "population": [
-                    {"code": {"coding": [{"code": "unknown-code"}]}, "count": 5},
-                    {"code": {"coding": [{"code": "numerator"}]}, "count": 1},
-                ]
-            }]
+            "group": [
+                {
+                    "population": [
+                        {"code": {"coding": [{"code": "unknown-code"}]}, "count": 5},
+                        {"code": {"coding": [{"code": "numerator"}]}, "count": 1},
+                    ]
+                }
+            ]
         }
         result = _extract_population_counts(report)
         assert "unknown-code" not in result
@@ -133,12 +132,16 @@ class TestExtractPopulationCounts:
     def test_multiple_groups_merged(self):
         report = {
             "group": [
-                {"population": [
-                    {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
-                ]},
-                {"population": [
-                    {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
-                ]},
+                {
+                    "population": [
+                        {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
+                    ]
+                },
+                {
+                    "population": [
+                        {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
+                    ]
+                },
             ]
         }
         result = _extract_population_counts(report)
@@ -203,10 +206,12 @@ class TestIsTestCase:
     def test_valid_test_case(self):
         resource = {
             "resourceType": "MeasureReport",
-            "modifierExtension": [{
-                "url": "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase",
-                "valueBoolean": True,
-            }],
+            "modifierExtension": [
+                {
+                    "url": "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase",
+                    "valueBoolean": True,
+                }
+            ],
         }
         assert _is_test_case_measure_report(resource) is True
 
@@ -217,10 +222,12 @@ class TestIsTestCase:
     def test_false_value(self):
         resource = {
             "resourceType": "MeasureReport",
-            "modifierExtension": [{
-                "url": "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase",
-                "valueBoolean": False,
-            }],
+            "modifierExtension": [
+                {
+                    "url": "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase",
+                    "valueBoolean": False,
+                }
+            ],
         }
         assert _is_test_case_measure_report(resource) is False
 
@@ -265,10 +272,12 @@ class TestExtractTestCaseInfo:
         mr = {
             "resourceType": "MeasureReport",
             "measure": "https://example.com/Measure/X",
-            "contained": [{
-                "resourceType": "Parameters",
-                "parameter": [{"name": "subject", "valueString": "p1"}],
-            }],
+            "contained": [
+                {
+                    "resourceType": "Parameters",
+                    "parameter": [{"name": "subject", "valueString": "p1"}],
+                }
+            ],
         }
         assert _extract_test_case_info(mr) is None
 
@@ -280,9 +289,7 @@ class TestExtractTestCaseInfo:
 
 class TestClassifyBundleEntries:
     def test_classifies_correctly(self, mock_test_bundle_with_expected):
-        measure_defs, clinical, test_cases = _classify_bundle_entries(
-            mock_test_bundle_with_expected
-        )
+        measure_defs, clinical, test_cases = _classify_bundle_entries(mock_test_bundle_with_expected)
         # Measure + Library = 2 measure defs
         assert len(measure_defs) == 2
         assert measure_defs[0]["resourceType"] == "Measure"
@@ -294,9 +301,7 @@ class TestClassifyBundleEntries:
         assert test_cases[0]["patient_ref"] == "test-patient-1"
 
     def test_empty_bundle(self):
-        measure_defs, clinical, test_cases = _classify_bundle_entries(
-            {"resourceType": "Bundle", "entry": []}
-        )
+        measure_defs, clinical, test_cases = _classify_bundle_entries({"resourceType": "Bundle", "entry": []})
         assert len(measure_defs) == 0
         assert len(clinical) == 0
         assert len(test_cases) == 0
