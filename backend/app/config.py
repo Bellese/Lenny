@@ -31,7 +31,7 @@ def parse_allowed_origins(raw: str) -> list[str]:
     """
     if raw == "*":
         return ["*"]
-    return [o.strip() for o in raw.split(",") if o.strip()]
+    return [o.strip().rstrip("/") for o in raw.split(",") if o.strip()]
 
 
 settings = Settings()

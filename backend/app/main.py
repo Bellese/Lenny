@@ -93,7 +93,7 @@ app = FastAPI(
 # CORS — restricted in production via ALLOWED_ORIGINS env var; defaults to wildcard for local dev
 origins = parse_allowed_origins(app_settings.ALLOWED_ORIGINS)
 # allow_credentials requires an explicit origin list; wildcard + credentials is invalid per spec
-allow_credentials = origins != ["*"]
+allow_credentials = bool(origins) and origins != ["*"]
 if not allow_credentials:
     logger.warning("CORS: ALLOWED_ORIGINS is wildcard — allow_credentials disabled. "
                    "Set ALLOWED_ORIGINS to specific origins in production.")
