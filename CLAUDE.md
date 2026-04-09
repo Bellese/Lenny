@@ -6,12 +6,20 @@
 # Unit tests (run from repo root)
 cd backend && python -m pytest tests/ --ignore=tests/integration -v
 
+# Unit tests with coverage (floor: 70%)
+cd backend && python -m pytest tests/ --ignore=tests/integration --cov=app --cov-report=term-missing
+
 # Integration tests (spins up real HAPI FHIR + Postgres containers)
 ./scripts/run-integration-tests.sh
+
+# Lint
+cd backend && ruff check app/ tests/ && ruff format --check app/ tests/
 
 # Frontend dev server (port 3001)
 cd frontend && npm start
 ```
+
+See `docs/testing.md` for the full testing strategy.
 
 ## Architecture
 
