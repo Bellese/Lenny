@@ -20,7 +20,11 @@ pytestmark = pytest.mark.integration
 
 GOLDEN_DIR = pathlib.Path(__file__).parent / "golden"
 
-MEASURE_ENGINE_BASE = TEST_MEASURE_URL
+GOLDEN_PERIOD_START = "2024-01-01"
+GOLDEN_PERIOD_END = "2024-12-31"
+
+# Pre-load bundles once at module scope (used by both fixture and parametrize)
+_GOLDEN_BUNDLES: list[tuple[str, dict]] = []
 
 
 def _load_golden_bundles() -> list[tuple[str, dict]]:
@@ -34,6 +38,14 @@ def _load_golden_bundles() -> list[tuple[str, dict]]:
         with open(bundle_path) as f:
             bundles.append((name, json.load(f)))
     return bundles
+
+
+def _get_golden_bundles() -> list[tuple[str, dict]]:
+    """Return cached golden bundles, loading once on first call."""
+    global _GOLDEN_BUNDLES
+    if not _GOLDEN_BUNDLES:
+        _GOLDEN_BUNDLES = _load_golden_bundles()
+    return _GOLDEN_BUNDLES
 
 
 def _find_measure(bundle: dict[str, Any]) -> dict[str, Any] | None:
@@ -61,9 +73,9 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
     This runs before any golden tests execute. Resources use unique IDs
     (golden-* prefix) to avoid conflicting with seed data.
     """
-    for name, bundle in _load_golden_bundles():
+    for name, bundle in _get_golden_bundles():
         resp = httpx.post(
-            MEASURE_ENGINE_BASE,
+            TEST_MEASURE_URL,
             json=bundle,
             headers={"Content-Type": "application/fhir+json"},
             timeout=60,
@@ -74,7 +86,12 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
             pytest.fail(f"Failed to load golden bundle '{name}': {exc}\nResponse: {resp.text[:500]}")
 
 
-@pytest.mark.parametrize("name,bundle", _load_golden_bundles())
+_PARAMETRIZE_BUNDLES = _get_golden_bundles() or [
+    pytest.param("_empty", {}, marks=pytest.mark.skip(reason="No golden bundles found"))
+]
+
+
+@pytest.mark.parametrize("name,bundle", _PARAMETRIZE_BUNDLES)
 def test_golden_measure_evaluates(name: str, bundle: dict[str, Any]) -> None:
     """Each golden bundle's measure evaluates without error for each patient.
 
@@ -95,15 +112,15 @@ def test_golden_measure_evaluates(name: str, bundle: dict[str, Any]) -> None:
     measure_id = measure.get("id")
     assert measure_id, f"Measure in '{name}' has no id"
 
-    period_start = "2024-01-01"
-    period_end = "2024-12-31"
+    period_start = GOLDEN_PERIOD_START
+    period_end = GOLDEN_PERIOD_END
 
     for patient in patients:
         patient_id = patient.get("id")
         assert patient_id, f"Patient in '{name}' has no id"
 
         url = (
-            f"{MEASURE_ENGINE_BASE}/Measure/{measure_id}/$evaluate-measure"
+            f"{TEST_MEASURE_URL}/Measure/{measure_id}/$evaluate-measure"
             f"?subject=Patient/{patient_id}"
             f"&periodStart={period_start}&periodEnd={period_end}"
         )
@@ -116,9 +133,7 @@ def test_golden_measure_evaluates(name: str, bundle: dict[str, Any]) -> None:
         # Accept 200 (success) or handled HTTP errors (HAPI may reject CQL we can't fully control)
         if resp.status_code != 200:
             # Log but don't fail — HAPI evaluation errors are expected during initial setup
-            pytest.skip(
-                f"HAPI returned {resp.status_code} for '{name}/{patient_id}': {resp.text[:200]}"
-            )
+            pytest.skip(f"HAPI returned {resp.status_code} for '{name}/{patient_id}': {resp.text[:200]}")
 
         report = resp.json()
 
@@ -126,9 +141,7 @@ def test_golden_measure_evaluates(name: str, bundle: dict[str, Any]) -> None:
         assert report.get("resourceType") == "MeasureReport", (
             f"Expected MeasureReport, got {report.get('resourceType')}"
         )
-        assert report.get("group"), (
-            f"MeasureReport for '{name}/{patient_id}' has no population groups"
-        )
+        assert report.get("group"), f"MeasureReport for '{name}/{patient_id}' has no population groups"
         # Patient reference should be present
         subject = report.get("subject", {}).get("reference", "")
         assert "Patient" in subject or patient_id in subject, (
