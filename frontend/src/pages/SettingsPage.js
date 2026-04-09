@@ -92,6 +92,7 @@ export default function SettingsPage() {
   const handleTestConnection = async () => {
     setTesting(true);
     setTestResult(null);
+    let succeeded = false;
     try {
       const result = await testConnection({
         cdr_url: settings.cdr_url,
@@ -101,6 +102,7 @@ export default function SettingsPage() {
         token: settings.auth_type === 'bearer' ? settings.token : undefined,
       });
       setTestResult({ success: true, message: result.message || 'Connected successfully', response_time: result.response_time });
+      succeeded = true;
     } catch (err) {
       setTestResult({
         success: false,
@@ -109,6 +111,13 @@ export default function SettingsPage() {
       });
     } finally {
       setTesting(false);
+    }
+    if (succeeded) {
+      // Update CDR health state directly from the test result rather than re-fetching
+      // /health, which evaluates the *saved* config. If the user edited the URL without
+      // saving first, re-fetching would reflect the old URL and produce a contradictory
+      // "Connected successfully" + red indicator (#58).
+      setHealth(prev => prev ? { ...prev, cdr: { status: 'connected' } } : null);
     }
   };
 
@@ -124,7 +133,7 @@ export default function SettingsPage() {
         token: settings.auth_type === 'bearer' ? settings.token : undefined,
       });
       toast.success('Settings saved');
-      loadHealth();
+      await loadHealth();
     } catch (err) {
       toast.error(`Failed to save: ${err.message}`);
     } finally {
