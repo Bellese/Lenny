@@ -114,6 +114,7 @@ Defined in `backend/app/config.py`. All overridable via environment variables.
 | `MAX_RETRIES` | `3` | Retry attempts for failed FHIR requests |
 | `HAPI_INDEX_WAIT_SECONDS` | `5` | Wait after uploading patients before evaluating (index propagation) |
 | `LOG_LEVEL` | `INFO` | Python logging level |
+| `ALLOWED_ORIGINS` | `"*"` | Comma-separated CORS allowed origins; `"*"` for wildcard (local dev default). Set to `https://${CADDY_HOST}` in production via `docker-compose.prod.yml`. |
 
 ## Test Infrastructure
 
