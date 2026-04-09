@@ -40,16 +40,15 @@ def _build_cors_app(allowed_origins: str) -> FastAPI:
 
 
 async def test_cors_wildcard_returns_origin_header():
-    """When ALLOWED_ORIGINS='*', a cross-origin request receives an
-    Access-Control-Allow-Origin header (Starlette echoes the requesting
-    origin rather than '*' when allow_credentials=True)."""
+    """When ALLOWED_ORIGINS='*', a cross-origin request receives
+    Access-Control-Allow-Origin: * (Starlette returns the wildcard literal)."""
     app = _build_cors_app("*")
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         resp = await ac.get("/ping", headers={"Origin": "https://anything.com"})
 
     assert resp.status_code == 200
-    assert "access-control-allow-origin" in resp.headers
+    assert resp.headers.get("access-control-allow-origin") == "*"
 
 
 async def test_cors_allowed_origin_echoed():
@@ -93,3 +92,18 @@ async def test_cors_preflight_allowed_origin():
     assert resp.status_code == 200
     assert resp.headers.get("access-control-allow-origin") == "https://example.com"
     assert "access-control-allow-methods" in resp.headers
+
+
+async def test_cors_multi_origin_list_allows_any_listed():
+    """ALLOWED_ORIGINS with a comma-separated list allows any listed origin.
+
+    Also exercises the whitespace-stripping logic in the origin parser
+    (' https://b.com' → 'https://b.com').
+    """
+    app = _build_cors_app("https://a.com, https://b.com")
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        resp = await ac.get("/ping", headers={"Origin": "https://b.com"})
+
+    assert resp.status_code == 200
+    assert resp.headers.get("access-control-allow-origin") == "https://b.com"
