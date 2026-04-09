@@ -23,10 +23,11 @@ cd frontend && npm start
 - **Python:** 3.10+, `X | None` union syntax OK, type hints required
 - **React:** plain JavaScript (not TypeScript), PascalCase components, co-located CSS Modules (`Foo.module.css`)
 - **Config:** all values via environment variables (`backend/app/config.py`) — never hardcoded
+- **PRs:** follow `.github/pull_request_template.md` structure when creating PR bodies
 
 ## Workflow
 
-Branches: `feature/*` or `fix/*` off `master`, merged via PR.
+Branches: `feature/*`, `fix/*`, or `chore/*` off `master`, merged via PR. Always use a git worktree for development — create a new branch in an isolated worktree rather than working directly on the current branch.
 Work items: GitHub Issues on the [project board](https://github.com/orgs/Bellese/projects/33/views/3).
 
 Follow this lifecycle for each issue. Update the issue after each phase before moving on.
