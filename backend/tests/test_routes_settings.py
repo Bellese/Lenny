@@ -127,3 +127,34 @@ async def test_test_connection_failure(client):
     data = resp.json()["detail"]
     assert data["resourceType"] == "OperationOutcome"
     assert "Connection failed" in data["issue"][0]["diagnostics"]
+
+
+async def test_test_connection_failure_does_not_leak_hostname():
+    """Regression: internal hostnames must not appear in 502 error responses.
+
+    When verify_fhir_connection raises a connection error whose message contains
+    an internal Docker-network hostname (hapi-fhir-cdr:8080), sanitize_error()
+    must strip it before the client sees it.
+    """
+    from httpx import AsyncClient, ASGITransport
+    from app.main import app
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://test"
+    ) as ac:
+        with patch(
+            "app.routes.settings.verify_fhir_connection",
+            new_callable=AsyncMock,
+            side_effect=ConnectionError(
+                "Cannot connect to http://hapi-fhir-cdr:8080/fhir"
+            ),
+        ):
+            resp = await ac.post(
+                "/settings/test-connection",
+                json={"cdr_url": "http://hapi-fhir-cdr:8080/fhir"},
+            )
+
+    assert resp.status_code == 502
+    body = resp.text
+    assert "hapi-fhir-cdr" not in body
+    assert "8080" not in body

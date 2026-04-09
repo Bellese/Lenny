@@ -182,3 +182,31 @@ async def test_get_evaluated_resources_not_found(client):
     """GET /results/{id}/evaluated-resources with non-existent ID returns 404."""
     resp = await client.get("/results/99999/evaluated-resources")
     assert resp.status_code == 404
+
+
+async def test_get_evaluated_resources_error_does_not_leak_hostname(client, test_session):
+    """Regression: internal hostnames must not appear in evaluated-resource error entries.
+
+    When resolve_evaluated_resource raises an exception whose message contains an
+    internal Docker-network hostname (hapi-fhir-measure:8080), sanitize_error()
+    must strip it before the client sees it in the response body errors list.
+    """
+    job, results = await _create_job_with_results(test_session, num_results=1)
+    result_id = results[0].id
+
+    with patch(
+        "app.routes.results.resolve_evaluated_resource",
+        new_callable=AsyncMock,
+        side_effect=Exception(
+            "Connection refused at http://hapi-fhir-measure:8080/fhir"
+        ),
+    ):
+        resp = await client.get(f"/results/{result_id}/evaluated-resources")
+
+    assert resp.status_code == 200
+    body = resp.text
+    assert "hapi-fhir-measure" not in body
+    assert "8080" not in body
+    data = resp.json()
+    assert data["errors"] is not None
+    assert len(data["errors"]) > 0

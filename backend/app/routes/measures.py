@@ -6,6 +6,7 @@ import logging
 from fastapi import APIRouter, HTTPException, UploadFile, File
 
 from app.services.fhir_client import list_measures, upload_measure_bundle
+from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/measures", tags=["measures"])
@@ -43,7 +44,7 @@ async def get_measures() -> dict:
                     {
                         "severity": "error",
                         "code": "exception",
-                        "diagnostics": f"Cannot reach measure engine: {exc}",
+                        "diagnostics": f"Cannot reach measure engine: {sanitize_error(exc)}",
                     }
                 ],
             },
@@ -84,7 +85,7 @@ async def upload_measure(file: UploadFile = File(...)) -> dict:
                     {
                         "severity": "error",
                         "code": "invalid",
-                        "diagnostics": f"Invalid JSON: {exc}",
+                        "diagnostics": f"Invalid JSON: {sanitize_error(exc)}",
                     }
                 ],
             },
@@ -126,7 +127,7 @@ async def upload_measure(file: UploadFile = File(...)) -> dict:
                     {
                         "severity": "error",
                         "code": "exception",
-                        "diagnostics": f"Measure engine rejected bundle: {exc}",
+                        "diagnostics": f"Measure engine rejected bundle: {sanitize_error(exc)}",
                     }
                 ],
             },

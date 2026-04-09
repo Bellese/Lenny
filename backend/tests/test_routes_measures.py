@@ -138,3 +138,49 @@ async def test_upload_measure_engine_rejects(client):
     assert resp.status_code == 502
     data = resp.json()["detail"]
     assert "Measure engine rejected bundle" in data["issue"][0]["diagnostics"]
+
+
+async def test_get_measures_engine_unreachable_does_not_leak_hostname(client):
+    """Regression: internal hostnames must not appear in 502 error responses.
+
+    When list_measures raises a connection error whose message contains
+    hapi-fhir-measure:8080, sanitize_error() must strip it before the client sees it.
+    """
+    with patch(
+        "app.routes.measures.list_measures",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError(
+            "Cannot connect to http://hapi-fhir-measure:8080/fhir"
+        ),
+    ):
+        resp = await client.get("/measures")
+
+    assert resp.status_code == 502
+    body = resp.text
+    assert "hapi-fhir-measure" not in body
+    assert "8080" not in body
+
+
+async def test_upload_measure_engine_rejects_does_not_leak_hostname(client):
+    """Regression: internal hostnames must not appear in 502 error responses.
+
+    When upload_measure_bundle raises an exception whose message contains an
+    internal hostname, sanitize_error() must strip it before the client sees it.
+    """
+    bundle = {"resourceType": "Bundle", "type": "transaction", "entry": []}
+    with patch(
+        "app.routes.measures.upload_measure_bundle",
+        new_callable=AsyncMock,
+        side_effect=Exception(
+            "502 Bad Gateway from http://hapi-fhir-measure:8080/fhir"
+        ),
+    ):
+        resp = await client.post(
+            "/measures/upload",
+            files={"file": ("bundle.json", json.dumps(bundle).encode(), "application/json")},
+        )
+
+    assert resp.status_code == 502
+    body = resp.text
+    assert "hapi-fhir-measure" not in body
+    assert "8080" not in body

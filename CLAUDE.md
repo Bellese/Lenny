@@ -62,3 +62,4 @@ Frontend has no test suite yet.
 - Hardcode URLs or credentials — use environment variables
 - Use Python 3.9-style `Optional[X]` — `X | None` is preferred
 - Modify HAPI FHIR H2 storage paths without reading `docs/architecture.md`
+- Create or update `TODOS.md` — work items go in GitHub Issues only. When a review, ship, or planning session surfaces a new task, open a GitHub issue instead.
