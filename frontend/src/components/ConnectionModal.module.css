@@ -121,6 +121,27 @@
   border-radius: var(--radius-md);
 }
 
+.testContent {
+  flex: 1;
+}
+
+.testDismiss {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  color: inherit;
+  opacity: 0.6;
+  transition: opacity var(--transition);
+}
+
+.testDismiss:hover {
+  opacity: 1;
+}
+
 .testSuccess {
   background: var(--color-success-light);
   border: 1px solid var(--color-success);
