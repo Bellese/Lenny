@@ -306,7 +306,7 @@ async def test_fhir_test_connection_success(mock_fhir_metadata):
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        result = await fhir_test_connection("http://example.com/fhir")
+        result = await fhir_test_connection("https://example.com/fhir")
 
     assert result["status"] == "connected"
     assert result["fhir_version"] == "4.0.1"
@@ -322,7 +322,7 @@ async def test_fhir_test_connection_failed():
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with pytest.raises(httpx.ConnectError):
-            await fhir_test_connection("http://bad-server/fhir")
+            await fhir_test_connection("https://bad-server/fhir")
 
 
 async def test_fhir_test_connection_401():
@@ -330,7 +330,7 @@ async def test_fhir_test_connection_401():
     mock_response = httpx.Response(
         401,
         json={"error": "unauthorized"},
-        request=httpx.Request("GET", "http://example.com/fhir/metadata"),
+        request=httpx.Request("GET", "https://example.com/fhir/metadata"),
     )
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
@@ -340,7 +340,7 @@ async def test_fhir_test_connection_401():
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with pytest.raises(httpx.HTTPStatusError):
-            await fhir_test_connection("http://example.com/fhir")
+            await fhir_test_connection("https://example.com/fhir")
 
 
 async def test_fhir_test_connection_500():
@@ -348,7 +348,7 @@ async def test_fhir_test_connection_500():
     mock_response = httpx.Response(
         500,
         json={"error": "server error"},
-        request=httpx.Request("GET", "http://example.com/fhir/metadata"),
+        request=httpx.Request("GET", "https://example.com/fhir/metadata"),
     )
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
@@ -358,7 +358,7 @@ async def test_fhir_test_connection_500():
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with pytest.raises(httpx.HTTPStatusError):
-            await fhir_test_connection("http://example.com/fhir")
+            await fhir_test_connection("https://example.com/fhir")
 
 
 async def test_fhir_test_connection_timeout():
@@ -370,7 +370,7 @@ async def test_fhir_test_connection_timeout():
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with pytest.raises(httpx.TimeoutException):
-            await fhir_test_connection("http://slow-server/fhir")
+            await fhir_test_connection("https://slow-server/fhir")
 
 
 # ---------------------------------------------------------------------------
@@ -445,7 +445,7 @@ async def test_upload_measure_bundle():
 _SMART_CREDENTIALS = {
     "client_id": "c1",
     "client_secret": "s1",
-    "token_endpoint": "http://auth.example.com/token",
+    "token_endpoint": "https://auth.example.com/token",
 }
 
 
@@ -455,7 +455,7 @@ class TestAcquireSmartToken:
         token_response = httpx.Response(
             200,
             json={"access_token": "tok123", "token_type": "bearer"},
-            request=httpx.Request("POST", "http://auth.example.com/token"),
+            request=httpx.Request("POST", "https://auth.example.com/token"),
         )
 
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
@@ -468,7 +468,7 @@ class TestAcquireSmartToken:
 
         assert token == "tok123"
         call_args = mock_ctx.post.call_args
-        assert call_args[0][0] == "http://auth.example.com/token"
+        assert call_args[0][0] == "https://auth.example.com/token"
         posted_data = call_args.kwargs.get("data") or call_args[1].get("data")
         assert posted_data["grant_type"] == "client_credentials"
         assert posted_data["client_id"] == "c1"
@@ -518,3 +518,130 @@ class TestAcquireSmartToken:
 
             with pytest.raises(httpx.ConnectError):
                 await _acquire_smart_token(_SMART_CREDENTIALS)
+
+    async def test_ssrf_blocked_http_external(self):
+        """_acquire_smart_token rejects plain http for non-localhost token_endpoint."""
+        creds = {
+            "client_id": "c1",
+            "client_secret": "s1",
+            "token_endpoint": "http://evil.example.com/token",
+        }
+        with pytest.raises(ValueError, match="SSRF protection"):
+            await _acquire_smart_token(creds)
+
+    async def test_ssrf_blocked_rfc1918(self):
+        """_acquire_smart_token rejects RFC-1918 addresses."""
+        creds = {
+            "client_id": "c1",
+            "client_secret": "s1",
+            "token_endpoint": "https://192.168.1.1/token",
+        }
+        with pytest.raises(ValueError, match="SSRF protection"):
+            await _acquire_smart_token(creds)
+
+    async def test_ssrf_allowed_localhost_http(self):
+        """_acquire_smart_token allows http://localhost for local dev."""
+        creds = {
+            "client_id": "c1",
+            "client_secret": "s1",
+            "token_endpoint": "http://localhost:9090/token",
+        }
+        token_response = httpx.Response(
+            200,
+            json={"access_token": "local-tok"},
+            request=httpx.Request("POST", "http://localhost:9090/token"),
+        )
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(return_value=token_response)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            token = await _acquire_smart_token(creds)
+        assert token == "local-tok"
+
+    async def test_ssrf_allowed_127_http(self):
+        """_acquire_smart_token allows http://127.0.0.1 for local dev."""
+        creds = {
+            "client_id": "c1",
+            "client_secret": "s1",
+            "token_endpoint": "http://127.0.0.1:8080/token",
+        }
+        token_response = httpx.Response(
+            200,
+            json={"access_token": "loopback-tok"},
+            request=httpx.Request("POST", "http://127.0.0.1:8080/token"),
+        )
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(return_value=token_response)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            token = await _acquire_smart_token(creds)
+        assert token == "loopback-tok"
+
+
+# ---------------------------------------------------------------------------
+# _validate_ssrf_url
+# ---------------------------------------------------------------------------
+
+
+class TestValidateSsrfUrl:
+    def test_https_external_allowed(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        _validate_ssrf_url("https://fhir.example.com/token")  # should not raise
+
+    def test_http_localhost_allowed(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        _validate_ssrf_url("http://localhost:8080/fhir")  # should not raise
+
+    def test_http_127_allowed(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        _validate_ssrf_url("http://127.0.0.1/fhir")  # should not raise
+
+    def test_http_external_blocked(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="must use https"):
+            _validate_ssrf_url("http://external.example.com/fhir")
+
+    def test_ftp_blocked(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="not allowed"):
+            _validate_ssrf_url("ftp://example.com/file")
+
+    def test_rfc1918_10_blocked(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="RFC-1918"):
+            _validate_ssrf_url("https://10.0.0.1/fhir")
+
+    def test_rfc1918_172_blocked(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="RFC-1918"):
+            _validate_ssrf_url("https://172.16.0.1/fhir")
+
+    def test_rfc1918_192_168_blocked(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="RFC-1918"):
+            _validate_ssrf_url("https://192.168.100.200/fhir")
+
+    def test_imds_endpoint_blocked(self):
+        """Classic AWS IMDSv1 endpoint — http with non-local host is blocked."""
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="must use https"):
+            _validate_ssrf_url("http://169.254.169.254/latest/meta-data/")
+
+
+async def test_verify_fhir_connection_ssrf_blocked():
+    """verify_fhir_connection raises ValueError for http non-localhost URLs."""
+    with pytest.raises(ValueError, match="SSRF protection"):
+        await fhir_test_connection("http://internal.corp.example.com/fhir")

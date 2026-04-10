@@ -6,7 +6,9 @@ Handles all HTTP communication with HAPI FHIR servers (CDR and measure engine).
 import abc
 import asyncio
 import logging
+import re
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -14,6 +16,52 @@ from app.config import settings
 from app.models.config import AuthType
 
 logger = logging.getLogger(__name__)
+
+# RFC-1918 private ranges: 10.x, 172.16-31.x, 192.168.x
+_RFC1918_PATTERN = re.compile(
+    r"^("
+    r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
+    r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
+    r"|192\.168\.\d{1,3}\.\d{1,3}"
+    r")$"
+)
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1"}
+
+
+def _validate_ssrf_url(url: str, label: str = "URL") -> None:
+    """Reject URLs that could be used for SSRF attacks.
+
+    Rules:
+    - Only https is allowed unless the host is localhost/127.0.0.1 (local dev exception).
+    - Hosts that resolve to RFC-1918 addresses are rejected unless they are
+      localhost or 127.0.0.1 (local dev exception).
+
+    Raises ValueError with a descriptive message on rejection.
+    """
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname or ""
+
+    is_local = host in _LOCAL_HOSTS
+
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            f"SSRF protection: {label} scheme '{scheme}' is not allowed. "
+            "Only https (or http for localhost) is permitted."
+        )
+
+    if scheme == "http" and not is_local:
+        raise ValueError(
+            f"SSRF protection: {label} must use https for non-localhost hosts "
+            f"(got http://{host})."
+        )
+
+    if _RFC1918_PATTERN.match(host) and not is_local:
+        raise ValueError(
+            f"SSRF protection: {label} resolves to a private RFC-1918 address "
+            f"({host}). Use a publicly routable host or localhost."
+        )
 
 
 async def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:
@@ -46,6 +94,8 @@ async def _acquire_smart_token(credentials: dict) -> str:
     missing = required - credentials.keys()
     if missing:
         raise ValueError(f"SMART credentials missing required fields: {', '.join(sorted(missing))}")
+
+    _validate_ssrf_url(credentials["token_endpoint"], label="token_endpoint")
 
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.post(
@@ -412,6 +462,7 @@ async def verify_fhir_connection(
     auth_credentials: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Test connectivity to a FHIR server by fetching its metadata."""
+    _validate_ssrf_url(fhir_url, label="cdr_url")
     headers = await _build_auth_headers(auth_type, auth_credentials)
     url = f"{fhir_url}/metadata"
     async with httpx.AsyncClient(timeout=15.0) as client:
