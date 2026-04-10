@@ -93,14 +93,6 @@ async def _run_schema_migrations(conn) -> None:
         # Add warning_message to bundle_uploads
         await conn.execute(text("ALTER TABLE bundle_uploads ADD COLUMN IF NOT EXISTS warning_message TEXT"))
 
-        # Seed the Local CDR row (idempotent via ON CONFLICT DO NOTHING)
-        await conn.execute(
-            text("""
-            INSERT INTO cdr_configs (cdr_url, auth_type, is_active, name, is_default, is_read_only)
-            VALUES ('http://hapi-fhir-cdr:8080/fhir', 'none', TRUE, 'Local CDR', TRUE, FALSE)
-            ON CONFLICT (name) DO NOTHING
-        """)
-        )
         # Update existing row that matches the default URL but has no name yet
         await conn.execute(
             text("""
@@ -117,6 +109,8 @@ async def lifespan(app: FastAPI):
     """Startup: create DB tables and launch background worker.
     Shutdown: signal worker to stop.
     """
+    from sqlalchemy import text
+
     # Run schema migrations outside a transaction (required for ALTER TYPE ADD VALUE in Postgres)
     async with engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
@@ -124,6 +118,17 @@ async def lifespan(app: FastAPI):
     # Create any missing tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # Seed built-in Local CDR row after tables exist (idempotent, separate connection)
+    async with engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+        if conn.dialect.name == "postgresql":
+            await conn.execute(
+                text("""
+                INSERT INTO cdr_configs (cdr_url, auth_type, is_active, name, is_default, is_read_only)
+                VALUES ('http://hapi-fhir-cdr:8080/fhir', 'none', TRUE, 'Local CDR', TRUE, FALSE)
+                ON CONFLICT (name) DO NOTHING
+            """)
+            )
     logger.info("Database tables created")
 
     # Start background worker
