@@ -9,11 +9,8 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import select
-
 from app.config import settings
 from app.db import async_session
-from app.models.config import CDRConfig
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
 from app.services.fhir_client import (
     BatchQueryStrategy,
@@ -186,12 +183,16 @@ async def run_job(job_id: int) -> None:
 
 
 async def _get_cdr_auth_headers(job_id: int) -> dict[str, str]:
-    """Resolve auth headers from the active CDR config."""
+    """Resolve auth headers from the job's stamped CDR credentials.
+
+    Reads cdr_auth_type / cdr_auth_credentials from the Job row (stamped at
+    creation time) so the orchestrator is not affected by active CDR changes
+    after the job was created.
+    """
     async with async_session() as session:
-        result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
-        config = result.scalar_one_or_none()
-        if config:
-            return await _build_auth_headers(config.auth_type, config.auth_credentials)
+        job = await session.get(Job, job_id)
+        if job and job.cdr_auth_type:
+            return await _build_auth_headers(job.cdr_auth_type, job.cdr_auth_credentials)
     return {}
 
 
