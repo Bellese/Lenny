@@ -64,6 +64,12 @@ async def _run_schema_migrations(conn) -> None:
     from sqlalchemy import text
 
     if conn.dialect.name == "postgresql":
+        # Check if tables already exist (skip migrations on a fresh DB — create_all handles those)
+        result = await conn.execute(text("SELECT to_regtype('authtype')"))
+        authtype_exists = result.scalar() is not None
+        if not authtype_exists:
+            return
+
         # AuthType enum: add 'smart' value if not present
         await conn.execute(text("ALTER TYPE authtype ADD VALUE IF NOT EXISTS 'smart'"))
 
