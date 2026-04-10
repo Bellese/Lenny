@@ -200,9 +200,15 @@ async def test_get_groups_success(client):
         {"id": "CMS122FHIRDiabetes", "name": "CMS122 Diabetes", "type": "person", "member_count": 20},
         {"id": "CMS349FHIRHIVScreening", "name": "CMS349 HIV Screening", "type": "person", "member_count": 36},
     ]
-    with patch("app.routes.jobs.list_groups", new=AsyncMock(return_value=mock_groups)):
+    with (
+        patch("app.routes.jobs.list_groups", new=AsyncMock(return_value=mock_groups)) as mock_lg,
+        patch("app.routes.jobs._build_auth_headers", new=AsyncMock(return_value={})) as mock_auth,
+    ):
         resp = await client.get("/jobs/groups")
+
     assert resp.status_code == 200
+    mock_auth.assert_called_once()
+    mock_lg.assert_called_once()
     data = resp.json()
     assert "groups" in data
     assert len(data["groups"]) == 2
@@ -223,7 +229,13 @@ async def test_get_groups_cdr_unreachable(client):
 
 async def test_create_job_stamps_active_cdr_metadata(client, test_session):
     """POST /jobs stamps cdr_name and cdr_read_only from the active CDR config."""
+    from sqlalchemy import update as sa_update
+
     from app.models.config import AuthType, CDRConfig
+
+    # Deactivate any existing active CDR rows first
+    await test_session.execute(sa_update(CDRConfig).values(is_active=False))
+    await test_session.commit()
 
     cdr = CDRConfig(
         cdr_url="http://prod-cdr.example.com/fhir",
