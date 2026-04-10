@@ -282,6 +282,7 @@ async def activate_connection(
 @router.post("/test-connection")
 async def test_cdr_connection(body: TestConnectionRequest) -> dict:
     """Test connectivity to a FHIR server."""
+    _validate_auth_type(body.auth_type)
     _validate_smart_credentials(body.auth_type, body.auth_credentials)
     try:
         result = await verify_fhir_connection(

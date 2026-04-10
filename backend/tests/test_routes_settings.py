@@ -59,8 +59,9 @@ async def test_create_connection_invalid_auth_type(client):
     payload = {"name": "Bad Auth", "cdr_url": "http://example.com/fhir", "auth_type": "oauth2"}
     resp = await client.post("/settings/connections", json=payload)
     assert resp.status_code == 400
-    detail = resp.json()["detail"]
-    assert "Invalid auth_type" in detail["issue"][0]["diagnostics"]
+    diag = resp.json()["detail"]["issue"][0]["diagnostics"]
+    assert "Invalid auth_type: oauth2" in diag
+    assert "none, basic, bearer, smart" in diag
 
 
 async def test_create_connection_smart_missing_credentials(client):
@@ -359,6 +360,18 @@ async def test_test_connection_smart_missing_credentials(client):
     assert resp.status_code == 400
     detail = resp.json()["detail"]
     assert "SMART on FHIR" in detail["issue"][0]["diagnostics"]
+
+
+async def test_test_connection_invalid_auth_type(client):
+    """POST /settings/test-connection with an invalid auth_type returns 400."""
+    resp = await client.post(
+        "/settings/test-connection",
+        json={"cdr_url": "http://example.com/fhir", "auth_type": "oauth2"},
+    )
+    assert resp.status_code == 400
+    diag = resp.json()["detail"]["issue"][0]["diagnostics"]
+    assert "Invalid auth_type: oauth2" in diag
+    assert "none, basic, bearer, smart" in diag
 
 
 async def test_test_connection_failure_does_not_leak_hostname():
