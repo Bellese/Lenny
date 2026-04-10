@@ -555,7 +555,12 @@ class TestProcessBundleUpload:
                 ctx.__aexit__ = AsyncMock(return_value=False)
                 return ctx
 
-            triage_summary = {"measures_loaded": 1, "patients_loaded": 1, "expected_results_loaded": 1}
+            triage_summary = {
+                "measures_loaded": 1,
+                "patients_loaded": 1,
+                "expected_results_loaded": 1,
+                "warning_message": None,
+            }
 
             with patch("app.services.validation.async_session", side_effect=lambda: make_ctx()):
                 with patch(  # noqa: E501
@@ -571,6 +576,7 @@ class TestProcessBundleUpload:
             assert upload.measures_loaded == 1
             assert upload.patients_loaded == 1
             assert upload.expected_results_loaded == 1
+            assert upload.warning_message is None
         finally:
             os.unlink(tmp_path)
 
