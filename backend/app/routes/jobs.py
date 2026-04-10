@@ -131,7 +131,7 @@ async def get_groups(
     result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
     config = result.scalar_one_or_none()
     cdr_url = config.cdr_url if config else settings.DEFAULT_CDR_URL
-    auth_headers = _build_auth_headers(config.auth_type, config.auth_credentials) if config else {}
+    auth_headers = await _build_auth_headers(config.auth_type, config.auth_credentials) if config else {}
 
     try:
         groups = await list_groups(cdr_url, auth_headers)

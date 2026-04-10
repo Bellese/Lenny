@@ -7,6 +7,7 @@ import pytest
 
 from app.services.fhir_client import (
     BatchQueryStrategy,
+    _acquire_smart_token,
     _build_auth_headers,
     evaluate_measure,
     list_measures,
@@ -36,17 +37,17 @@ def _make_response(status_code: int, json_data: dict) -> httpx.Response:
 
 
 class TestBuildAuthHeaders:
-    def test_no_auth(self):
-        result = _build_auth_headers("none", None)
+    async def test_no_auth(self):
+        result = await _build_auth_headers("none", None)
         assert result == {}
 
-    def test_no_auth_with_credentials(self):
+    async def test_no_auth_with_credentials(self):
         """Even with credentials, 'none' auth type returns empty."""
-        result = _build_auth_headers("none", {"username": "u", "password": "p"})
+        result = await _build_auth_headers("none", {"username": "u", "password": "p"})
         assert result == {}
 
-    def test_basic_auth(self):
-        result = _build_auth_headers("basic", {"username": "admin", "password": "secret"})
+    async def test_basic_auth(self):
+        result = await _build_auth_headers("basic", {"username": "admin", "password": "secret"})
         assert "Authorization" in result
         assert result["Authorization"].startswith("Basic ")
         import base64
@@ -54,17 +55,31 @@ class TestBuildAuthHeaders:
         decoded = base64.b64decode(result["Authorization"].split(" ")[1]).decode()
         assert decoded == "admin:secret"
 
-    def test_bearer_auth(self):
-        result = _build_auth_headers("bearer", {"token": "my-jwt"})
+    async def test_bearer_auth(self):
+        result = await _build_auth_headers("bearer", {"token": "my-jwt"})
         assert result == {"Authorization": "Bearer my-jwt"}
 
-    def test_unknown_auth_type(self):
-        result = _build_auth_headers("oauth2", {"token": "abc"})
+    async def test_unknown_auth_type(self):
+        result = await _build_auth_headers("oauth2", {"token": "abc"})
         assert result == {}
 
-    def test_basic_auth_no_credentials(self):
-        result = _build_auth_headers("basic", None)
+    async def test_basic_auth_no_credentials(self):
+        result = await _build_auth_headers("basic", None)
         assert result == {}
+
+    async def test_smart_auth(self):
+        """_build_auth_headers with SMART type calls _acquire_smart_token internally."""
+        credentials = {
+            "client_id": "c1",
+            "client_secret": "s1",
+            "token_endpoint": "http://auth.example.com/token",
+        }
+        with patch(
+            "app.services.fhir_client._acquire_smart_token",
+            new=AsyncMock(return_value="smart-token-abc"),
+        ):
+            result = await _build_auth_headers("smart", credentials)
+        assert result == {"Authorization": "Bearer smart-token-abc"}
 
 
 # ---------------------------------------------------------------------------
@@ -420,3 +435,86 @@ async def test_upload_measure_bundle():
         result = await upload_measure_bundle(input_bundle)
 
     assert result["type"] == "transaction-response"
+
+
+# ---------------------------------------------------------------------------
+# _acquire_smart_token
+# ---------------------------------------------------------------------------
+
+
+_SMART_CREDENTIALS = {
+    "client_id": "c1",
+    "client_secret": "s1",
+    "token_endpoint": "http://auth.example.com/token",
+}
+
+
+class TestAcquireSmartToken:
+    async def test_success(self):
+        """_acquire_smart_token returns the access_token on success."""
+        token_response = httpx.Response(
+            200,
+            json={"access_token": "tok123", "token_type": "bearer"},
+            request=httpx.Request("POST", "http://auth.example.com/token"),
+        )
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(return_value=token_response)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            token = await _acquire_smart_token(_SMART_CREDENTIALS)
+
+        assert token == "tok123"
+        call_args = mock_ctx.post.call_args
+        assert call_args[0][0] == "http://auth.example.com/token"
+        posted_data = call_args.kwargs.get("data") or call_args[1].get("data")
+        assert posted_data["grant_type"] == "client_credentials"
+        assert posted_data["client_id"] == "c1"
+        assert posted_data["client_secret"] == "s1"
+
+    async def test_401_raises(self):
+        """_acquire_smart_token raises HTTPStatusError on 401."""
+        error_response = httpx.Response(
+            401,
+            json={"error": "unauthorized"},
+            request=httpx.Request("POST", "http://auth.example.com/token"),
+        )
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(return_value=error_response)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with pytest.raises(httpx.HTTPStatusError):
+                await _acquire_smart_token(_SMART_CREDENTIALS)
+
+    async def test_500_raises(self):
+        """_acquire_smart_token raises HTTPStatusError on 500."""
+        error_response = httpx.Response(
+            500,
+            json={"error": "server error"},
+            request=httpx.Request("POST", "http://auth.example.com/token"),
+        )
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(return_value=error_response)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with pytest.raises(httpx.HTTPStatusError):
+                await _acquire_smart_token(_SMART_CREDENTIALS)
+
+    async def test_network_error_raises(self):
+        """_acquire_smart_token propagates network errors."""
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with pytest.raises(httpx.ConnectError):
+                await _acquire_smart_token(_SMART_CREDENTIALS)

@@ -16,8 +16,8 @@ from app.models.config import AuthType
 logger = logging.getLogger(__name__)
 
 
-def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:
-    """Build HTTP auth headers from CDR config."""
+async def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:
+    """Build HTTP auth headers from CDR config. Async to support SMART token acquisition."""
     if auth_type == AuthType.none or not auth_credentials:
         return {}
     if auth_type == AuthType.basic:
@@ -30,7 +30,37 @@ def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dic
     if auth_type == AuthType.bearer:
         token = auth_credentials.get("token", "")
         return {"Authorization": f"Bearer {token}"}
+    if auth_type == AuthType.smart:
+        token = await _acquire_smart_token(auth_credentials)
+        return {"Authorization": f"Bearer {token}"}
     return {}
+
+
+async def _acquire_smart_token(credentials: dict) -> str:
+    """Exchange client_credentials grant for a bearer token at token_endpoint.
+
+    No token caching — fresh token per request is intentional for the connectathon.
+    Add TTL-based caching post-connectathon if token endpoint rate-limiting becomes an issue.
+    """
+    required = {"token_endpoint", "client_id", "client_secret"}
+    missing = required - credentials.keys()
+    if missing:
+        raise ValueError(f"SMART credentials missing required fields: {', '.join(sorted(missing))}")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            credentials["token_endpoint"],
+            data={
+                "grant_type": "client_credentials",
+                "client_id": credentials["client_id"],
+                "client_secret": credentials["client_secret"],
+            },
+        )
+        resp.raise_for_status()
+        token = resp.json().get("access_token")
+        if not token:
+            raise ValueError("SMART token endpoint response missing 'access_token'")
+        return token
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +412,7 @@ async def verify_fhir_connection(
     auth_credentials: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Test connectivity to a FHIR server by fetching its metadata."""
-    headers = _build_auth_headers(auth_type, auth_credentials)
+    headers = await _build_auth_headers(auth_type, auth_credentials)
     url = f"{fhir_url}/metadata"
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers=headers)

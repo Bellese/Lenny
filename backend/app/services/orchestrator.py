@@ -191,7 +191,7 @@ async def _get_cdr_auth_headers(job_id: int) -> dict[str, str]:
         result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         config = result.scalar_one_or_none()
         if config:
-            return _build_auth_headers(config.auth_type, config.auth_credentials)
+            return await _build_auth_headers(config.auth_type, config.auth_credentials)
     return {}
 
 

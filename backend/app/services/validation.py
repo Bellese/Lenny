@@ -419,7 +419,7 @@ async def run_validation(validation_run_id: int) -> None:
             active_cdr = cdr_result.scalar_one_or_none()
             if active_cdr:
                 cdr_url = active_cdr.cdr_url
-                auth_headers = _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials)
+                auth_headers = await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials)
             else:
                 cdr_url = settings.DEFAULT_CDR_URL
                 auth_headers = {}
