@@ -35,7 +35,7 @@ See `docs/testing.md` for the full testing strategy.
 
 ## Workflow
 
-Branches: `feature/*`, `fix/*`, or `chore/*` off `master`, merged via PR. Always work in a git worktree (`git worktree add ../mct2-<branch> -b <branch> origin/master`) — never commit directly on the current branch.
+Branches: `feature/*`, `fix/*`, or `chore/*` off `main`, merged via PR. Always work in a git worktree (`git worktree add ../mct2-<branch> -b <branch> origin/main`) — never commit directly on the current branch.
 Work items: GitHub Issues on the [project board](https://github.com/orgs/Bellese/projects/33/views/3).
 
 Follow this lifecycle for each issue. Update the issue after each phase before moving on.
