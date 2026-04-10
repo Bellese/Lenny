@@ -53,10 +53,7 @@ def _validate_ssrf_url(url: str, label: str = "URL") -> None:
         )
 
     if scheme == "http" and not is_local:
-        raise ValueError(
-            f"SSRF protection: {label} must use https for non-localhost hosts "
-            f"(got http://{host})."
-        )
+        raise ValueError(f"SSRF protection: {label} must use https for non-localhost hosts (got http://{host}).")
 
     if _RFC1918_PATTERN.match(host) and not is_local:
         raise ValueError(

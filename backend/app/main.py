@@ -96,8 +96,7 @@ async def _run_schema_migrations(conn) -> None:
         # Enforce at most one active CDR row (partial unique index — Postgres only)
         await conn.execute(
             text(
-                "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_cdr"
-                " ON cdr_configs (is_active) WHERE is_active = TRUE"
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_cdr ON cdr_configs (is_active) WHERE is_active = TRUE"
             )
         )
 

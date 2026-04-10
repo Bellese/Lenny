@@ -68,7 +68,12 @@ async def health_check(
                 }
                 status["status"] = "degraded"
     except Exception as exc:
-        status["cdr"] = {"status": "disconnected", "name": cdr.name, "is_read_only": cdr.is_read_only, "error": sanitize_error(exc)[:200]}
+        status["cdr"] = {
+            "status": "disconnected",
+            "name": cdr.name,
+            "is_read_only": cdr.is_read_only,
+            "error": sanitize_error(exc)[:200],
+        }
         status["status"] = "degraded"
 
     return status
