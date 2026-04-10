@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.2.1] - 2026-04-10
+
+### Fixed
+- Bundle upload path collision: two concurrent uploads of the same filename within the
+  same second no longer overwrite each other. A `uuid4` hex token is now embedded in
+  the saved filename (`{timestamp}-{uuid4}-{basename}`), guaranteeing unique paths
+  regardless of upload timing. Closes #63.
+
 ## [0.0.2.0] - 2026-04-09
 
 ### Added
