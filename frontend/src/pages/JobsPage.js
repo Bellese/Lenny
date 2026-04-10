@@ -81,13 +81,10 @@ export default function JobsPage() {
       const data = await getMeasures();
       const list = Array.isArray(data) ? data : data.measures || data.entry || [];
       setMeasures(list);
-      if (list.length > 0 && !formData.measure_id) {
-        setFormData(prev => ({ ...prev, measure_id: list[0].id || '' }));
-      }
     } catch {
       // Non-blocking
     }
-  }, [formData.measure_id]);
+  }, []);
 
   const loadGroups = useCallback(async () => {
     try {
@@ -103,6 +100,12 @@ export default function JobsPage() {
     loadMeasures();
     loadGroups();
   }, [loadJobs, loadMeasures, loadGroups]);
+
+  useEffect(() => {
+    if (measures.length > 0 && !formData.measure_id) {
+      setFormData(prev => ({ ...prev, measure_id: measures[0].id || '' }));
+    }
+  }, [measures]);
 
   // Polling for in-progress jobs
   useEffect(() => {

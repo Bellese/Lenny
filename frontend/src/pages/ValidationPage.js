@@ -175,7 +175,7 @@ export default function ValidationPage() {
                     <td>
                       <StatusBadge status={u.status} />
                       {u.warning_message && (
-                        <span className={styles.uploadWarning} title={u.warning_message}>&#x26A0; read-only</span>
+                        <span className={styles.uploadWarning} title={u.warning_message}>&#x26A0; {u.warning_message}</span>
                       )}
                     </td>
                     <td>{u.measures_loaded}</td>

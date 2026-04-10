@@ -211,7 +211,7 @@ export default function SettingsPage() {
             <StatusIndicator
               label="Measure Engine"
               status={health?.measure_engine?.status}
-              detail={health?.measure_engine_url}
+              detail={health?.measure_engine?.error}
             />
             <StatusIndicator
               label="CDR"
