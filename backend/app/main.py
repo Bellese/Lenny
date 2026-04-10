@@ -81,6 +81,11 @@ async def _run_schema_migrations(conn) -> None:
         ]:
             await conn.execute(text(stmt))
 
+        # Unique constraint on name (required for ON CONFLICT (name) seed upsert)
+        await conn.execute(
+            text("CREATE UNIQUE INDEX IF NOT EXISTS uq_cdr_configs_name ON cdr_configs (name)")
+        )
+
         # Add new columns to jobs
         for stmt in [
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_name VARCHAR(512)",
