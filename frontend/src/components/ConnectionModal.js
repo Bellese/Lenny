@@ -179,10 +179,11 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
           {testResult && (
             <div className={`${styles.testResult} ${testResult.success ? styles.testSuccess : styles.testFailure}`} role="status">
               <span aria-hidden="true">{testResult.success ? '\u2713' : '\u2717'}</span>
-              <div>
+              <div className={styles.testContent}>
                 <p className={styles.testMessage}>{testResult.message}</p>
                 {testResult.response_time && <p className={styles.testDetail}>Response time: {testResult.response_time}ms</p>}
               </div>
+              <button className={styles.testDismiss} onClick={() => setTestResult(null)} aria-label="Dismiss">&#x2715;</button>
             </div>
           )}
 

@@ -33,7 +33,21 @@ async function request(path, options = {}) {
     } catch {
       // Response may not be JSON
     }
-    const message = body?.detail || body?.message || `Request failed: ${response.status} ${response.statusText}`;
+    const raw = body?.detail || body?.message;
+    let message;
+    if (!raw) {
+      message = `Request failed: ${response.status} ${response.statusText}`;
+    } else if (typeof raw === 'string') {
+      message = raw;
+    } else if (raw?.issue?.[0]?.diagnostics) {
+      // FHIR OperationOutcome
+      message = raw.issue[0].diagnostics;
+    } else if (Array.isArray(raw)) {
+      // FastAPI validation error array
+      message = raw.map(e => e.msg || JSON.stringify(e)).join('; ');
+    } else {
+      message = `Request failed: ${response.status} ${response.statusText}`;
+    }
     throw new ApiError(message, response.status, body);
   }
 
