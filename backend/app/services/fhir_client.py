@@ -7,6 +7,7 @@ import abc
 import asyncio
 import logging
 import re
+import time
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -466,11 +467,14 @@ async def verify_fhir_connection(
     headers = await _build_auth_headers(auth_type, auth_credentials)
     url = f"{fhir_url}/metadata"
     async with httpx.AsyncClient(timeout=15.0) as client:
+        t0 = time.monotonic()
         resp = await client.get(url, headers=headers)
+        response_time_ms = round((time.monotonic() - t0) * 1000)
         resp.raise_for_status()
         data = resp.json()
         return {
             "status": "connected",
             "fhir_version": data.get("fhirVersion", "unknown"),
             "software": data.get("software", {}).get("name", "unknown"),
+            "response_time": response_time_ms,
         }

@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import styles from './SettingsPage.module.css';
 import { getConnections, deleteConnection, activateConnection, getHealth } from '../api/client';
 import ConnectionModal from '../components/ConnectionModal';
+import { useToast } from '../components/Toast';
 
 function StatusIndicator({ label, status, detail }) {
   const isHealthy = status === 'healthy' || status === 'connected' || status === true;
@@ -37,6 +38,7 @@ function StatusIndicator({ label, status, detail }) {
 }
 
 export default function SettingsPage() {
+  const toast = useToast();
   const [connections, setConnections] = useState([]);
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -81,9 +83,11 @@ export default function SettingsPage() {
   };
 
   const handleModalSaved = async () => {
+    const wasEdit = !!editingConnection;
     setModalOpen(false);
     setEditingConnection(null);
     await Promise.all([loadConnections(), loadHealth()]);
+    toast.success(wasEdit ? 'Connection updated successfully' : 'Connection added successfully');
   };
 
   const handleActivate = async (id) => {
@@ -181,6 +185,7 @@ export default function SettingsPage() {
                       className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
                       onClick={() => handleDelete(conn)}
                       disabled={conn.is_default || conn.is_active}
+                      title={conn.is_default ? 'Cannot delete the built-in Local CDR' : conn.is_active ? 'Activate a different connection first, then delete this one' : undefined}
                       aria-label={`Delete ${conn.name}`}
                     >
                       Delete
