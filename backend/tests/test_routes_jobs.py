@@ -27,6 +27,8 @@ async def test_create_job_valid(client):
     assert data["processed_patients"] == 0
     assert data["failed_patients"] == 0
     assert data["id"] is not None
+    assert "cdr_name" in data
+    assert "cdr_read_only" in data
 
 
 async def test_create_job_missing_fields(client):
@@ -50,6 +52,7 @@ async def test_create_job_uses_default_cdr_url(client):
     # Should use the DEFAULT_CDR_URL from settings
     assert data["cdr_url"] is not None
     assert len(data["cdr_url"]) > 0
+    assert data["cdr_read_only"] is False
 
 
 async def test_list_jobs_empty(client):
@@ -216,3 +219,33 @@ async def test_get_groups_cdr_unreachable(client):
         resp = await client.get("/jobs/groups")
     assert resp.status_code == 502
     assert "CDR" in resp.json()["detail"]
+
+
+async def test_create_job_stamps_active_cdr_metadata(client, test_session):
+    """POST /jobs stamps cdr_name and cdr_read_only from the active CDR config."""
+    from app.models.config import AuthType, CDRConfig
+
+    cdr = CDRConfig(
+        cdr_url="http://prod-cdr.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        name="Production CDR",
+        is_default=False,
+        is_read_only=True,
+    )
+    test_session.add(cdr)
+    await test_session.commit()
+
+    resp = await client.post(
+        "/jobs",
+        json={
+            "measure_id": "measure-1",
+            "period_start": "2024-01-01",
+            "period_end": "2024-12-31",
+        },
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["cdr_url"] == "http://prod-cdr.example.com/fhir"
+    assert data["cdr_name"] == "Production CDR"
+    assert data["cdr_read_only"] is True

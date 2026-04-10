@@ -8,6 +8,37 @@ import pytest
 pytestmark = pytest.mark.asyncio
 
 
+async def test_health_response_includes_cdr_name(client, test_session):
+    """GET /health includes cdr name in the cdr section."""
+    from app.models.config import AuthType, CDRConfig
+
+    cdr = CDRConfig(
+        cdr_url="http://my-cdr.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        name="My Test CDR",
+        is_default=False,
+        is_read_only=False,
+    )
+    test_session.add(cdr)
+    await test_session.commit()
+
+    import httpx as _httpx
+
+    mock_response = _httpx.Response(200, json={"resourceType": "CapabilityStatement"})
+    with patch("app.routes.health.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        resp = await client.get("/health")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["cdr"]["status"] == "connected"
+    assert data["cdr"]["name"] == "My Test CDR"
+
+
 async def test_health_all_healthy(client, mock_fhir_metadata):
     """All three services (db, measure engine, CDR) report healthy."""
     mock_response = httpx.Response(200, json=mock_fhir_metadata)

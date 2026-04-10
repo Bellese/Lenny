@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import get_session
+from app.dependencies import CDRContext, get_active_cdr
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -16,7 +17,10 @@ router = APIRouter(tags=["health"])
 
 
 @router.get("/health")
-async def health_check(session: AsyncSession = Depends(get_session)) -> dict:
+async def health_check(
+    session: AsyncSession = Depends(get_session),
+    cdr: CDRContext = Depends(get_active_cdr),
+) -> dict:
     """Check connectivity to database, measure engine, and CDR."""
     status: dict = {
         "status": "healthy",
@@ -52,17 +56,18 @@ async def health_check(session: AsyncSession = Depends(get_session)) -> dict:
     # CDR check
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(f"{settings.DEFAULT_CDR_URL}/metadata")
+            resp = await client.get(f"{cdr.cdr_url}/metadata")
             if resp.status_code == 200:
-                status["cdr"] = {"status": "connected"}
+                status["cdr"] = {"status": "connected", "name": cdr.name}
             else:
                 status["cdr"] = {
                     "status": "disconnected",
+                    "name": cdr.name,
                     "error": f"HTTP {resp.status_code}",
                 }
                 status["status"] = "degraded"
     except Exception as exc:
-        status["cdr"] = {"status": "disconnected", "error": sanitize_error(exc)[:200]}
+        status["cdr"] = {"status": "disconnected", "name": cdr.name, "error": sanitize_error(exc)[:200]}
         status["status"] = "degraded"
 
     return status
