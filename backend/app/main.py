@@ -93,6 +93,14 @@ async def _run_schema_migrations(conn) -> None:
         # Add warning_message to bundle_uploads
         await conn.execute(text("ALTER TABLE bundle_uploads ADD COLUMN IF NOT EXISTS warning_message TEXT"))
 
+        # Enforce at most one active CDR row (partial unique index — Postgres only)
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_cdr"
+                " ON cdr_configs (is_active) WHERE is_active = TRUE"
+            )
+        )
+
         # Update existing row that matches the default URL but has no name yet
         await conn.execute(
             text("""
@@ -118,6 +126,16 @@ async def lifespan(app: FastAPI):
     # Create any missing tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    # Enforce at most one active CDR row on fresh DBs (partial unique index — Postgres only)
+    async with engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+        if conn.dialect.name == "postgresql":
+            await conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_cdr"
+                    " ON cdr_configs (is_active) WHERE is_active = TRUE"
+                )
+            )
     # Seed built-in Local CDR row after tables exist (idempotent, separate connection)
     async with engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")

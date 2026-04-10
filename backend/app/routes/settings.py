@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -266,9 +267,20 @@ async def activate_connection(
     if cfg is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 
-    await session.execute(sa_update(CDRConfig).where(CDRConfig.is_active.is_(True)).values(is_active=False))
-    cfg.is_active = True
-    await session.commit()
+    # Already active — nothing to do
+    if cfg.is_active:
+        return _cfg_to_response(cfg)
+
+    try:
+        await session.execute(sa_update(CDRConfig).where(CDRConfig.is_active.is_(True)).values(is_active=False))
+        cfg.is_active = True
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail="Another connection was activated simultaneously. Please retry.",
+        )
     await session.refresh(cfg)
     return _cfg_to_response(cfg)
 
@@ -293,7 +305,7 @@ async def test_cdr_connection(body: TestConnectionRequest) -> dict:
     except Exception as exc:
         logger.warning(
             "CDR connection test failed",
-            extra={"cdr_url": body.cdr_url, "error": str(exc)},
+            extra={"cdr_url": body.cdr_url, "error": sanitize_error(str(exc))},
         )
         raise HTTPException(
             status_code=502,
