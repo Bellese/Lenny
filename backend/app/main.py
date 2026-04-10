@@ -85,23 +85,25 @@ async def _run_schema_migrations(conn) -> None:
             await conn.execute(text(stmt))
 
         # Add warning_message to bundle_uploads
-        await conn.execute(text(
-            "ALTER TABLE bundle_uploads ADD COLUMN IF NOT EXISTS warning_message TEXT"
-        ))
+        await conn.execute(text("ALTER TABLE bundle_uploads ADD COLUMN IF NOT EXISTS warning_message TEXT"))
 
         # Seed the Local CDR row (idempotent via ON CONFLICT DO NOTHING)
-        await conn.execute(text("""
+        await conn.execute(
+            text("""
             INSERT INTO cdr_configs (cdr_url, auth_type, is_active, name, is_default, is_read_only)
             VALUES ('http://hapi-fhir-cdr:8080/fhir', 'none', TRUE, 'Local CDR', TRUE, FALSE)
             ON CONFLICT (name) DO NOTHING
-        """))
+        """)
+        )
         # Update existing row that matches the default URL but has no name yet
-        await conn.execute(text("""
+        await conn.execute(
+            text("""
             UPDATE cdr_configs
             SET name = 'Local CDR', is_default = TRUE, is_read_only = FALSE
             WHERE cdr_url = 'http://hapi-fhir-cdr:8080/fhir'
               AND (name IS NULL OR name = '')
-        """))
+        """)
+        )
 
 
 @asynccontextmanager
