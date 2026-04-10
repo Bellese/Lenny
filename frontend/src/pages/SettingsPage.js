@@ -156,7 +156,7 @@ export default function SettingsPage() {
                     <div className={styles.connectionUrl} title={conn.cdr_url}>{conn.cdr_url}</div>
                   </div>
                   <div className={styles.connectionBadges}>
-                    <span className={styles.badge}>{conn.auth_type || 'none'}</span>
+                    <span className={styles.badge}>{{ none: 'No Auth', basic: 'Basic', bearer: 'Bearer', smart: 'SMART' }[conn.auth_type] || conn.auth_type || 'No Auth'}</span>
                     {conn.is_read_only && (
                       <span className={`${styles.badge} ${styles.badgeReadOnly}`}>read-only</span>
                     )}
