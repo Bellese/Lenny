@@ -172,7 +172,12 @@ export default function ValidationPage() {
                 {uploads.map(u => (
                   <tr key={u.id}>
                     <td>{u.filename}</td>
-                    <td><StatusBadge status={u.status} /></td>
+                    <td>
+                      <StatusBadge status={u.status} />
+                      {u.warning_message && (
+                        <span className={styles.uploadWarning} title={u.warning_message}>&#x26A0; read-only</span>
+                      )}
+                    </td>
                     <td>{u.measures_loaded}</td>
                     <td>{u.patients_loaded}</td>
                     <td>{u.expected_results_loaded}</td>

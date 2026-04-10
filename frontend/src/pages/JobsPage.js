@@ -243,7 +243,10 @@ export default function JobsPage() {
                   return (
                     <tr key={job.id}>
                       <td className={styles.measureCell}>{getMeasureName(job)}</td>
-                      <td>{job.cdr_name || job.cdr || 'Default'}</td>
+                      <td title={job.cdr_url || undefined}>
+                        {job.cdr_name || job.cdr_url || 'Default'}
+                        {job.cdr_read_only && <span className={styles.cdrReadOnly}>(read-only)</span>}
+                      </td>
                       <td className={styles.periodCell}>
                         {job.period_start && job.period_end
                           ? `${job.period_start} - ${job.period_end}`

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import styles from './SettingsPage.module.css';
-import { getSettings, updateSettings, testConnection, getHealth } from '../api/client';
-import { useToast } from '../components/Toast';
+import { getConnections, deleteConnection, activateConnection, getHealth } from '../api/client';
+import ConnectionModal from '../components/ConnectionModal';
 
 function StatusIndicator({ label, status, detail }) {
   const isHealthy = status === 'healthy' || status === 'connected' || status === true;
@@ -37,36 +37,18 @@ function StatusIndicator({ label, status, detail }) {
 }
 
 export default function SettingsPage() {
-  const [settings, setSettings] = useState({
-    cdr_url: '',
-    auth_type: 'none',
-    username: '',
-    password: '',
-    token: '',
-  });
+  const [connections, setConnections] = useState([]);
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState(null);
-  const toast = useToast();
+  const [modalOpen, setModalOpen] = useState(false);
+  const [editingConnection, setEditingConnection] = useState(null);
 
-  const loadSettings = useCallback(async () => {
-    setLoading(true);
+  const loadConnections = useCallback(async () => {
     try {
-      const data = await getSettings();
-      setSettings(prev => ({
-        ...prev,
-        cdr_url: data.cdr_url || data.cdr?.url || '',
-        auth_type: data.auth_type || data.cdr?.auth_type || 'none',
-        username: data.username || data.cdr?.username || '',
-        password: '', // Never pre-fill password
-        token: '', // Never pre-fill token
-      }));
+      const data = await getConnections();
+      setConnections(Array.isArray(data) ? data : data.connections || []);
     } catch {
-      // May not have settings yet
-    } finally {
-      setLoading(false);
+      setConnections([]);
     }
   }, []);
 
@@ -80,64 +62,47 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    loadSettings();
-    loadHealth();
-  }, [loadSettings, loadHealth]);
+    Promise.all([loadConnections(), loadHealth()]).finally(() => setLoading(false));
+  }, [loadConnections, loadHealth]);
 
-  const handleChange = (field) => (e) => {
-    setSettings(prev => ({ ...prev, [field]: e.target.value }));
-    setTestResult(null);
+  const handleOpenAdd = () => {
+    setEditingConnection(null);
+    setModalOpen(true);
   };
 
-  const handleTestConnection = async () => {
-    setTesting(true);
-    setTestResult(null);
-    let succeeded = false;
+  const handleOpenEdit = (conn) => {
+    setEditingConnection(conn);
+    setModalOpen(true);
+  };
+
+  const handleModalClose = () => {
+    setModalOpen(false);
+    setEditingConnection(null);
+  };
+
+  const handleModalSaved = async () => {
+    setModalOpen(false);
+    setEditingConnection(null);
+    await Promise.all([loadConnections(), loadHealth()]);
+  };
+
+  const handleActivate = async (id) => {
     try {
-      const result = await testConnection({
-        cdr_url: settings.cdr_url,
-        auth_type: settings.auth_type,
-        username: settings.auth_type === 'basic' ? settings.username : undefined,
-        password: settings.auth_type === 'basic' ? settings.password : undefined,
-        token: settings.auth_type === 'bearer' ? settings.token : undefined,
-      });
-      setTestResult({ success: true, message: result.message || 'Connected successfully', response_time: result.response_time });
-      succeeded = true;
+      await activateConnection(id);
+      await Promise.all([loadConnections(), loadHealth()]);
     } catch (err) {
-      setTestResult({
-        success: false,
-        message: err.message || 'Connection failed',
-        hint: 'Check that the CDR URL is correct and the server is running.',
-      });
-    } finally {
-      setTesting(false);
-    }
-    if (succeeded) {
-      // Update CDR health state directly from the test result rather than re-fetching
-      // /health, which evaluates the *saved* config. If the user edited the URL without
-      // saving first, re-fetching would reflect the old URL and produce a contradictory
-      // "Connected successfully" + red indicator (#58).
-      setHealth(prev => prev ? { ...prev, cdr: { status: 'connected' } } : null);
+      alert(err.message || 'Failed to activate connection');
     }
   };
 
-  const handleSave = async (e) => {
-    e.preventDefault();
-    setSaving(true);
+  const handleDelete = async (conn) => {
+    if (!window.confirm(`Delete connection "${conn.name}"?`)) return;
     try {
-      await updateSettings({
-        cdr_url: settings.cdr_url,
-        auth_type: settings.auth_type,
-        username: settings.auth_type === 'basic' ? settings.username : undefined,
-        password: settings.auth_type === 'basic' ? settings.password : undefined,
-        token: settings.auth_type === 'bearer' ? settings.token : undefined,
-      });
-      toast.success('Settings saved');
-      await loadHealth();
+      await deleteConnection(conn.id);
+      await loadConnections();
     } catch (err) {
-      toast.error(`Failed to save: ${err.message}`);
-    } finally {
-      setSaving(false);
+      const diag = err.body?.detail?.issue?.[0]?.diagnostics;
+      alert(diag || err.message || 'Failed to delete connection');
     }
   };
 
@@ -159,115 +124,72 @@ export default function SettingsPage() {
       <h1 className={styles.title}>Settings</h1>
 
       <div className={styles.sections}>
-        {/* CDR Connection */}
+        {/* CDR Connections */}
         <section className={styles.section}>
-          <h2 className={styles.sectionTitle}>CDR Connection</h2>
-          <form onSubmit={handleSave} className={styles.form}>
-            <div className={styles.formGroup}>
-              <label htmlFor="cdr-url" className={styles.label}>CDR URL</label>
-              <input
-                id="cdr-url"
-                type="url"
-                value={settings.cdr_url}
-                onChange={handleChange('cdr_url')}
-                placeholder="http://localhost:8080/fhir"
-                className={styles.input}
-              />
-            </div>
+          <div className={styles.sectionHeader}>
+            <h2 className={styles.sectionTitle}>CDR Connections</h2>
+            <button className={styles.addBtn} onClick={handleOpenAdd}>
+              Add Connection
+            </button>
+          </div>
 
-            <div className={styles.formGroup}>
-              <label htmlFor="auth-type" className={styles.label}>Authentication</label>
-              <select
-                id="auth-type"
-                value={settings.auth_type}
-                onChange={handleChange('auth_type')}
-                className={styles.select}
-              >
-                <option value="none">None</option>
-                <option value="basic">Basic Auth</option>
-                <option value="bearer">Bearer Token</option>
-              </select>
-            </div>
-
-            {settings.auth_type === 'basic' && (
-              <div className={styles.formRow}>
-                <div className={styles.formGroup}>
-                  <label htmlFor="username" className={styles.label}>Username</label>
-                  <input
-                    id="username"
-                    type="text"
-                    value={settings.username}
-                    onChange={handleChange('username')}
-                    className={styles.input}
-                    autoComplete="username"
+          {connections.length === 0 ? (
+            <div className={styles.emptyState}>No connections configured.</div>
+          ) : (
+            <div className={styles.connectionList}>
+              {connections.map(conn => (
+                <div
+                  key={conn.id}
+                  className={styles.connectionRow}
+                  data-active={conn.is_active ? 'true' : 'false'}
+                >
+                  <span
+                    className={styles.connectionDot}
+                    data-active={conn.is_active ? 'true' : 'false'}
+                    aria-label={conn.is_active ? 'Active' : 'Inactive'}
                   />
+                  <div className={styles.connectionInfo}>
+                    <div className={styles.connectionName}>
+                      {conn.name}
+                      {conn.is_active && <span style={{ marginLeft: 6, fontWeight: 'normal', color: 'var(--color-success)', fontSize: 'var(--font-size-sm)' }}>(active)</span>}
+                    </div>
+                    <div className={styles.connectionUrl} title={conn.cdr_url}>{conn.cdr_url}</div>
+                  </div>
+                  <div className={styles.connectionBadges}>
+                    <span className={styles.badge}>{conn.auth_type || 'none'}</span>
+                    {conn.is_read_only && (
+                      <span className={`${styles.badge} ${styles.badgeReadOnly}`}>read-only</span>
+                    )}
+                  </div>
+                  <div className={styles.connectionActions}>
+                    <button
+                      className={styles.iconBtn}
+                      onClick={() => handleOpenEdit(conn)}
+                      aria-label={`Edit ${conn.name}`}
+                    >
+                      Edit
+                    </button>
+                    <button
+                      className={styles.iconBtn}
+                      onClick={() => handleActivate(conn.id)}
+                      disabled={conn.is_active}
+                      aria-label={`Activate ${conn.name}`}
+                    >
+                      Activate
+                    </button>
+                    <button
+                      className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
+                      onClick={() => handleDelete(conn)}
+                      disabled={conn.is_default || conn.is_active}
+                      aria-label={`Delete ${conn.name}`}
+                    >
+                      Delete
+                    </button>
+                  </div>
                 </div>
-                <div className={styles.formGroup}>
-                  <label htmlFor="password" className={styles.label}>Password</label>
-                  <input
-                    id="password"
-                    type="password"
-                    value={settings.password}
-                    onChange={handleChange('password')}
-                    className={styles.input}
-                    autoComplete="current-password"
-                  />
-                </div>
-              </div>
-            )}
-
-            {settings.auth_type === 'bearer' && (
-              <div className={styles.formGroup}>
-                <label htmlFor="token" className={styles.label}>Bearer Token</label>
-                <input
-                  id="token"
-                  type="password"
-                  value={settings.token}
-                  onChange={handleChange('token')}
-                  className={styles.input}
-                  autoComplete="off"
-                />
-              </div>
-            )}
-
-            {/* Test connection result */}
-            {testResult && (
-              <div className={`${styles.testResult} ${testResult.success ? styles.testSuccess : styles.testFailure}`} role="status">
-                <span className={styles.testIcon} aria-hidden="true">
-                  {testResult.success ? '\u2713' : '\u2717'}
-                </span>
-                <div>
-                  <p className={styles.testMessage}>{testResult.message}</p>
-                  {testResult.response_time && (
-                    <p className={styles.testDetail}>Response time: {testResult.response_time}ms</p>
-                  )}
-                  {testResult.hint && (
-                    <p className={styles.testDetail}>{testResult.hint}</p>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <div className={styles.actions}>
-              <button
-                type="button"
-                className={styles.secondaryBtn}
-                onClick={handleTestConnection}
-                disabled={testing || !settings.cdr_url}
-                aria-busy={testing}
-              >
-                {testing ? 'Testing...' : 'Test Connection'}
-              </button>
-              <button
-                type="submit"
-                className={styles.primaryBtn}
-                disabled={saving}
-                aria-busy={saving}
-              >
-                {saving ? 'Saving...' : 'Save'}
-              </button>
+              ))}
             </div>
-          </form>
+          )}
         </section>
 
         {/* System Status */}
@@ -294,7 +216,7 @@ export default function SettingsPage() {
             <StatusIndicator
               label="CDR"
               status={health?.cdr?.status}
-              detail={health?.cdr_response_time ? `${health.cdr_response_time}ms` : null}
+              detail={health?.cdr?.name ? `${health.cdr.name}${health?.cdr?.is_read_only ? ' · read-only' : ''}` : null}
             />
             <StatusIndicator
               label="Database"
@@ -303,6 +225,14 @@ export default function SettingsPage() {
           </div>
         </section>
       </div>
+
+      {modalOpen && (
+        <ConnectionModal
+          connection={editingConnection}
+          onClose={handleModalClose}
+          onSaved={handleModalSaved}
+        />
+      )}
     </div>
   );
 }

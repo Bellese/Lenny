@@ -318,3 +318,10 @@
   font-weight: normal;
   color: var(--color-text-secondary);
 }
+
+.cdrReadOnly {
+  display: block;
+  font-size: var(--font-size-sm);
+  color: var(--color-warning, #856404);
+  margin-top: 2px;
+}
