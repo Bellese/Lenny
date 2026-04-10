@@ -2,10 +2,11 @@
 
 import io
 import json
+import time as time_module
 
 import pytest
 
-from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+from app.models.validation import BundleUpload, ExpectedResult, ValidationRun, ValidationStatus
 
 # ---------------------------------------------------------------------------
 # POST /validation/upload-bundle
@@ -55,6 +56,45 @@ class TestUploadBundle:
         )
         assert response.status_code == 400
         assert ".json" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_concurrent_same_filename_gets_distinct_paths(self, client, test_session, tmp_path, monkeypatch):
+        """Two uploads of the same filename must produce distinct file paths (issue #63).
+
+        Forces both uploads to the same timestamp bucket (via monkeypatched time.time)
+        to verify that uuid4 alone differentiates the paths even when the timestamp prefix
+        is identical. Requests are sequential, not concurrent — sufficient to prove the
+        uuid4 uniqueness guarantee.
+        """
+        monkeypatch.setattr("app.routes.validation.UPLOAD_DIR", str(tmp_path))
+        # Pin timestamp so both uploads land in the same second — the pre-fix
+        # code would produce identical paths; the uuid4 fix ensures they don't.
+        monkeypatch.setattr(time_module, "time", lambda: 1_000_000_000)
+
+        content = json.dumps({"resourceType": "Bundle", "type": "transaction", "entry": []}).encode()
+
+        resp1 = await client.post(
+            "/validation/upload-bundle",
+            files={"file": ("bundle.json", io.BytesIO(content), "application/json")},
+        )
+        resp2 = await client.post(
+            "/validation/upload-bundle",
+            files={"file": ("bundle.json", io.BytesIO(content), "application/json")},
+        )
+
+        assert resp1.status_code == 200
+        assert resp2.status_code == 200
+
+        id1 = resp1.json()["id"]
+        id2 = resp2.json()["id"]
+        assert id1 != id2, "Expected distinct DB records for each upload"
+
+        upload1 = await test_session.get(BundleUpload, id1)
+        upload2 = await test_session.get(BundleUpload, id2)
+
+        assert upload1 is not None
+        assert upload2 is not None
+        assert upload1.file_path != upload2.file_path, f"Collision: both uploads resolved to {upload1.file_path!r}"
 
 
 # ---------------------------------------------------------------------------
