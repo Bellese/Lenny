@@ -58,16 +58,17 @@ async def health_check(
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(f"{cdr.cdr_url}/metadata")
             if resp.status_code == 200:
-                status["cdr"] = {"status": "connected", "name": cdr.name}
+                status["cdr"] = {"status": "connected", "name": cdr.name, "is_read_only": cdr.is_read_only}
             else:
                 status["cdr"] = {
                     "status": "disconnected",
                     "name": cdr.name,
+                    "is_read_only": cdr.is_read_only,
                     "error": f"HTTP {resp.status_code}",
                 }
                 status["status"] = "degraded"
     except Exception as exc:
-        status["cdr"] = {"status": "disconnected", "name": cdr.name, "error": sanitize_error(exc)[:200]}
+        status["cdr"] = {"status": "disconnected", "name": cdr.name, "is_read_only": cdr.is_read_only, "error": sanitize_error(exc)[:200]}
         status["status"] = "degraded"
 
     return status
