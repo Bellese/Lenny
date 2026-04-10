@@ -88,6 +88,7 @@ async def update_settings(
     try:
         auth_type_enum = AuthType(body.auth_type)
     except ValueError:
+        valid_types = ", ".join(t.value for t in AuthType)
         raise HTTPException(
             status_code=400,
             detail={
@@ -96,7 +97,7 @@ async def update_settings(
                     {
                         "severity": "error",
                         "code": "invalid",
-                        "diagnostics": f"Invalid auth_type: {body.auth_type}. Must be one of: none, basic, bearer",
+                        "diagnostics": f"Invalid auth_type: {body.auth_type}. Must be one of: {valid_types}",
                     }
                 ],
             },

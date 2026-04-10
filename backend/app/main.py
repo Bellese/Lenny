@@ -54,12 +54,66 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+async def _run_schema_migrations(conn) -> None:
+    """Add new columns/enum values to existing tables. Idempotent (IF NOT EXISTS).
+
+    Must run outside a transaction for ALTER TYPE ADD VALUE (Postgres < 12
+    requires autocommit for that statement). SQLite (used in tests) skips all
+    ALTER statements — create_all handles new columns on fresh in-memory DBs.
+    """
+    from sqlalchemy import text
+
+    if conn.dialect.name == "postgresql":
+        # AuthType enum: add 'smart' value if not present
+        await conn.execute(text("ALTER TYPE authtype ADD VALUE IF NOT EXISTS 'smart'"))
+
+        # Add new columns to cdr_configs (idempotent)
+        for stmt in [
+            "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS name VARCHAR(512)",
+            "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS is_read_only BOOLEAN NOT NULL DEFAULT FALSE",
+        ]:
+            await conn.execute(text(stmt))
+
+        # Add new columns to jobs
+        for stmt in [
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_name VARCHAR(512)",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_read_only BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_auth_type VARCHAR(32)",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_auth_credentials JSONB",
+        ]:
+            await conn.execute(text(stmt))
+
+        # Add warning_message to bundle_uploads
+        await conn.execute(text(
+            "ALTER TABLE bundle_uploads ADD COLUMN IF NOT EXISTS warning_message TEXT"
+        ))
+
+        # Seed the Local CDR row (idempotent via ON CONFLICT DO NOTHING)
+        await conn.execute(text("""
+            INSERT INTO cdr_configs (cdr_url, auth_type, is_active, name, is_default, is_read_only)
+            VALUES ('http://hapi-fhir-cdr:8080/fhir', 'none', TRUE, 'Local CDR', TRUE, FALSE)
+            ON CONFLICT (name) DO NOTHING
+        """))
+        # Update existing row that matches the default URL but has no name yet
+        await conn.execute(text("""
+            UPDATE cdr_configs
+            SET name = 'Local CDR', is_default = TRUE, is_read_only = FALSE
+            WHERE cdr_url = 'http://hapi-fhir-cdr:8080/fhir'
+              AND (name IS NULL OR name = '')
+        """))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: create DB tables and launch background worker.
     Shutdown: signal worker to stop.
     """
-    # Create tables
+    # Run schema migrations outside a transaction (required for ALTER TYPE ADD VALUE in Postgres)
+    async with engine.connect() as conn:
+        await conn.execution_options(isolation_level="AUTOCOMMIT")
+        await _run_schema_migrations(conn)
+    # Create any missing tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     logger.info("Database tables created")
