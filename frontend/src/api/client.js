@@ -105,16 +105,35 @@ export function getEvaluatedResources(resultId) {
   return request(`/results/${resultId}/evaluated-resources`);
 }
 
-// Settings
-export function getSettings() {
-  return request('/settings');
+// Connections
+export function getConnections() {
+  return request('/settings/connections');
 }
 
-export function updateSettings(data) {
-  return request('/settings', {
+export function createConnection(data) {
+  return request('/settings/connections', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function getConnection(id) {
+  return request(`/settings/connections/${id}`);
+}
+
+export function updateConnection(id, data) {
+  return request(`/settings/connections/${id}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   });
+}
+
+export function deleteConnection(id) {
+  return request(`/settings/connections/${id}`, { method: 'DELETE' });
+}
+
+export function activateConnection(id) {
+  return request(`/settings/connections/${id}/activate`, { method: 'POST' });
 }
 
 export function testConnection(data) {

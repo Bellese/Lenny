@@ -12,7 +12,7 @@ async def test_create_job_valid(client):
         "measure_name": "Test Measure",
         "period_start": "2024-01-01",
         "period_end": "2024-12-31",
-        "cdr_url": "http://example.com/fhir",
+        "cdr_url": "https://example.com/fhir",
     }
     resp = await client.post("/jobs", json=payload)
     assert resp.status_code == 201
@@ -21,12 +21,28 @@ async def test_create_job_valid(client):
     assert data["measure_name"] == "Test Measure"
     assert data["period_start"] == "2024-01-01"
     assert data["period_end"] == "2024-12-31"
-    assert data["cdr_url"] == "http://example.com/fhir"
+    assert data["cdr_url"] == "https://example.com/fhir"
     assert data["status"] == "queued"
     assert data["total_patients"] == 0
     assert data["processed_patients"] == 0
     assert data["failed_patients"] == 0
     assert data["id"] is not None
+    assert "cdr_name" in data
+    assert "cdr_read_only" in data
+
+
+async def test_create_job_ssrf_cdr_url_blocked(client):
+    """POST /jobs with a private IP cdr_url override returns 400."""
+    payload = {
+        "measure_id": "measure-1",
+        "period_start": "2024-01-01",
+        "period_end": "2024-12-31",
+        "cdr_url": "https://169.254.169.254/fhir",
+    }
+    resp = await client.post("/jobs", json=payload)
+    assert resp.status_code == 400
+    diag = resp.json()["detail"]["issue"][0]["diagnostics"]
+    assert "SSRF protection" in diag
 
 
 async def test_create_job_missing_fields(client):
@@ -50,6 +66,7 @@ async def test_create_job_uses_default_cdr_url(client):
     # Should use the DEFAULT_CDR_URL from settings
     assert data["cdr_url"] is not None
     assert len(data["cdr_url"]) > 0
+    assert data["cdr_read_only"] is False
 
 
 async def test_list_jobs_empty(client):
@@ -69,7 +86,7 @@ async def test_list_jobs_returns_created_jobs(client):
                 "measure_id": f"measure-{i}",
                 "period_start": "2024-01-01",
                 "period_end": "2024-12-31",
-                "cdr_url": "http://example.com/fhir",
+                "cdr_url": "https://example.com/fhir",
             },
         )
 
@@ -90,7 +107,7 @@ async def test_get_job_with_batches(client):
             "measure_id": "measure-1",
             "period_start": "2024-01-01",
             "period_end": "2024-12-31",
-            "cdr_url": "http://example.com/fhir",
+            "cdr_url": "https://example.com/fhir",
         },
     )
     job_id = create_resp.json()["id"]
@@ -121,7 +138,7 @@ async def test_cancel_job_queued(client):
             "measure_id": "measure-1",
             "period_start": "2024-01-01",
             "period_end": "2024-12-31",
-            "cdr_url": "http://example.com/fhir",
+            "cdr_url": "https://example.com/fhir",
         },
     )
     job_id = create_resp.json()["id"]
@@ -166,7 +183,7 @@ async def test_create_job_with_group_id(client):
         "measure_id": "measure-1",
         "period_start": "2024-01-01",
         "period_end": "2024-12-31",
-        "cdr_url": "http://example.com/fhir",
+        "cdr_url": "https://example.com/fhir",
         "group_id": "CMS349FHIRHIVScreening",
     }
     resp = await client.post("/jobs", json=payload)
@@ -181,7 +198,7 @@ async def test_create_job_without_group_id(client):
         "measure_id": "measure-1",
         "period_start": "2024-01-01",
         "period_end": "2024-12-31",
-        "cdr_url": "http://example.com/fhir",
+        "cdr_url": "https://example.com/fhir",
     }
     resp = await client.post("/jobs", json=payload)
     assert resp.status_code == 201
@@ -197,9 +214,15 @@ async def test_get_groups_success(client):
         {"id": "CMS122FHIRDiabetes", "name": "CMS122 Diabetes", "type": "person", "member_count": 20},
         {"id": "CMS349FHIRHIVScreening", "name": "CMS349 HIV Screening", "type": "person", "member_count": 36},
     ]
-    with patch("app.routes.jobs.list_groups", new=AsyncMock(return_value=mock_groups)):
+    with (
+        patch("app.routes.jobs.list_groups", new=AsyncMock(return_value=mock_groups)) as mock_lg,
+        patch("app.routes.jobs._build_auth_headers", new=AsyncMock(return_value={})) as mock_auth,
+    ):
         resp = await client.get("/jobs/groups")
+
     assert resp.status_code == 200
+    mock_auth.assert_called_once()
+    mock_lg.assert_called_once()
     data = resp.json()
     assert "groups" in data
     assert len(data["groups"]) == 2
@@ -216,3 +239,81 @@ async def test_get_groups_cdr_unreachable(client):
         resp = await client.get("/jobs/groups")
     assert resp.status_code == 502
     assert "CDR" in resp.json()["detail"]
+
+
+async def test_create_job_stamps_active_cdr_metadata(client, test_session):
+    """POST /jobs stamps cdr_name and cdr_read_only from the active CDR config."""
+    from sqlalchemy import update as sa_update
+
+    from app.models.config import AuthType, CDRConfig
+
+    # Deactivate any existing active CDR rows first
+    await test_session.execute(sa_update(CDRConfig).values(is_active=False))
+    await test_session.commit()
+
+    cdr = CDRConfig(
+        cdr_url="http://prod-cdr.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        name="Production CDR",
+        is_default=False,
+        is_read_only=True,
+    )
+    test_session.add(cdr)
+    await test_session.commit()
+
+    resp = await client.post(
+        "/jobs",
+        json={
+            "measure_id": "measure-1",
+            "period_start": "2024-01-01",
+            "period_end": "2024-12-31",
+        },
+    )
+    assert resp.status_code == 201
+    data = resp.json()
+    assert data["cdr_url"] == "http://prod-cdr.example.com/fhir"
+    assert data["cdr_name"] == "Production CDR"
+    assert data["cdr_read_only"] is True
+
+
+async def test_create_job_stamps_cdr_auth_type_as_string_value(client, test_session):
+    """POST /jobs stamps cdr_auth_type as the raw string value (e.g. 'bearer'), not 'AuthType.bearer'."""
+    from sqlalchemy import update as sa_update
+
+    from app.models.config import AuthType, CDRConfig
+
+    # Deactivate any existing active CDR rows first
+    await test_session.execute(sa_update(CDRConfig).values(is_active=False))
+    await test_session.commit()
+
+    cdr = CDRConfig(
+        cdr_url="http://auth-cdr.example.com/fhir",
+        auth_type=AuthType.bearer,
+        is_active=True,
+        name="Auth CDR",
+        is_default=False,
+        is_read_only=False,
+        auth_credentials="my-token",
+    )
+    test_session.add(cdr)
+    await test_session.commit()
+
+    resp = await client.post(
+        "/jobs",
+        json={
+            "measure_id": "measure-1",
+            "period_start": "2024-01-01",
+            "period_end": "2024-12-31",
+        },
+    )
+    assert resp.status_code == 201
+
+    # Verify the stamped value in the DB is the plain string "bearer", not "AuthType.bearer"
+    from sqlalchemy import select
+
+    from app.models.job import Job
+
+    result = await test_session.execute(select(Job).order_by(Job.id.desc()).limit(1))
+    job = result.scalar_one()
+    assert job.cdr_auth_type == "bearer"

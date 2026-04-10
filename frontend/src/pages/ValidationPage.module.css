@@ -310,3 +310,10 @@
   font-weight: var(--font-weight-semibold);
   font-size: var(--font-size-sm);
 }
+
+.uploadWarning {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--font-size-sm);
+  color: var(--color-warning, #856404);
+}

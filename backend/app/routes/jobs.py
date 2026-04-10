@@ -10,11 +10,10 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.db import get_session
-from app.models.config import CDRConfig
+from app.dependencies import CDRContext, get_active_cdr
 from app.models.job import Job, JobStatus
-from app.services.fhir_client import _build_auth_headers, list_groups
+from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -52,6 +51,8 @@ class JobResponse(BaseModel):
     period_start: str
     period_end: str
     cdr_url: str
+    cdr_name: Optional[str] = None
+    cdr_read_only: bool = False
     group_id: Optional[str]
     status: str
     total_patients: int
@@ -94,6 +95,8 @@ def _job_to_response(job: Job) -> dict:
         "period_start": job.period_start,
         "period_end": job.period_end,
         "cdr_url": job.cdr_url,
+        "cdr_name": job.cdr_name,
+        "cdr_read_only": job.cdr_read_only,
         "group_id": job.group_id,
         "status": job.status.value if isinstance(job.status, JobStatus) else job.status,
         "total_patients": job.total_patients,
@@ -125,16 +128,13 @@ def _batch_to_response(batch) -> dict:
 
 @router.get("/groups")
 async def get_groups(
-    session: AsyncSession = Depends(get_session),
+    cdr: CDRContext = Depends(get_active_cdr),
 ) -> dict:
     """List FHIR Group resources from the CDR."""
-    result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
-    config = result.scalar_one_or_none()
-    cdr_url = config.cdr_url if config else settings.DEFAULT_CDR_URL
-    auth_headers = _build_auth_headers(config.auth_type, config.auth_credentials) if config else {}
+    auth_headers = await _build_auth_headers(cdr.auth_type, cdr.auth_credentials)
 
     try:
-        groups = await list_groups(cdr_url, auth_headers)
+        groups = await list_groups(cdr.cdr_url, auth_headers)
         return {"groups": groups}
     except Exception:
         logger.exception("Failed to fetch groups from CDR")
@@ -148,14 +148,21 @@ async def get_groups(
 async def create_job(
     body: JobCreate,
     session: AsyncSession = Depends(get_session),
+    cdr: CDRContext = Depends(get_active_cdr),
 ) -> dict:
     """Create a new measure calculation job."""
-    # Resolve CDR URL
-    cdr_url = body.cdr_url
-    if not cdr_url:
-        result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
-        config = result.scalar_one_or_none()
-        cdr_url = config.cdr_url if config else settings.DEFAULT_CDR_URL
+    if body.cdr_url:
+        try:
+            _validate_ssrf_url(body.cdr_url, label="cdr_url")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "resourceType": "OperationOutcome",
+                    "issue": [{"severity": "error", "code": "security", "diagnostics": str(exc)}],
+                },
+            )
+    cdr_url = body.cdr_url or cdr.cdr_url
 
     job = Job(
         measure_id=body.measure_id,
@@ -165,6 +172,10 @@ async def create_job(
         cdr_url=cdr_url,
         group_id=body.group_id,
         status=JobStatus.queued,
+        cdr_name=cdr.name,
+        cdr_read_only=cdr.is_read_only,
+        cdr_auth_type=cdr.auth_type.value if cdr.auth_type else None,
+        cdr_auth_credentials=cdr.auth_credentials,
     )
     session.add(job)
     await session.commit()

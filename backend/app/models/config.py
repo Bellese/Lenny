@@ -14,6 +14,7 @@ class AuthType(str, enum.Enum):
     none = "none"
     basic = "basic"
     bearer = "bearer"
+    smart = "smart"
 
 
 class CDRConfig(Base):
@@ -24,5 +25,8 @@ class CDRConfig(Base):
     auth_type: Mapped[AuthType] = mapped_column(Enum(AuthType), nullable=False, default=AuthType.none)
     auth_credentials: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, unique=True)
+    is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, onupdate=func.now())

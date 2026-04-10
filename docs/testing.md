@@ -100,7 +100,7 @@ Exact population count assertions should be added once HAPI evaluation behavior 
 
 ## CI Checks (PR Gate)
 
-Every PR to `master` triggers `.github/workflows/pr-checks.yml` with 4 jobs:
+Every PR to `main` triggers `.github/workflows/pr-checks.yml` with 4 jobs:
 
 | Job | What it does | Fails if |
 |-----|-------------|----------|

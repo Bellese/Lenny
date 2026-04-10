@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.2.2] - 2026-04-10
+
+### Added
+- Multi-CDR connection management: full CRUD for CDR connections with support for
+  none/basic/bearer/SMART on FHIR auth, read-only flag, and a default Local CDR row.
+  CDR credentials are stamped on each job at creation. Closes #6.
+
 ## [0.0.2.1] - 2026-04-10
 
 ### Fixed

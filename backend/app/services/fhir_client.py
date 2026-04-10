@@ -5,8 +5,11 @@ Handles all HTTP communication with HAPI FHIR servers (CDR and measure engine).
 
 import abc
 import asyncio
+import ipaddress
 import logging
+import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -15,9 +18,58 @@ from app.models.config import AuthType
 
 logger = logging.getLogger(__name__)
 
+# Hosts explicitly allowed for local dev even though they're loopback/private.
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
-def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:
-    """Build HTTP auth headers from CDR config."""
+
+def _is_blocked_ip(host: str) -> bool:
+    """Return True if host is a private/reserved IP (RFC-1918, loopback, link-local, ULA).
+
+    Covers IPv4 (including 169.254.0.0/16 AWS IMDS) and IPv6 private ranges.
+    Returns False for hostnames that aren't raw IP literals.
+    """
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_private or addr.is_loopback or addr.is_link_local
+    except ValueError:
+        return False  # Not a raw IP literal — hostname, can't resolve statically
+
+
+def _validate_ssrf_url(url: str, label: str = "URL") -> None:
+    """Reject URLs that could be used for SSRF attacks.
+
+    Rules:
+    - Only https is allowed unless the host is localhost/127.0.0.1/::1 (local dev).
+    - Raw IP literals that are private, loopback, or link-local are rejected unless
+      the host is in the local dev allowlist.  This covers RFC-1918, 169.254.0.0/16
+      (AWS IMDS), IPv6 loopback, link-local, and ULA ranges.
+
+    Raises ValueError with a descriptive message on rejection.
+    """
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname or ""
+
+    is_local = host in _LOCAL_HOSTS
+
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            f"SSRF protection: {label} scheme '{scheme}' is not allowed. "
+            "Only https (or http for localhost) is permitted."
+        )
+
+    if scheme == "http" and not is_local:
+        raise ValueError(f"SSRF protection: {label} must use https for non-localhost hosts (got http://{host}).")
+
+    if not is_local and _is_blocked_ip(host):
+        raise ValueError(
+            f"SSRF protection: {label} resolves to a private/reserved address "
+            f"({host}). Use a publicly routable host or localhost."
+        )
+
+
+async def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:
+    """Build HTTP auth headers from CDR config. Async to support SMART token acquisition."""
     if auth_type == AuthType.none or not auth_credentials:
         return {}
     if auth_type == AuthType.basic:
@@ -30,7 +82,39 @@ def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dic
     if auth_type == AuthType.bearer:
         token = auth_credentials.get("token", "")
         return {"Authorization": f"Bearer {token}"}
+    if auth_type == AuthType.smart:
+        token = await _acquire_smart_token(auth_credentials)
+        return {"Authorization": f"Bearer {token}"}
     return {}
+
+
+async def _acquire_smart_token(credentials: dict) -> str:
+    """Exchange client_credentials grant for a bearer token at token_endpoint.
+
+    No token caching — fresh token per request is intentional for the connectathon.
+    Add TTL-based caching post-connectathon if token endpoint rate-limiting becomes an issue.
+    """
+    required = {"token_endpoint", "client_id", "client_secret"}
+    missing = required - credentials.keys()
+    if missing:
+        raise ValueError(f"SMART credentials missing required fields: {', '.join(sorted(missing))}")
+
+    _validate_ssrf_url(credentials["token_endpoint"], label="token_endpoint")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            credentials["token_endpoint"],
+            data={
+                "grant_type": "client_credentials",
+                "client_id": credentials["client_id"],
+                "client_secret": credentials["client_secret"],
+            },
+        )
+        resp.raise_for_status()
+        token = resp.json().get("access_token")
+        if not token:
+            raise ValueError("SMART token endpoint response missing 'access_token'")
+        return token
 
 
 # ---------------------------------------------------------------------------
@@ -382,14 +466,18 @@ async def verify_fhir_connection(
     auth_credentials: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Test connectivity to a FHIR server by fetching its metadata."""
-    headers = _build_auth_headers(auth_type, auth_credentials)
+    _validate_ssrf_url(fhir_url, label="cdr_url")
+    headers = await _build_auth_headers(auth_type, auth_credentials)
     url = f"{fhir_url}/metadata"
     async with httpx.AsyncClient(timeout=15.0) as client:
+        t0 = time.monotonic()
         resp = await client.get(url, headers=headers)
+        response_time_ms = round((time.monotonic() - t0) * 1000)
         resp.raise_for_status()
         data = resp.json()
         return {
             "status": "connected",
             "fhir_version": data.get("fhirVersion", "unknown"),
             "software": data.get("software", {}).get("name", "unknown"),
+            "response_time": response_time_ms,
         }

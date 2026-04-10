@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -51,6 +52,10 @@ class Job(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    cdr_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    cdr_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    cdr_auth_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    cdr_auth_credentials: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     batches: Mapped[list["Batch"]] = relationship(
         "Batch", back_populates="job", cascade="all, delete-orphan", lazy="selectin"

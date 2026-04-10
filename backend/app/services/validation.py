@@ -274,29 +274,30 @@ async def triage_test_bundle(
         await session.execute(stmt)
     await session.commit()
 
-    # Push clinical data to CDR — only if using the default bundled CDR
+    # Push clinical data to CDR — blocked if active CDR is read-only
     patients_loaded = 0
+    warning_message = None
     if clinical:
-        # Check if active CDR config is the default bundled one
         cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         active_cdr = cdr_result.scalar_one_or_none()
         cdr_url = active_cdr.cdr_url if active_cdr else settings.DEFAULT_CDR_URL
+        is_read_only = active_cdr.is_read_only if active_cdr else False
 
-        if cdr_url == settings.DEFAULT_CDR_URL:
-            await push_resources(clinical, target_url=settings.DEFAULT_CDR_URL)
-            # Count unique Patient resources
+        if not is_read_only:
+            await push_resources(clinical, target_url=cdr_url)
             patients_loaded = sum(1 for r in clinical if r.get("resourceType") == "Patient")
         else:
+            warning_message = "Clinical test data was not loaded because the active CDR is read-only."
             logger.warning(
-                "External CDR configured — test patients NOT pushed to CDR. "
-                "Only measure definitions were loaded to the measure engine.",
-                extra={"active_cdr": cdr_url},
+                "Active CDR is read-only — test patients NOT pushed to CDR.",
+                extra={"cdr_url": cdr_url},
             )
 
     return {
         "measures_loaded": sum(1 for r in measure_defs if r.get("resourceType") == "Measure"),
         "patients_loaded": patients_loaded,
         "expected_results_loaded": len(test_cases),
+        "warning_message": warning_message,
     }
 
 
@@ -325,6 +326,7 @@ async def process_bundle_upload(upload_id: int) -> None:
             upload.measures_loaded = summary["measures_loaded"]
             upload.patients_loaded = summary["patients_loaded"]
             upload.expected_results_loaded = summary["expected_results_loaded"]
+            upload.warning_message = summary.get("warning_message")
             upload.status = ValidationStatus.complete
             upload.completed_at = datetime.now(timezone.utc)
             await session.commit()
@@ -419,7 +421,7 @@ async def run_validation(validation_run_id: int) -> None:
             active_cdr = cdr_result.scalar_one_or_none()
             if active_cdr:
                 cdr_url = active_cdr.cdr_url
-                auth_headers = _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials)
+                auth_headers = await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials)
             else:
                 cdr_url = settings.DEFAULT_CDR_URL
                 auth_headers = {}
