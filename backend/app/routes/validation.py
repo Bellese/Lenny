@@ -108,6 +108,7 @@ async def list_uploads(session: AsyncSession = Depends(get_session)) -> dict:
                 "patients_loaded": u.patients_loaded,
                 "expected_results_loaded": u.expected_results_loaded,
                 "error_message": u.error_message,
+                "warning_message": u.warning_message,
                 "created_at": u.created_at.isoformat() if u.created_at else None,
                 "completed_at": u.completed_at.isoformat() if u.completed_at else None,
             }

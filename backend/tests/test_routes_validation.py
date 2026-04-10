@@ -239,3 +239,21 @@ class TestListUploads:
         response = await client.get("/validation/uploads")
         assert response.status_code == 200
         assert response.json()["uploads"] == []
+
+    @pytest.mark.asyncio
+    async def test_warning_message_included_in_response(self, client, test_session):
+        """GET /validation/uploads includes warning_message for each upload."""
+        upload = BundleUpload(
+            filename="test-bundle.json",
+            file_path="/tmp/test-bundle.json",
+            status=ValidationStatus.complete,
+            warning_message="2 resources could not be loaded",
+        )
+        test_session.add(upload)
+        await test_session.commit()
+
+        response = await client.get("/validation/uploads")
+        assert response.status_code == 200
+        uploads = response.json()["uploads"]
+        assert len(uploads) == 1
+        assert uploads[0]["warning_message"] == "2 resources could not be loaded"

@@ -261,3 +261,45 @@ async def test_create_job_stamps_active_cdr_metadata(client, test_session):
     assert data["cdr_url"] == "http://prod-cdr.example.com/fhir"
     assert data["cdr_name"] == "Production CDR"
     assert data["cdr_read_only"] is True
+
+
+async def test_create_job_stamps_cdr_auth_type_as_string_value(client, test_session):
+    """POST /jobs stamps cdr_auth_type as the raw string value (e.g. 'bearer'), not 'AuthType.bearer'."""
+    from sqlalchemy import update as sa_update
+
+    from app.models.config import AuthType, CDRConfig
+
+    # Deactivate any existing active CDR rows first
+    await test_session.execute(sa_update(CDRConfig).values(is_active=False))
+    await test_session.commit()
+
+    cdr = CDRConfig(
+        cdr_url="http://auth-cdr.example.com/fhir",
+        auth_type=AuthType.bearer,
+        is_active=True,
+        name="Auth CDR",
+        is_default=False,
+        is_read_only=False,
+        auth_credentials="my-token",
+    )
+    test_session.add(cdr)
+    await test_session.commit()
+
+    resp = await client.post(
+        "/jobs",
+        json={
+            "measure_id": "measure-1",
+            "period_start": "2024-01-01",
+            "period_end": "2024-12-31",
+        },
+    )
+    assert resp.status_code == 201
+
+    # Verify the stamped value in the DB is the plain string "bearer", not "AuthType.bearer"
+    from sqlalchemy import select
+
+    from app.models.job import Job
+
+    result = await test_session.execute(select(Job).order_by(Job.id.desc()).limit(1))
+    job = result.scalar_one()
+    assert job.cdr_auth_type == "bearer"

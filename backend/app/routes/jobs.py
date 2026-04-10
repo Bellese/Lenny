@@ -163,7 +163,7 @@ async def create_job(
         status=JobStatus.queued,
         cdr_name=cdr.name,
         cdr_read_only=cdr.is_read_only,
-        cdr_auth_type=str(cdr.auth_type) if cdr.auth_type else None,
+        cdr_auth_type=cdr.auth_type.value if cdr.auth_type else None,
         cdr_auth_credentials=cdr.auth_credentials,
     )
     session.add(job)
