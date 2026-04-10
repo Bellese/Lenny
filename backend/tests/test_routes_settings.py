@@ -182,6 +182,45 @@ async def test_update_connection_not_found(client):
     assert resp.status_code == 404
 
 
+async def test_update_connection_preserves_credentials_when_omitted(client):
+    """PUT that omits auth_credentials does not wipe existing credentials."""
+    smart_creds = {
+        "client_id": "my-client",
+        "client_secret": "my-secret",
+        "token_endpoint": "http://auth.example.com/token",
+    }
+    create_resp = await client.post(
+        "/settings/connections",
+        json={
+            "name": "SMART CDR",
+            "cdr_url": "http://smart.example.com/fhir",
+            "auth_type": "smart",
+            "auth_credentials": smart_creds,
+        },
+    )
+    conn_id = create_resp.json()["id"]
+
+    # PUT with no auth_credentials — should keep the existing ones
+    resp = await client.put(
+        f"/settings/connections/{conn_id}",
+        json={
+            "name": "SMART CDR Renamed",
+            "cdr_url": "http://smart.example.com/fhir",
+            "auth_type": "smart",
+            # auth_credentials intentionally omitted
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["name"] == "SMART CDR Renamed"
+
+    # Verify credentials were not wiped by fetching via GET
+    get_resp = await client.get(f"/settings/connections/{conn_id}")
+    assert get_resp.status_code == 200
+    # auth_credentials are not exposed in the response schema, so the key absence
+    # is expected — we just confirm the connection still exists and auth_type is intact
+    assert get_resp.json()["auth_type"] == "smart"
+
+
 # ---------------------------------------------------------------------------
 # DELETE /settings/connections/{id}
 # ---------------------------------------------------------------------------
@@ -374,27 +413,22 @@ async def test_test_connection_invalid_auth_type(client):
     assert "none, basic, bearer, smart" in diag
 
 
-async def test_test_connection_failure_does_not_leak_hostname():
+async def test_test_connection_failure_does_not_leak_hostname(client):
     """Regression: internal hostnames must not appear in 502 error responses.
 
     When verify_fhir_connection raises a connection error whose message contains
     an internal Docker-network hostname (hapi-fhir-cdr:8080), sanitize_error()
     must strip it before the client sees it.
     """
-    from httpx import ASGITransport, AsyncClient
-
-    from app.main import app
-
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        with patch(
-            "app.routes.settings.verify_fhir_connection",
-            new_callable=AsyncMock,
-            side_effect=ConnectionError("Cannot connect to http://hapi-fhir-cdr:8080/fhir"),
-        ):
-            resp = await ac.post(
-                "/settings/test-connection",
-                json={"cdr_url": "http://hapi-fhir-cdr:8080/fhir"},
-            )
+    with patch(
+        "app.routes.settings.verify_fhir_connection",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("Cannot connect to http://hapi-fhir-cdr:8080/fhir"),
+    ):
+        resp = await client.post(
+            "/settings/test-connection",
+            json={"cdr_url": "http://hapi-fhir-cdr:8080/fhir"},
+        )
 
     assert resp.status_code == 502
     body = resp.text

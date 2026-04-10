@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -182,7 +183,8 @@ async def update_connection(
         raise HTTPException(status_code=404, detail="Connection not found")
 
     _validate_auth_type(body.auth_type)
-    _validate_smart_credentials(body.auth_type, body.auth_credentials)
+    effective_credentials = body.auth_credentials if body.auth_credentials is not None else cfg.auth_credentials
+    _validate_smart_credentials(body.auth_type, effective_credentials)
 
     duplicate = await session.execute(
         select(CDRConfig).where(CDRConfig.name == body.name, CDRConfig.id != connection_id)
@@ -205,7 +207,7 @@ async def update_connection(
     cfg.name = body.name
     cfg.cdr_url = body.cdr_url
     cfg.auth_type = AuthType(body.auth_type)
-    cfg.auth_credentials = body.auth_credentials
+    cfg.auth_credentials = effective_credentials
     cfg.is_read_only = body.is_read_only
     await session.commit()
     await session.refresh(cfg)
@@ -264,10 +266,7 @@ async def activate_connection(
     if cfg is None:
         raise HTTPException(status_code=404, detail="Connection not found")
 
-    active_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)))
-    for active_cfg in active_result.scalars().all():
-        active_cfg.is_active = False
-
+    await session.execute(sa_update(CDRConfig).where(CDRConfig.is_active.is_(True)).values(is_active=False))
     cfg.is_active = True
     await session.commit()
     await session.refresh(cfg)
