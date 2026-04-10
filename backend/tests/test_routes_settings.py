@@ -28,7 +28,7 @@ async def test_create_connection(client):
     """POST /settings/connections creates a connection and returns it."""
     payload = {
         "name": "My CDR",
-        "cdr_url": "http://my-cdr.example.com/fhir",
+        "cdr_url": "https://my-cdr.example.com/fhir",
         "auth_type": "none",
     }
     resp = await client.post("/settings/connections", json=payload)
@@ -36,7 +36,7 @@ async def test_create_connection(client):
     data = resp.json()
     assert data["id"] is not None
     assert data["name"] == "My CDR"
-    assert data["cdr_url"] == "http://my-cdr.example.com/fhir"
+    assert data["cdr_url"] == "https://my-cdr.example.com/fhir"
     assert data["auth_type"] == "none"
     assert data["is_active"] is False
     assert data["is_default"] is False
@@ -45,7 +45,7 @@ async def test_create_connection(client):
 
 async def test_create_connection_duplicate_name(client):
     """POST with an existing name returns 409."""
-    payload = {"name": "Duplicate", "cdr_url": "http://a.example.com/fhir", "auth_type": "none"}
+    payload = {"name": "Duplicate", "cdr_url": "https://a.example.com/fhir", "auth_type": "none"}
     await client.post("/settings/connections", json=payload)
     resp = await client.post("/settings/connections", json=payload)
     assert resp.status_code == 409
@@ -54,9 +54,27 @@ async def test_create_connection_duplicate_name(client):
     assert "already exists" in detail["issue"][0]["diagnostics"]
 
 
+async def test_create_connection_ssrf_private_ip_blocked(client):
+    """POST with a private IP cdr_url returns 400 with SSRF diagnostics."""
+    payload = {"name": "Private CDR", "cdr_url": "https://10.0.0.1/fhir", "auth_type": "none"}
+    resp = await client.post("/settings/connections", json=payload)
+    assert resp.status_code == 400
+    diag = resp.json()["detail"]["issue"][0]["diagnostics"]
+    assert "SSRF protection" in diag
+
+
+async def test_create_connection_ssrf_imds_blocked(client):
+    """POST with the AWS IMDS link-local address returns 400."""
+    payload = {"name": "IMDS", "cdr_url": "https://169.254.169.254/fhir", "auth_type": "none"}
+    resp = await client.post("/settings/connections", json=payload)
+    assert resp.status_code == 400
+    diag = resp.json()["detail"]["issue"][0]["diagnostics"]
+    assert "SSRF protection" in diag
+
+
 async def test_create_connection_invalid_auth_type(client):
     """POST with an unsupported auth_type returns 400."""
-    payload = {"name": "Bad Auth", "cdr_url": "http://example.com/fhir", "auth_type": "oauth2"}
+    payload = {"name": "Bad Auth", "cdr_url": "https://example.com/fhir", "auth_type": "oauth2"}
     resp = await client.post("/settings/connections", json=payload)
     assert resp.status_code == 400
     diag = resp.json()["detail"]["issue"][0]["diagnostics"]
@@ -68,7 +86,7 @@ async def test_create_connection_smart_missing_credentials(client):
     """POST with auth_type=smart and missing SMART fields returns 400."""
     payload = {
         "name": "SMART CDR",
-        "cdr_url": "http://example.com/fhir",
+        "cdr_url": "https://example.com/fhir",
         "auth_type": "smart",
         "auth_credentials": {"client_id": "abc"},  # missing client_secret and token_endpoint
     }
@@ -82,12 +100,12 @@ async def test_create_connection_smart_valid(client):
     """POST with auth_type=smart and all required fields succeeds."""
     payload = {
         "name": "SMART CDR",
-        "cdr_url": "http://example.com/fhir",
+        "cdr_url": "https://example.com/fhir",
         "auth_type": "smart",
         "auth_credentials": {
             "client_id": "abc",
             "client_secret": "secret",
-            "token_endpoint": "http://auth.example.com/token",
+            "token_endpoint": "https://auth.example.com/token",
         },
     }
     resp = await client.post("/settings/connections", json=payload)
@@ -106,7 +124,7 @@ async def test_get_connection(client):
     """GET /settings/connections/{id} returns the connection."""
     create_resp = await client.post(
         "/settings/connections",
-        json={"name": "Fetch Me", "cdr_url": "http://example.com/fhir", "auth_type": "none"},
+        json={"name": "Fetch Me", "cdr_url": "https://example.com/fhir", "auth_type": "none"},
     )
     conn_id = create_resp.json()["id"]
 
@@ -132,7 +150,7 @@ async def test_update_connection(client):
     """PUT updates fields on an existing connection."""
     create_resp = await client.post(
         "/settings/connections",
-        json={"name": "Original", "cdr_url": "http://old.example.com/fhir", "auth_type": "none"},
+        json={"name": "Original", "cdr_url": "https://old.example.com/fhir", "auth_type": "none"},
     )
     conn_id = create_resp.json()["id"]
 
@@ -140,7 +158,7 @@ async def test_update_connection(client):
         f"/settings/connections/{conn_id}",
         json={
             "name": "Updated",
-            "cdr_url": "http://new.example.com/fhir",
+            "cdr_url": "https://new.example.com/fhir",
             "auth_type": "bearer",
             "auth_credentials": {"token": "tok123"},
         },
@@ -148,7 +166,7 @@ async def test_update_connection(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["name"] == "Updated"
-    assert data["cdr_url"] == "http://new.example.com/fhir"
+    assert data["cdr_url"] == "https://new.example.com/fhir"
     assert data["auth_type"] == "bearer"
 
 
@@ -156,17 +174,17 @@ async def test_update_connection_duplicate_name(client):
     """PUT with another connection's name returns 409."""
     await client.post(
         "/settings/connections",
-        json={"name": "Alpha", "cdr_url": "http://alpha.example.com/fhir", "auth_type": "none"},
+        json={"name": "Alpha", "cdr_url": "https://alpha.example.com/fhir", "auth_type": "none"},
     )
     beta_resp = await client.post(
         "/settings/connections",
-        json={"name": "Beta", "cdr_url": "http://beta.example.com/fhir", "auth_type": "none"},
+        json={"name": "Beta", "cdr_url": "https://beta.example.com/fhir", "auth_type": "none"},
     )
     beta_id = beta_resp.json()["id"]
 
     resp = await client.put(
         f"/settings/connections/{beta_id}",
-        json={"name": "Alpha", "cdr_url": "http://beta.example.com/fhir", "auth_type": "none"},
+        json={"name": "Alpha", "cdr_url": "https://beta.example.com/fhir", "auth_type": "none"},
     )
     assert resp.status_code == 409
     detail = resp.json()["detail"]
@@ -177,7 +195,7 @@ async def test_update_connection_not_found(client):
     """PUT on a missing connection returns 404."""
     resp = await client.put(
         "/settings/connections/999",
-        json={"name": "Ghost", "cdr_url": "http://example.com/fhir", "auth_type": "none"},
+        json={"name": "Ghost", "cdr_url": "https://example.com/fhir", "auth_type": "none"},
     )
     assert resp.status_code == 404
 
@@ -187,13 +205,13 @@ async def test_update_connection_preserves_credentials_when_omitted(client):
     smart_creds = {
         "client_id": "my-client",
         "client_secret": "my-secret",
-        "token_endpoint": "http://auth.example.com/token",
+        "token_endpoint": "https://auth.example.com/token",
     }
     create_resp = await client.post(
         "/settings/connections",
         json={
             "name": "SMART CDR",
-            "cdr_url": "http://smart.example.com/fhir",
+            "cdr_url": "https://smart.example.com/fhir",
             "auth_type": "smart",
             "auth_credentials": smart_creds,
         },
@@ -205,7 +223,7 @@ async def test_update_connection_preserves_credentials_when_omitted(client):
         f"/settings/connections/{conn_id}",
         json={
             "name": "SMART CDR Renamed",
-            "cdr_url": "http://smart.example.com/fhir",
+            "cdr_url": "https://smart.example.com/fhir",
             "auth_type": "smart",
             # auth_credentials intentionally omitted
         },
@@ -230,7 +248,7 @@ async def test_delete_connection(client):
     """DELETE a non-default, non-active connection returns 204."""
     create_resp = await client.post(
         "/settings/connections",
-        json={"name": "Deletable", "cdr_url": "http://example.com/fhir", "auth_type": "none"},
+        json={"name": "Deletable", "cdr_url": "https://example.com/fhir", "auth_type": "none"},
     )
     conn_id = create_resp.json()["id"]
 
@@ -248,7 +266,7 @@ async def test_delete_default_connection_blocked(client, test_session):
 
     cfg = CDRConfig(
         name="Local CDR",
-        cdr_url="http://localhost:8080/fhir",
+        cdr_url="https://localhost:8080/fhir",
         auth_type=AuthType.none,
         is_active=False,
         is_default=True,
@@ -270,7 +288,7 @@ async def test_delete_active_connection_blocked(client, test_session):
 
     cfg = CDRConfig(
         name="Active CDR",
-        cdr_url="http://active.example.com/fhir",
+        cdr_url="https://active.example.com/fhir",
         auth_type=AuthType.none,
         is_active=True,
         is_default=False,
@@ -303,13 +321,13 @@ async def test_activate_connection(client):
     conn_a = (
         await client.post(
             "/settings/connections",
-            json={"name": "CDR A", "cdr_url": "http://a.example.com/fhir", "auth_type": "none"},
+            json={"name": "CDR A", "cdr_url": "https://a.example.com/fhir", "auth_type": "none"},
         )
     ).json()
     conn_b = (
         await client.post(
             "/settings/connections",
-            json={"name": "CDR B", "cdr_url": "http://b.example.com/fhir", "auth_type": "none"},
+            json={"name": "CDR B", "cdr_url": "https://b.example.com/fhir", "auth_type": "none"},
         )
     ).json()
 

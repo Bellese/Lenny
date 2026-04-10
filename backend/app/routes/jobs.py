@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.dependencies import CDRContext, get_active_cdr
 from app.models.job import Job, JobStatus
-from app.services.fhir_client import _build_auth_headers, list_groups
+from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -151,6 +151,17 @@ async def create_job(
     cdr: CDRContext = Depends(get_active_cdr),
 ) -> dict:
     """Create a new measure calculation job."""
+    if body.cdr_url:
+        try:
+            _validate_ssrf_url(body.cdr_url, label="cdr_url")
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "resourceType": "OperationOutcome",
+                    "issue": [{"severity": "error", "code": "security", "diagnostics": str(exc)}],
+                },
+            )
     cdr_url = body.cdr_url or cdr.cdr_url
 
     job = Job(

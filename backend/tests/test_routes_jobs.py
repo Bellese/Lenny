@@ -12,7 +12,7 @@ async def test_create_job_valid(client):
         "measure_name": "Test Measure",
         "period_start": "2024-01-01",
         "period_end": "2024-12-31",
-        "cdr_url": "http://example.com/fhir",
+        "cdr_url": "https://example.com/fhir",
     }
     resp = await client.post("/jobs", json=payload)
     assert resp.status_code == 201
@@ -21,7 +21,7 @@ async def test_create_job_valid(client):
     assert data["measure_name"] == "Test Measure"
     assert data["period_start"] == "2024-01-01"
     assert data["period_end"] == "2024-12-31"
-    assert data["cdr_url"] == "http://example.com/fhir"
+    assert data["cdr_url"] == "https://example.com/fhir"
     assert data["status"] == "queued"
     assert data["total_patients"] == 0
     assert data["processed_patients"] == 0
@@ -29,6 +29,20 @@ async def test_create_job_valid(client):
     assert data["id"] is not None
     assert "cdr_name" in data
     assert "cdr_read_only" in data
+
+
+async def test_create_job_ssrf_cdr_url_blocked(client):
+    """POST /jobs with a private IP cdr_url override returns 400."""
+    payload = {
+        "measure_id": "measure-1",
+        "period_start": "2024-01-01",
+        "period_end": "2024-12-31",
+        "cdr_url": "https://169.254.169.254/fhir",
+    }
+    resp = await client.post("/jobs", json=payload)
+    assert resp.status_code == 400
+    diag = resp.json()["detail"]["issue"][0]["diagnostics"]
+    assert "SSRF protection" in diag
 
 
 async def test_create_job_missing_fields(client):
@@ -72,7 +86,7 @@ async def test_list_jobs_returns_created_jobs(client):
                 "measure_id": f"measure-{i}",
                 "period_start": "2024-01-01",
                 "period_end": "2024-12-31",
-                "cdr_url": "http://example.com/fhir",
+                "cdr_url": "https://example.com/fhir",
             },
         )
 
@@ -93,7 +107,7 @@ async def test_get_job_with_batches(client):
             "measure_id": "measure-1",
             "period_start": "2024-01-01",
             "period_end": "2024-12-31",
-            "cdr_url": "http://example.com/fhir",
+            "cdr_url": "https://example.com/fhir",
         },
     )
     job_id = create_resp.json()["id"]
@@ -124,7 +138,7 @@ async def test_cancel_job_queued(client):
             "measure_id": "measure-1",
             "period_start": "2024-01-01",
             "period_end": "2024-12-31",
-            "cdr_url": "http://example.com/fhir",
+            "cdr_url": "https://example.com/fhir",
         },
     )
     job_id = create_resp.json()["id"]
@@ -169,7 +183,7 @@ async def test_create_job_with_group_id(client):
         "measure_id": "measure-1",
         "period_start": "2024-01-01",
         "period_end": "2024-12-31",
-        "cdr_url": "http://example.com/fhir",
+        "cdr_url": "https://example.com/fhir",
         "group_id": "CMS349FHIRHIVScreening",
     }
     resp = await client.post("/jobs", json=payload)
@@ -184,7 +198,7 @@ async def test_create_job_without_group_id(client):
         "measure_id": "measure-1",
         "period_start": "2024-01-01",
         "period_end": "2024-12-31",
-        "cdr_url": "http://example.com/fhir",
+        "cdr_url": "https://example.com/fhir",
     }
     resp = await client.post("/jobs", json=payload)
     assert resp.status_code == 201

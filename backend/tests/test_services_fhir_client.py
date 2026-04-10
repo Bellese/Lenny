@@ -618,27 +618,54 @@ class TestValidateSsrfUrl:
     def test_rfc1918_10_blocked(self):
         from app.services.fhir_client import _validate_ssrf_url
 
-        with pytest.raises(ValueError, match="RFC-1918"):
+        with pytest.raises(ValueError, match="private/reserved"):
             _validate_ssrf_url("https://10.0.0.1/fhir")
 
     def test_rfc1918_172_blocked(self):
         from app.services.fhir_client import _validate_ssrf_url
 
-        with pytest.raises(ValueError, match="RFC-1918"):
+        with pytest.raises(ValueError, match="private/reserved"):
             _validate_ssrf_url("https://172.16.0.1/fhir")
 
     def test_rfc1918_192_168_blocked(self):
         from app.services.fhir_client import _validate_ssrf_url
 
-        with pytest.raises(ValueError, match="RFC-1918"):
+        with pytest.raises(ValueError, match="private/reserved"):
             _validate_ssrf_url("https://192.168.100.200/fhir")
 
-    def test_imds_endpoint_blocked(self):
+    def test_imds_endpoint_http_blocked(self):
         """Classic AWS IMDSv1 endpoint — http with non-local host is blocked."""
         from app.services.fhir_client import _validate_ssrf_url
 
         with pytest.raises(ValueError, match="must use https"):
             _validate_ssrf_url("http://169.254.169.254/latest/meta-data/")
+
+    def test_imds_endpoint_https_blocked(self):
+        """AWS IMDS link-local over https is blocked by IP range check."""
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="private/reserved"):
+            _validate_ssrf_url("https://169.254.169.254/latest/meta-data/")
+
+    def test_ipv6_loopback_allowed(self):
+        """::1 is in the local dev allowlist."""
+        from app.services.fhir_client import _validate_ssrf_url
+
+        _validate_ssrf_url("http://[::1]:8080/fhir")  # should not raise
+
+    def test_ipv6_link_local_blocked(self):
+        """fe80:: link-local IPv6 is blocked."""
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="private/reserved"):
+            _validate_ssrf_url("https://[fe80::1]/fhir")
+
+    def test_ipv6_ula_blocked(self):
+        """fc00::/7 Unique Local Address IPv6 is blocked."""
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="private/reserved"):
+            _validate_ssrf_url("https://[fd00::1]/fhir")
 
 
 async def test_verify_fhir_connection_ssrf_blocked():

@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.models.config import AuthType, CDRConfig
-from app.services.fhir_client import verify_fhir_connection
+from app.services.fhir_client import _validate_ssrf_url, verify_fhir_connection
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,19 @@ def _validate_smart_credentials(auth_type: str, auth_credentials: dict | None) -
         )
 
 
+def _check_cdr_url(url: str) -> None:
+    try:
+        _validate_ssrf_url(url, label="cdr_url")
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "security", "diagnostics": str(exc)}],
+            },
+        )
+
+
 def _cfg_to_response(cfg: CDRConfig) -> dict:
     return {
         "id": cfg.id,
@@ -128,6 +141,7 @@ async def create_connection(
     body: CDRConnectionCreate,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
+    _check_cdr_url(body.cdr_url)
     _validate_auth_type(body.auth_type)
     _validate_smart_credentials(body.auth_type, body.auth_credentials)
 
@@ -169,7 +183,13 @@ async def get_connection(
 ) -> dict:
     cfg = await session.get(CDRConfig, connection_id)
     if cfg is None:
-        raise HTTPException(status_code=404, detail="Connection not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "not-found", "diagnostics": "Connection not found"}],
+            },
+        )
     return _cfg_to_response(cfg)
 
 
@@ -181,8 +201,15 @@ async def update_connection(
 ) -> dict:
     cfg = await session.get(CDRConfig, connection_id)
     if cfg is None:
-        raise HTTPException(status_code=404, detail="Connection not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "not-found", "diagnostics": "Connection not found"}],
+            },
+        )
 
+    _check_cdr_url(body.cdr_url)
     _validate_auth_type(body.auth_type)
     effective_credentials = body.auth_credentials if body.auth_credentials is not None else cfg.auth_credentials
     _validate_smart_credentials(body.auth_type, effective_credentials)
@@ -222,7 +249,13 @@ async def delete_connection(
 ) -> None:
     cfg = await session.get(CDRConfig, connection_id)
     if cfg is None:
-        raise HTTPException(status_code=404, detail="Connection not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "not-found", "diagnostics": "Connection not found"}],
+            },
+        )
 
     if cfg.is_default:
         raise HTTPException(
@@ -265,7 +298,13 @@ async def activate_connection(
 ) -> dict:
     cfg = await session.get(CDRConfig, connection_id)
     if cfg is None:
-        raise HTTPException(status_code=404, detail="Connection not found")
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "not-found", "diagnostics": "Connection not found"}],
+            },
+        )
 
     # Already active — nothing to do
     if cfg.is_active:
@@ -279,7 +318,16 @@ async def activate_connection(
         await session.rollback()
         raise HTTPException(
             status_code=409,
-            detail="Another connection was activated simultaneously. Please retry.",
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "conflict",
+                        "diagnostics": "Another connection was activated simultaneously. Please retry.",
+                    }
+                ],
+            },
         )
     await session.refresh(cfg)
     return _cfg_to_response(cfg)

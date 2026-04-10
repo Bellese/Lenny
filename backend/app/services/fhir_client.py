@@ -5,8 +5,8 @@ Handles all HTTP communication with HAPI FHIR servers (CDR and measure engine).
 
 import abc
 import asyncio
+import ipaddress
 import logging
-import re
 import time
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -18,25 +18,31 @@ from app.models.config import AuthType
 
 logger = logging.getLogger(__name__)
 
-# RFC-1918 private ranges: 10.x, 172.16-31.x, 192.168.x
-_RFC1918_PATTERN = re.compile(
-    r"^("
-    r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}"
-    r"|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
-    r"|192\.168\.\d{1,3}\.\d{1,3}"
-    r")$"
-)
+# Hosts explicitly allowed for local dev even though they're loopback/private.
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
-_LOCAL_HOSTS = {"localhost", "127.0.0.1"}
+
+def _is_blocked_ip(host: str) -> bool:
+    """Return True if host is a private/reserved IP (RFC-1918, loopback, link-local, ULA).
+
+    Covers IPv4 (including 169.254.0.0/16 AWS IMDS) and IPv6 private ranges.
+    Returns False for hostnames that aren't raw IP literals.
+    """
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_private or addr.is_loopback or addr.is_link_local
+    except ValueError:
+        return False  # Not a raw IP literal — hostname, can't resolve statically
 
 
 def _validate_ssrf_url(url: str, label: str = "URL") -> None:
     """Reject URLs that could be used for SSRF attacks.
 
     Rules:
-    - Only https is allowed unless the host is localhost/127.0.0.1 (local dev exception).
-    - Hosts that resolve to RFC-1918 addresses are rejected unless they are
-      localhost or 127.0.0.1 (local dev exception).
+    - Only https is allowed unless the host is localhost/127.0.0.1/::1 (local dev).
+    - Raw IP literals that are private, loopback, or link-local are rejected unless
+      the host is in the local dev allowlist.  This covers RFC-1918, 169.254.0.0/16
+      (AWS IMDS), IPv6 loopback, link-local, and ULA ranges.
 
     Raises ValueError with a descriptive message on rejection.
     """
@@ -55,9 +61,9 @@ def _validate_ssrf_url(url: str, label: str = "URL") -> None:
     if scheme == "http" and not is_local:
         raise ValueError(f"SSRF protection: {label} must use https for non-localhost hosts (got http://{host}).")
 
-    if _RFC1918_PATTERN.match(host) and not is_local:
+    if not is_local and _is_blocked_ip(host):
         raise ValueError(
-            f"SSRF protection: {label} resolves to a private RFC-1918 address "
+            f"SSRF protection: {label} resolves to a private/reserved address "
             f"({host}). Use a publicly routable host or localhost."
         )
 
