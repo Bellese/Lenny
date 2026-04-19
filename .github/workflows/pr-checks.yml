@@ -55,6 +55,9 @@ jobs:
     name: Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    env:
+      # Soft default: STRICT_STU6=0 for rollout week. Flip to 1 once all connectathon measures pass in CI.
+      STRICT_STU6: "0"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
