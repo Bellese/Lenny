@@ -79,3 +79,29 @@ async def test_load_connectathon_bundles_empty_directory(tmp_path):
     assert summary["loaded"] == 0
     assert summary["failed"] == 0
     mock_triage.assert_not_called()
+
+
+async def test_load_connectathon_bundles_includes_patients_loaded(tmp_path):
+    """load_connectathon_bundles reflects patients_loaded from triage summary (#81)."""
+    from app.services.bundle_loader import load_connectathon_bundles
+
+    (tmp_path / "bundle.json").write_text(json.dumps({"resourceType": "Bundle", "entry": []}))
+
+    with patch("app.services.bundle_loader.triage_test_bundle") as mock_triage:
+        mock_triage.return_value = {
+            "measures_loaded": 1,
+            "patients_loaded": 5,
+            "expected_results_loaded": 2,
+        }
+        mock_session = AsyncMock()
+        mock_session_factory = MagicMock()
+        mock_session_factory.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.bundle_loader.async_session", mock_session_factory):
+            summary = await load_connectathon_bundles(directory=tmp_path)
+
+    assert summary["loaded"] == 1
+    assert summary["failed"] == 0
+    loaded_detail = summary["details"][0]
+    assert loaded_detail["patients_loaded"] == 5

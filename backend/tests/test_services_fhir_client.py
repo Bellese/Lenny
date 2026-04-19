@@ -907,6 +907,161 @@ async def test_data_requirements_strategy_non_200_resource_entries_skipped():
     assert resources == []
 
 
+async def test_fetch_by_requirements_code_filter_appends_code_in():
+    """codeFilter.valueSet is translated to code:in= search parameter (AC2)."""
+    vs_url = "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.198.12.1134"
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [
+            {
+                "type": "Observation",
+                "codeFilter": [{"valueSet": vs_url}],
+            }
+        ],
+    }
+    obs_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Observation", "id": "o1"}}],
+        "link": [],
+    }
+
+    captured_urls: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        captured_urls.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        return _make_response(200, obs_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    obs_url = next((u for u in captured_urls if "Observation" in u), None)
+    assert obs_url is not None
+    assert "code:in=" in obs_url
+    assert vs_url in obs_url
+    assert len(resources) == 1
+
+
+async def test_fetch_by_requirements_date_filter_does_not_add_params():
+    """dateFilter entries do not modify the URL — type-only query used (AC2)."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [
+            {
+                "type": "Observation",
+                "dateFilter": [{"path": "effective", "valuePeriod": {"start": "2024-01-01", "end": "2024-12-31"}}],
+            }
+        ],
+    }
+    obs_bundle = {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []}
+
+    captured_urls: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        captured_urls.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        return _make_response(200, obs_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    obs_url = next((u for u in captured_urls if "Observation" in u), None)
+    assert obs_url is not None
+    assert "code:in" not in obs_url
+
+
+async def test_fetch_by_requirements_no_filter_type_only():
+    """dataRequirement with no codeFilter generates plain type+subject query (AC2 baseline)."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [{"type": "Encounter"}],
+    }
+    enc_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Encounter", "id": "e1"}}],
+        "link": [],
+    }
+
+    captured_urls: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        captured_urls.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        return _make_response(200, enc_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    enc_url = next((u for u in captured_urls if "Encounter" in u), None)
+    assert enc_url is not None
+    assert "code:in" not in enc_url
+    assert len(resources) == 1
+
+
+async def test_fetch_by_requirements_one_type_fails_partial_result_no_fallback():
+    """One type fails CDR fetch — others succeed; partial result returned without $everything (AC5)."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [
+            {"type": "Observation"},
+            {"type": "Condition"},
+        ],
+    }
+    obs_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Observation", "id": "o1"}}],
+        "link": [],
+    }
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        if "Observation" in url:
+            return _make_response(200, obs_bundle)
+        if "Condition" in url:
+            raise httpx.ConnectError("CDR unreachable for Condition")
+        return _make_response(200, {"resourceType": "Bundle", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    # Observation fetched; Condition skipped; no $everything fallback
+    assert any(r.get("resourceType") == "Observation" for r in resources)
+    assert not any(r.get("resourceType") == "Condition" for r in resources)
+    everything_calls = [c for c in mock_ctx.get.call_args_list if "$everything" in str(c)]
+    assert len(everything_calls) == 0
+
+
 async def test_data_requirements_strategy_gather_patients_delegates_to_batch():
     """DataRequirementsStrategy.gather_patients uses the same BatchQuery logic."""
     patient_bundle = {

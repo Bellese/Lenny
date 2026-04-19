@@ -290,9 +290,15 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
         auth_headers: dict[str, str],
         requirements: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
-        """Translate dataRequirement entries to CDR REST queries and collect resources."""
+        """Translate dataRequirement entries to CDR REST queries and collect resources.
+
+        Translates codeFilter[].valueSet into code:in={valueSetUrl} search parameters.
+        Per-type failures are logged and skipped; only raises if all types fail (triggering
+        the outer $everything fallback).
+        """
         resources: list[dict[str, Any]] = []
         seen_types: set[str] = set()
+        failed_types: set[str] = set()
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             for req in requirements:
@@ -303,18 +309,38 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                     continue
                 seen_types.add(resource_type)
 
-                if resource_type == "Patient":
-                    resp = await client.get(f"{cdr_url}/Patient/{patient_id}", headers=auth_headers)
-                    if resp.status_code == 200:
-                        resources.append(resp.json())
-                else:
-                    url = f"{cdr_url}/{resource_type}?subject=Patient/{patient_id}&_count=100"
-                    resp = await client.get(url, headers=auth_headers)
-                    if resp.status_code == 200:
-                        for entry in resp.json().get("entry", []):
-                            resource = entry.get("resource")
-                            if resource:
-                                resources.append(resource)
+                try:
+                    if resource_type == "Patient":
+                        resp = await client.get(f"{cdr_url}/Patient/{patient_id}", headers=auth_headers)
+                        if resp.status_code == 200:
+                            resources.append(resp.json())
+                    else:
+                        # Translate codeFilter[].valueSet to code:in search parameter
+                        params = f"subject=Patient/{patient_id}&_count=100"
+                        for cf in req.get("codeFilter", []):
+                            vs = cf.get("valueSet")
+                            if vs:
+                                params += f"&code:in={vs}"
+                                break  # Use first valueSet codeFilter only
+                        url = f"{cdr_url}/{resource_type}?{params}"
+                        resp = await client.get(url, headers=auth_headers)
+                        if resp.status_code == 200:
+                            for entry in resp.json().get("entry", []):
+                                resource = entry.get("resource")
+                                if resource:
+                                    resources.append(resource)
+                except Exception as exc:
+                    failed_types.add(resource_type)
+                    logger.warning(
+                        "CDR fetch failed for resource type %s, skipping — %s",
+                        resource_type,
+                        str(exc),
+                        extra={"resource_type": resource_type, "patient_id": patient_id, "error": str(exc)},
+                    )
+
+        # Only propagate failure (triggering outer $everything fallback) when all types fail
+        if seen_types and failed_types == seen_types:
+            raise RuntimeError(f"All resource types failed CDR fetch: {sorted(failed_types)}")
 
         logger.info(
             "Fetched patient data via $data-requirements",

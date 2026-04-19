@@ -280,30 +280,20 @@ async def triage_test_bundle(
         await session.execute(stmt)
     await session.commit()
 
-    # Push clinical data to CDR — blocked if active CDR is read-only
+    # Push clinical data to whatever CDR is active (external or bundled default)
     patients_loaded = 0
-    warning_message = None
     if clinical:
         cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         active_cdr = cdr_result.scalar_one_or_none()
         cdr_url = active_cdr.cdr_url if active_cdr else settings.DEFAULT_CDR_URL
-        is_read_only = active_cdr.is_read_only if active_cdr else False
 
-        if not is_read_only:
-            await push_resources(clinical, target_url=cdr_url)
-            patients_loaded = sum(1 for r in clinical if r.get("resourceType") == "Patient")
-        else:
-            warning_message = "Clinical test data was not loaded because the active CDR is read-only."
-            logger.warning(
-                "Active CDR is read-only — test patients NOT pushed to CDR.",
-                extra={"cdr_url": cdr_url},
-            )
+        await push_resources(clinical, target_url=cdr_url)
+        patients_loaded = sum(1 for r in clinical if r.get("resourceType") == "Patient")
 
     return {
         "measures_loaded": sum(1 for r in measure_defs if r.get("resourceType") == "Measure"),
         "patients_loaded": patients_loaded,
         "expected_results_loaded": len(test_cases),
-        "warning_message": warning_message,
     }
 
 

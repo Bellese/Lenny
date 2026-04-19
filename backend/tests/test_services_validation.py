@@ -422,24 +422,23 @@ class TestTriageTestBundle:
         assert result.get("warning_message") is None
         assert mock_push.call_count >= 1
 
-    async def test_external_cdr_clinical_not_pushed(self, test_session, mock_test_bundle_with_expected):
-        """When active CDR is read-only, clinical data is NOT pushed."""
+    async def test_external_cdr_clinical_is_pushed(self, test_session, mock_test_bundle_with_expected):
+        """When an external CDR is active, clinical data is pushed to it (#81)."""
         from app.models.config import AuthType, CDRConfig
 
-        # Insert an active read-only CDR config
-        readonly_cdr = CDRConfig(
+        # Insert an active external CDR config (marked read-only in DB, but guard is removed)
+        external_cdr = CDRConfig(
             cdr_url="http://external-cdr.example.com/fhir",
             auth_type=AuthType.none,
             is_active=True,
             name="External CDR",
             is_default=False,
-            is_read_only=True,  # <-- key change
+            is_read_only=True,
         )
-        test_session.add(readonly_cdr)
+        test_session.add(external_cdr)
         await test_session.commit()
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
-            # pg_insert interceptor is still needed for SQLite compat
             orig_execute = test_session.execute
 
             async def _execute_interceptor(stmt, *args, **kwargs):
@@ -451,17 +450,17 @@ class TestTriageTestBundle:
 
             result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
-        # clinical data NOT pushed (read-only CDR) → patients_loaded == 0
-        assert result["patients_loaded"] == 0
-        assert result["warning_message"] is not None
-        assert "read-only" in result["warning_message"].lower()
-        # Measure defs are still pushed (to measure engine)
-        push_calls_for_defs = [
+        # Clinical data IS pushed to external CDR regardless of is_read_only flag
+        assert result["patients_loaded"] == 1
+        assert result.get("warning_message") is None
+        # Verify push was called for clinical data targeting the external CDR URL
+        clinical_push_calls = [
             call
             for call in mock_push.call_args_list
-            if any(r.get("resourceType") in {"Measure", "Library"} for r in call.args[0])
+            if call.kwargs.get("target_url") == "http://external-cdr.example.com/fhir"
+            or (len(call.args) > 1 and call.args[1] == "http://external-cdr.example.com/fhir")
         ]
-        assert len(push_calls_for_defs) == 1
+        assert len(clinical_push_calls) >= 1
 
     async def test_bundle_with_only_measure_defs(self, test_session):
         """Bundle containing only measure defs: no expected results, no clinical push."""
