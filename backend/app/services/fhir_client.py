@@ -7,8 +7,12 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import ipaddress
 import logging
+import re
+import time
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -17,9 +21,58 @@ from app.models.config import AuthType
 
 logger = logging.getLogger(__name__)
 
+# Hosts explicitly allowed for local dev even though they're loopback/private.
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
-def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:
-    """Build HTTP auth headers from CDR config."""
+
+def _is_blocked_ip(host: str) -> bool:
+    """Return True if host is a private/reserved IP (RFC-1918, loopback, link-local, ULA).
+
+    Covers IPv4 (including 169.254.0.0/16 AWS IMDS) and IPv6 private ranges.
+    Returns False for hostnames that aren't raw IP literals.
+    """
+    try:
+        addr = ipaddress.ip_address(host)
+        return addr.is_private or addr.is_loopback or addr.is_link_local
+    except ValueError:
+        return False  # Not a raw IP literal — hostname, can't resolve statically
+
+
+def _validate_ssrf_url(url: str, label: str = "URL") -> None:
+    """Reject URLs that could be used for SSRF attacks.
+
+    Rules:
+    - Only https is allowed unless the host is localhost/127.0.0.1/::1 (local dev).
+    - Raw IP literals that are private, loopback, or link-local are rejected unless
+      the host is in the local dev allowlist.  This covers RFC-1918, 169.254.0.0/16
+      (AWS IMDS), IPv6 loopback, link-local, and ULA ranges.
+
+    Raises ValueError with a descriptive message on rejection.
+    """
+    parsed = urlparse(url)
+    scheme = parsed.scheme.lower()
+    host = parsed.hostname or ""
+
+    is_local = host in _LOCAL_HOSTS
+
+    if scheme not in ("http", "https"):
+        raise ValueError(
+            f"SSRF protection: {label} scheme '{scheme}' is not allowed. "
+            "Only https (or http for localhost) is permitted."
+        )
+
+    if scheme == "http" and not is_local:
+        raise ValueError(f"SSRF protection: {label} must use https for non-localhost hosts (got http://{host}).")
+
+    if not is_local and _is_blocked_ip(host):
+        raise ValueError(
+            f"SSRF protection: {label} resolves to a private/reserved address "
+            f"({host}). Use a publicly routable host or localhost."
+        )
+
+
+async def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:
+    """Build HTTP auth headers from CDR config. Async to support SMART token acquisition."""
     if auth_type == AuthType.none or not auth_credentials:
         return {}
     if auth_type == AuthType.basic:
@@ -32,7 +85,39 @@ def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dic
     if auth_type == AuthType.bearer:
         token = auth_credentials.get("token", "")
         return {"Authorization": f"Bearer {token}"}
+    if auth_type == AuthType.smart:
+        token = await _acquire_smart_token(auth_credentials)
+        return {"Authorization": f"Bearer {token}"}
     return {}
+
+
+async def _acquire_smart_token(credentials: dict) -> str:
+    """Exchange client_credentials grant for a bearer token at token_endpoint.
+
+    No token caching — fresh token per request is intentional for the connectathon.
+    Add TTL-based caching post-connectathon if token endpoint rate-limiting becomes an issue.
+    """
+    required = {"token_endpoint", "client_id", "client_secret"}
+    missing = required - credentials.keys()
+    if missing:
+        raise ValueError(f"SMART credentials missing required fields: {', '.join(sorted(missing))}")
+
+    _validate_ssrf_url(credentials["token_endpoint"], label="token_endpoint")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(
+            credentials["token_endpoint"],
+            data={
+                "grant_type": "client_credentials",
+                "client_id": credentials["client_id"],
+                "client_secret": credentials["client_secret"],
+            },
+        )
+        resp.raise_for_status()
+        token = resp.json().get("access_token")
+        if not token:
+            raise ValueError("SMART token endpoint response missing 'access_token'")
+        return token
 
 
 # ---------------------------------------------------------------------------
@@ -136,9 +221,163 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
         return resources
 
 
+class DataRequirementsStrategy(DataAcquisitionStrategy):
+    """DEQM spec-compliant data acquisition using $data-requirements.
+
+    Calls GET /Measure/{id}/$data-requirements on the measure engine,
+    translates each dataRequirement entry into a CDR REST query, and
+    collects only the resources the measure actually needs.
+
+    Falls back to BatchQueryStrategy ($everything) if $data-requirements
+    returns an empty list or raises any exception.
+    """
+
+    def __init__(self, measure_id: str) -> None:
+        self._measure_id = measure_id
+        self._fallback = BatchQueryStrategy()
+
+    async def gather_patients(
+        self,
+        cdr_url: str,
+        auth_headers: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Delegate patient listing to BatchQueryStrategy (CDR search is the same)."""
+        return await self._fallback.gather_patients(cdr_url, auth_headers)
+
+    async def gather_patient_data(
+        self,
+        cdr_url: str,
+        patient_id: str,
+        auth_headers: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Fetch only the resources the measure needs, using $data-requirements."""
+        try:
+            requirements = await self._get_data_requirements()
+        except Exception as exc:
+            logger.warning(
+                "$data-requirements failed, falling back to $everything",
+                extra={"measure_id": self._measure_id, "patient_id": patient_id, "error": str(exc)},
+            )
+            return await self._fallback.gather_patient_data(cdr_url, patient_id, auth_headers)
+
+        if not requirements:
+            logger.info(
+                "$data-requirements returned no entries, falling back to $everything",
+                extra={"measure_id": self._measure_id, "patient_id": patient_id},
+            )
+            return await self._fallback.gather_patient_data(cdr_url, patient_id, auth_headers)
+
+        try:
+            return await self._fetch_by_requirements(cdr_url, patient_id, auth_headers, requirements)
+        except Exception as exc:
+            logger.warning(
+                "CDR fetch by requirements failed, falling back to $everything",
+                extra={"measure_id": self._measure_id, "patient_id": patient_id, "error": str(exc)},
+            )
+            return await self._fallback.gather_patient_data(cdr_url, patient_id, auth_headers)
+
+    async def _get_data_requirements(self) -> list[dict[str, Any]]:
+        """Call $data-requirements on MCS and return the dataRequirement entries."""
+        url = f"{settings.MEASURE_ENGINE_URL}/Measure/{self._measure_id}/$data-requirements"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            library = resp.json()
+            return library.get("dataRequirement", [])
+
+    async def _fetch_by_requirements(
+        self,
+        cdr_url: str,
+        patient_id: str,
+        auth_headers: dict[str, str],
+        requirements: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Translate dataRequirement entries to CDR REST queries and collect resources.
+
+        Translates codeFilter[].valueSet into code:in={valueSetUrl} search parameters.
+        Per-type failures are logged and skipped; only raises if all types fail (triggering
+        the outer $everything fallback).
+        """
+        resources: list[dict[str, Any]] = []
+        seen_types: set[str] = set()
+        failed_types: set[str] = set()
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for req in requirements:
+                resource_type = req.get("type", "")
+                if not resource_type or not re.match(r"^[A-Za-z][A-Za-z0-9]{0,127}$", resource_type):
+                    continue
+                if resource_type in seen_types:
+                    continue
+                seen_types.add(resource_type)
+
+                try:
+                    if resource_type == "Patient":
+                        resp = await client.get(f"{cdr_url}/Patient/{patient_id}", headers=auth_headers)
+                        if resp.status_code == 200:
+                            resources.append(resp.json())
+                    else:
+                        # Translate codeFilter[].valueSet to code:in search parameter
+                        params = f"subject=Patient/{patient_id}&_count=100"
+                        for cf in req.get("codeFilter", []):
+                            vs = cf.get("valueSet")
+                            if vs:
+                                params += f"&code:in={vs}"
+                                break  # Use first valueSet codeFilter only
+                        page_url: Optional[str] = f"{cdr_url}/{resource_type}?{params}"
+                        while page_url:
+                            resp = await client.get(page_url, headers=auth_headers)
+                            if resp.status_code != 200:
+                                break
+                            bundle = resp.json()
+                            for entry in bundle.get("entry", []):
+                                resource = entry.get("resource")
+                                if resource:
+                                    resources.append(resource)
+                            page_url = None
+                            for link in bundle.get("link", []):
+                                if link.get("relation") == "next":
+                                    page_url = link.get("url")
+                                    break
+                except Exception as exc:
+                    failed_types.add(resource_type)
+                    logger.warning(
+                        "CDR fetch failed for resource type %s, skipping — %s",
+                        resource_type,
+                        str(exc),
+                        extra={"resource_type": resource_type, "patient_id": patient_id, "error": str(exc)},
+                    )
+
+        # Only propagate failure (triggering outer $everything fallback) when all types fail
+        if seen_types and failed_types == seen_types:
+            raise RuntimeError(f"All resource types failed CDR fetch: {sorted(failed_types)}")
+
+        logger.info(
+            "Fetched patient data via $data-requirements",
+            extra={
+                "measure_id": self._measure_id,
+                "patient_id": patient_id,
+                "resource_count": len(resources),
+                "requirement_types": list(seen_types),
+            },
+        )
+        return resources
+
+
 # ---------------------------------------------------------------------------
 # Direct FHIR helper functions (measure engine interaction)
 # ---------------------------------------------------------------------------
+
+
+def _normalize_measure_def(r: dict[str, Any]) -> dict[str, Any]:
+    """Ensure Library resources have a url so HAPI 8.x can resolve canonical refs.
+
+    DBCG FHIR4 bundles omit Library.url; HAPI resolves Measure.library references
+    by canonical URL search, so we backfill url = "Library/{id}" when absent.
+    """
+    if r.get("resourceType") == "Library" and not r.get("url") and r.get("id"):
+        r = {**r, "url": f"Library/{r['id']}"}
+    return r
 
 
 async def push_resources(
@@ -153,7 +392,7 @@ async def push_resources(
         "type": "transaction",
         "entry": [
             {
-                "resource": r,
+                "resource": _normalize_measure_def(r),
                 "request": {
                     "method": "PUT",
                     "url": f"{r['resourceType']}/{r['id']}",
@@ -173,6 +412,10 @@ async def push_resources(
             json=bundle,
             headers=headers,
         )
+        # HAPI-0902: duplicate canonical URL+version — resources already loaded; treat as success
+        if resp.status_code == 422 and "HAPI-0902" in resp.text:
+            logger.info("Resources already present (HAPI-0902)", extra={"target": base})
+            return
         resp.raise_for_status()
     logger.info("Pushed resources", extra={"count": len(bundle["entry"]), "target": base})
 
@@ -386,14 +629,18 @@ async def verify_fhir_connection(
     auth_credentials: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Test connectivity to a FHIR server by fetching its metadata."""
-    headers = _build_auth_headers(auth_type, auth_credentials)
+    _validate_ssrf_url(fhir_url, label="cdr_url")
+    headers = await _build_auth_headers(auth_type, auth_credentials)
     url = f"{fhir_url}/metadata"
     async with httpx.AsyncClient(timeout=15.0) as client:
+        t0 = time.monotonic()
         resp = await client.get(url, headers=headers)
+        response_time_ms = round((time.monotonic() - t0) * 1000)
         resp.raise_for_status()
         data = resp.json()
         return {
             "status": "connected",
             "fhir_version": data.get("fhirVersion", "unknown"),
             "software": data.get("software", {}).get("name", "unknown"),
+            "response_time": response_time_ms,
         }

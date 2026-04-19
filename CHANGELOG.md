@@ -2,16 +2,61 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.0.3.0] - 2026-04-19
+## [0.0.4.0] - 2026-04-19
 
 ### Fixed
-- Bundle upload now pushes clinical data (Patient, Encounter, Observation, etc.) to
-  the active CDR regardless of whether it is the default bundled CDR or an externally
-  configured CDR. Previously, clinical resources were silently skipped when an external
-  CDR was active, causing connectathon demos to produce empty results.
-- When the active CDR has authentication configured (Basic or Bearer), auth headers
-  are now correctly forwarded during clinical data push. Previously, `push_resources`
-  had no auth support, which would produce 401 errors against auth-required external CDRs.
+- Bundle upload now forwards auth headers (Basic or Bearer) when pushing clinical data
+  to an external CDR. `push_resources` now accepts an optional `auth_headers` parameter
+  that is merged into the POST request, matching the auth behavior already present in
+  `run_validation`. External CDRs requiring authentication would previously receive a 401.
+
+## [0.0.3.0] - 2026-04-19
+
+### Added
+- **$data-requirements strategy**: Lenny now uses the DEQM-compliant `$data-requirements`
+  endpoint to fetch only the clinical resources a measure actually needs, replacing the
+  broad `$everything` call. Falls back to `$everything` automatically if the measure engine
+  does not support `$data-requirements` or returns an empty list. codeFilter.valueSet entries
+  are translated to `code:in={valueSetUrl}` CDR search parameters, and per-resource-type
+  failures are isolated so one failing type does not abort all others.
+- **Startup bundle loader**: 12 connectathon bundles (9 DBCG FHIR4 + 3 QICore 2025 Hospital Harm)
+  load automatically on backend startup. Measures, patients, and expected results are available
+  immediately without manual upload. Clinical data now always loads to the active CDR regardless
+  of whether it is the default or an external CDR.
+- **Comparison view on Results page**: A new comparison table shows each patient's actual
+  vs. expected population results side-by-side, including match/mismatch indicators.
+  Requires expected results from loaded test bundles.
+- **`GET /jobs/{id}/comparison` endpoint**: Returns per-patient comparison data against
+  stored expected results for a job.
+- **Golden integration test fixtures**: 12 end-to-end regression fixtures under
+  `tests/integration/golden/` (EXM104–529, CMS816/1017/1218) assert that each seed bundle
+  evaluates to correct population counts after a full HAPI startup.
+
+### Changed
+- Orchestrator uses `DataRequirementsStrategy` by default instead of `BatchQueryStrategy`.
+- `_fetch_by_requirements` now follows FHIR pagination (`link.next`) for resource type queries,
+  preventing silent truncation at 100 resources for patients with large datasets.
+
+### Fixed
+- HAPI FHIR 8.6 measure engine now uses Hibernate Search Lucene backend, fixing ValueSet
+  expansion failures that caused all-zero population counts.
+- Golden integration tests use FHIR batch bundles instead of transaction bundles to avoid
+  HAPI reference validation failures when test fixtures contain partial resource graphs.
+
+## [0.0.2.2] - 2026-04-10
+
+### Added
+- Multi-CDR connection management: full CRUD for CDR connections with support for
+  none/basic/bearer/SMART on FHIR auth, read-only flag, and a default Local CDR row.
+  CDR credentials are stamped on each job at creation. Closes #6.
+
+## [0.0.2.1] - 2026-04-10
+
+### Fixed
+- Bundle upload path collision: two concurrent uploads of the same filename within the
+  same second no longer overwrite each other. A `uuid4` hex token is now embedded in
+  the saved filename (`{timestamp}-{uuid4}-{basename}`), guaranteeing unique paths
+  regardless of upload timing. Closes #63.
 
 ## [0.0.2.0] - 2026-04-09
 

@@ -10,6 +10,7 @@ from app.models.job import Job, JobStatus, MeasureResult
 from app.services.orchestrator import (
     _extract_patient_name,
     _extract_populations,
+    _get_cdr_auth_headers,
     run_job,
 )
 
@@ -310,3 +311,100 @@ async def test_run_job_nonexistent(session_factory):
     with _make_session_factory_patch(session_factory):
         # Should not raise
         await run_job(99999)
+
+
+async def test_get_cdr_auth_headers_reads_from_job_row(test_session, session_factory):
+    """_get_cdr_auth_headers reads auth from the job row, not the active CDRConfig."""
+    job = Job(
+        measure_id="m-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr.example.com/fhir",
+        status=JobStatus.queued,
+        cdr_auth_type="bearer",
+        cdr_auth_credentials={"token": "test-jwt"},
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    with (
+        patch("app.services.orchestrator.async_session", session_factory),
+        patch(
+            "app.services.orchestrator._build_auth_headers",
+            new_callable=AsyncMock,
+            return_value={"Authorization": "Bearer test-jwt"},
+        ) as mock_auth,
+    ):
+        headers = await _get_cdr_auth_headers(job.id)
+
+    assert headers == {"Authorization": "Bearer test-jwt"}
+    mock_auth.assert_called_once_with("bearer", {"token": "test-jwt"})
+
+
+async def test_process_batch_uses_data_requirements_strategy(test_session, session_factory):
+    """_process_single_batch uses DataRequirementsStrategy by default."""
+    from unittest.mock import MagicMock
+
+    from app.models.job import Batch, BatchStatus
+    from app.services.orchestrator import _process_single_batch
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    batch = Batch(
+        job_id=job.id,
+        batch_number=1,
+        patient_ids=["p1"],
+        status=BatchStatus.pending,
+    )
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    patient_map = {"p1": {"resourceType": "Patient", "id": "p1"}}
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.DataRequirementsStrategy") as mock_strategy_cls,
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={
+                "resourceType": "MeasureReport",
+                "status": "complete",
+                "group": [
+                    {
+                        "population": [
+                            {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
+                            {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
+                            {"code": {"coding": [{"code": "numerator"}]}, "count": 0},
+                        ]
+                    }
+                ],
+            },
+        ),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+    ):
+        mock_strategy = MagicMock()
+        mock_strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p1"}])
+        mock_strategy_cls.return_value = mock_strategy
+
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map=patient_map,
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+        )
+
+    mock_strategy_cls.assert_called_once_with("CMS999")

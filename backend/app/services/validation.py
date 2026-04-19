@@ -90,7 +90,7 @@ def _extract_population_counts(measure_report: dict[str, Any]) -> dict[str, int]
             for coding in pop.get("code", {}).get("coding", []):
                 code = coding.get("code", "")
                 if code in valid_codes:
-                    populations[code] = pop.get("count", 0)
+                    populations[code] = populations.get(code, 0) + pop.get("count", 0)
     return populations
 
 
@@ -243,9 +243,15 @@ async def triage_test_bundle(
     """
     measure_defs, clinical, test_cases = _classify_bundle_entries(bundle_json)
 
-    # Push measure definitions to measure engine
+    # Push measure definitions to measure engine in two phases so shared ValueSets
+    # (which trigger HAPI-0902 on re-upload) never block the Measure/Library load.
     if measure_defs:
-        await push_resources(measure_defs)
+        primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
+        secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
+        if secondary:
+            await push_resources(secondary)  # ValueSets/CodeSystems — HAPI-0902 is OK
+        if primary:
+            await push_resources(primary)  # Measure + Library always pushed
 
     # Upsert expected results atomically (avoids TOCTOU on concurrent uploads)
     for tc in test_cases:
@@ -280,7 +286,7 @@ async def triage_test_bundle(
         cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         active_cdr = cdr_result.scalar_one_or_none()
         cdr_url = active_cdr.cdr_url if active_cdr else settings.DEFAULT_CDR_URL
-        cdr_auth = _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials) if active_cdr else {}
+        cdr_auth = await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials) if active_cdr else {}
         await push_resources(clinical, target_url=cdr_url, auth_headers=cdr_auth)
         patients_loaded = sum(1 for r in clinical if r.get("resourceType") == "Patient")
         logger.info(
@@ -292,6 +298,7 @@ async def triage_test_bundle(
         "measures_loaded": sum(1 for r in measure_defs if r.get("resourceType") == "Measure"),
         "patients_loaded": patients_loaded,
         "expected_results_loaded": len(test_cases),
+        "warning_message": None,
     }
 
 
@@ -320,6 +327,7 @@ async def process_bundle_upload(upload_id: int) -> None:
             upload.measures_loaded = summary["measures_loaded"]
             upload.patients_loaded = summary["patients_loaded"]
             upload.expected_results_loaded = summary["expected_results_loaded"]
+            upload.warning_message = summary.get("warning_message")
             upload.status = ValidationStatus.complete
             upload.completed_at = datetime.now(timezone.utc)
             await session.commit()
@@ -414,7 +422,7 @@ async def run_validation(validation_run_id: int) -> None:
             active_cdr = cdr_result.scalar_one_or_none()
             if active_cdr:
                 cdr_url = active_cdr.cdr_url
-                auth_headers = _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials)
+                auth_headers = await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials)
             else:
                 cdr_url = settings.DEFAULT_CDR_URL
                 auth_headers = {}

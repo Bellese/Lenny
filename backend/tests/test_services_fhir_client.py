@@ -7,6 +7,8 @@ import pytest
 
 from app.services.fhir_client import (
     BatchQueryStrategy,
+    DataRequirementsStrategy,
+    _acquire_smart_token,
     _build_auth_headers,
     evaluate_measure,
     list_measures,
@@ -36,17 +38,17 @@ def _make_response(status_code: int, json_data: dict) -> httpx.Response:
 
 
 class TestBuildAuthHeaders:
-    def test_no_auth(self):
-        result = _build_auth_headers("none", None)
+    async def test_no_auth(self):
+        result = await _build_auth_headers("none", None)
         assert result == {}
 
-    def test_no_auth_with_credentials(self):
+    async def test_no_auth_with_credentials(self):
         """Even with credentials, 'none' auth type returns empty."""
-        result = _build_auth_headers("none", {"username": "u", "password": "p"})
+        result = await _build_auth_headers("none", {"username": "u", "password": "p"})
         assert result == {}
 
-    def test_basic_auth(self):
-        result = _build_auth_headers("basic", {"username": "admin", "password": "secret"})
+    async def test_basic_auth(self):
+        result = await _build_auth_headers("basic", {"username": "admin", "password": "secret"})
         assert "Authorization" in result
         assert result["Authorization"].startswith("Basic ")
         import base64
@@ -54,17 +56,31 @@ class TestBuildAuthHeaders:
         decoded = base64.b64decode(result["Authorization"].split(" ")[1]).decode()
         assert decoded == "admin:secret"
 
-    def test_bearer_auth(self):
-        result = _build_auth_headers("bearer", {"token": "my-jwt"})
+    async def test_bearer_auth(self):
+        result = await _build_auth_headers("bearer", {"token": "my-jwt"})
         assert result == {"Authorization": "Bearer my-jwt"}
 
-    def test_unknown_auth_type(self):
-        result = _build_auth_headers("oauth2", {"token": "abc"})
+    async def test_unknown_auth_type(self):
+        result = await _build_auth_headers("oauth2", {"token": "abc"})
         assert result == {}
 
-    def test_basic_auth_no_credentials(self):
-        result = _build_auth_headers("basic", None)
+    async def test_basic_auth_no_credentials(self):
+        result = await _build_auth_headers("basic", None)
         assert result == {}
+
+    async def test_smart_auth(self):
+        """_build_auth_headers with SMART type calls _acquire_smart_token internally."""
+        credentials = {
+            "client_id": "c1",
+            "client_secret": "s1",
+            "token_endpoint": "http://auth.example.com/token",
+        }
+        with patch(
+            "app.services.fhir_client._acquire_smart_token",
+            new=AsyncMock(return_value="smart-token-abc"),
+        ):
+            result = await _build_auth_headers("smart", credentials)
+        assert result == {"Authorization": "Bearer smart-token-abc"}
 
 
 # ---------------------------------------------------------------------------
@@ -315,7 +331,7 @@ async def test_fhir_test_connection_success(mock_fhir_metadata):
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        result = await fhir_test_connection("http://example.com/fhir")
+        result = await fhir_test_connection("https://example.com/fhir")
 
     assert result["status"] == "connected"
     assert result["fhir_version"] == "4.0.1"
@@ -331,7 +347,7 @@ async def test_fhir_test_connection_failed():
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with pytest.raises(httpx.ConnectError):
-            await fhir_test_connection("http://bad-server/fhir")
+            await fhir_test_connection("https://bad-server/fhir")
 
 
 async def test_fhir_test_connection_401():
@@ -339,7 +355,7 @@ async def test_fhir_test_connection_401():
     mock_response = httpx.Response(
         401,
         json={"error": "unauthorized"},
-        request=httpx.Request("GET", "http://example.com/fhir/metadata"),
+        request=httpx.Request("GET", "https://example.com/fhir/metadata"),
     )
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
@@ -349,7 +365,7 @@ async def test_fhir_test_connection_401():
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with pytest.raises(httpx.HTTPStatusError):
-            await fhir_test_connection("http://example.com/fhir")
+            await fhir_test_connection("https://example.com/fhir")
 
 
 async def test_fhir_test_connection_500():
@@ -357,7 +373,7 @@ async def test_fhir_test_connection_500():
     mock_response = httpx.Response(
         500,
         json={"error": "server error"},
-        request=httpx.Request("GET", "http://example.com/fhir/metadata"),
+        request=httpx.Request("GET", "https://example.com/fhir/metadata"),
     )
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
@@ -367,7 +383,7 @@ async def test_fhir_test_connection_500():
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with pytest.raises(httpx.HTTPStatusError):
-            await fhir_test_connection("http://example.com/fhir")
+            await fhir_test_connection("https://example.com/fhir")
 
 
 async def test_fhir_test_connection_timeout():
@@ -379,7 +395,7 @@ async def test_fhir_test_connection_timeout():
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with pytest.raises(httpx.TimeoutException):
-            await fhir_test_connection("http://slow-server/fhir")
+            await fhir_test_connection("https://slow-server/fhir")
 
 
 # ---------------------------------------------------------------------------
@@ -444,3 +460,649 @@ async def test_upload_measure_bundle():
         result = await upload_measure_bundle(input_bundle)
 
     assert result["type"] == "transaction-response"
+
+
+# ---------------------------------------------------------------------------
+# _acquire_smart_token
+# ---------------------------------------------------------------------------
+
+
+_SMART_CREDENTIALS = {
+    "client_id": "c1",
+    "client_secret": "s1",
+    "token_endpoint": "https://auth.example.com/token",
+}
+
+
+class TestAcquireSmartToken:
+    async def test_success(self):
+        """_acquire_smart_token returns the access_token on success."""
+        token_response = httpx.Response(
+            200,
+            json={"access_token": "tok123", "token_type": "bearer"},
+            request=httpx.Request("POST", "https://auth.example.com/token"),
+        )
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(return_value=token_response)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            token = await _acquire_smart_token(_SMART_CREDENTIALS)
+
+        assert token == "tok123"
+        call_args = mock_ctx.post.call_args
+        assert call_args[0][0] == "https://auth.example.com/token"
+        posted_data = call_args.kwargs.get("data") or call_args[1].get("data")
+        assert posted_data["grant_type"] == "client_credentials"
+        assert posted_data["client_id"] == "c1"
+        assert posted_data["client_secret"] == "s1"
+
+    async def test_401_raises(self):
+        """_acquire_smart_token raises HTTPStatusError on 401."""
+        error_response = httpx.Response(
+            401,
+            json={"error": "unauthorized"},
+            request=httpx.Request("POST", "http://auth.example.com/token"),
+        )
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(return_value=error_response)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with pytest.raises(httpx.HTTPStatusError):
+                await _acquire_smart_token(_SMART_CREDENTIALS)
+
+    async def test_500_raises(self):
+        """_acquire_smart_token raises HTTPStatusError on 500."""
+        error_response = httpx.Response(
+            500,
+            json={"error": "server error"},
+            request=httpx.Request("POST", "http://auth.example.com/token"),
+        )
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(return_value=error_response)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with pytest.raises(httpx.HTTPStatusError):
+                await _acquire_smart_token(_SMART_CREDENTIALS)
+
+    async def test_network_error_raises(self):
+        """_acquire_smart_token propagates network errors."""
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with pytest.raises(httpx.ConnectError):
+                await _acquire_smart_token(_SMART_CREDENTIALS)
+
+    async def test_ssrf_blocked_http_external(self):
+        """_acquire_smart_token rejects plain http for non-localhost token_endpoint."""
+        creds = {
+            "client_id": "c1",
+            "client_secret": "s1",
+            "token_endpoint": "http://evil.example.com/token",
+        }
+        with pytest.raises(ValueError, match="SSRF protection"):
+            await _acquire_smart_token(creds)
+
+    async def test_ssrf_blocked_rfc1918(self):
+        """_acquire_smart_token rejects RFC-1918 addresses."""
+        creds = {
+            "client_id": "c1",
+            "client_secret": "s1",
+            "token_endpoint": "https://192.168.1.1/token",
+        }
+        with pytest.raises(ValueError, match="SSRF protection"):
+            await _acquire_smart_token(creds)
+
+    async def test_ssrf_allowed_localhost_http(self):
+        """_acquire_smart_token allows http://localhost for local dev."""
+        creds = {
+            "client_id": "c1",
+            "client_secret": "s1",
+            "token_endpoint": "http://localhost:9090/token",
+        }
+        token_response = httpx.Response(
+            200,
+            json={"access_token": "local-tok"},
+            request=httpx.Request("POST", "http://localhost:9090/token"),
+        )
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(return_value=token_response)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            token = await _acquire_smart_token(creds)
+        assert token == "local-tok"
+
+    async def test_ssrf_allowed_127_http(self):
+        """_acquire_smart_token allows http://127.0.0.1 for local dev."""
+        creds = {
+            "client_id": "c1",
+            "client_secret": "s1",
+            "token_endpoint": "http://127.0.0.1:8080/token",
+        }
+        token_response = httpx.Response(
+            200,
+            json={"access_token": "loopback-tok"},
+            request=httpx.Request("POST", "http://127.0.0.1:8080/token"),
+        )
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.post = AsyncMock(return_value=token_response)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            token = await _acquire_smart_token(creds)
+        assert token == "loopback-tok"
+
+
+# ---------------------------------------------------------------------------
+# _validate_ssrf_url
+# ---------------------------------------------------------------------------
+
+
+class TestValidateSsrfUrl:
+    def test_https_external_allowed(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        _validate_ssrf_url("https://fhir.example.com/token")  # should not raise
+
+    def test_http_localhost_allowed(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        _validate_ssrf_url("http://localhost:8080/fhir")  # should not raise
+
+    def test_http_127_allowed(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        _validate_ssrf_url("http://127.0.0.1/fhir")  # should not raise
+
+    def test_http_external_blocked(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="must use https"):
+            _validate_ssrf_url("http://external.example.com/fhir")
+
+    def test_ftp_blocked(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="not allowed"):
+            _validate_ssrf_url("ftp://example.com/file")
+
+    def test_rfc1918_10_blocked(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="private/reserved"):
+            _validate_ssrf_url("https://10.0.0.1/fhir")
+
+    def test_rfc1918_172_blocked(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="private/reserved"):
+            _validate_ssrf_url("https://172.16.0.1/fhir")
+
+    def test_rfc1918_192_168_blocked(self):
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="private/reserved"):
+            _validate_ssrf_url("https://192.168.100.200/fhir")
+
+    def test_imds_endpoint_http_blocked(self):
+        """Classic AWS IMDSv1 endpoint — http with non-local host is blocked."""
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="must use https"):
+            _validate_ssrf_url("http://169.254.169.254/latest/meta-data/")
+
+    def test_imds_endpoint_https_blocked(self):
+        """AWS IMDS link-local over https is blocked by IP range check."""
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="private/reserved"):
+            _validate_ssrf_url("https://169.254.169.254/latest/meta-data/")
+
+    def test_ipv6_loopback_allowed(self):
+        """::1 is in the local dev allowlist."""
+        from app.services.fhir_client import _validate_ssrf_url
+
+        _validate_ssrf_url("http://[::1]:8080/fhir")  # should not raise
+
+    def test_ipv6_link_local_blocked(self):
+        """fe80:: link-local IPv6 is blocked."""
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="private/reserved"):
+            _validate_ssrf_url("https://[fe80::1]/fhir")
+
+    def test_ipv6_ula_blocked(self):
+        """fc00::/7 Unique Local Address IPv6 is blocked."""
+        from app.services.fhir_client import _validate_ssrf_url
+
+        with pytest.raises(ValueError, match="private/reserved"):
+            _validate_ssrf_url("https://[fd00::1]/fhir")
+
+
+async def test_verify_fhir_connection_ssrf_blocked():
+    """verify_fhir_connection raises ValueError for http non-localhost URLs."""
+    with pytest.raises(ValueError, match="SSRF protection"):
+        await fhir_test_connection("http://internal.corp.example.com/fhir")
+
+
+# ---------------------------------------------------------------------------
+# DataRequirementsStrategy
+# ---------------------------------------------------------------------------
+
+
+async def test_data_requirements_strategy_uses_requirements():
+    """DataRequirementsStrategy fetches resources per $data-requirements entries."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [
+            {"type": "Patient"},
+            {"type": "Observation"},
+        ],
+    }
+    patient_resource = {"resourceType": "Patient", "id": "p1"}
+    obs_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Observation", "id": "o1"}}],
+        "link": [],
+    }
+
+    get_responses = {
+        "Measure/m1/$data-requirements": _make_response(200, data_req_response),
+        "Observation?subject=Patient/p1": _make_response(200, obs_bundle),
+        "Patient/p1": _make_response(200, patient_resource),
+    }
+
+    async def mock_get(url, **kwargs):
+        for key, resp in get_responses.items():
+            if key in url:
+                return resp
+        return _make_response(404, {})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    assert len(resources) == 2
+    types = {r["resourceType"] for r in resources}
+    assert types == {"Patient", "Observation"}
+
+
+async def test_data_requirements_strategy_falls_back_on_empty():
+    """DataRequirementsStrategy falls back to $everything when $data-requirements returns no entries."""
+    empty_lib = {"resourceType": "Library", "dataRequirement": []}
+    everything_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
+        "link": [],
+    }
+
+    call_count = {"n": 0}
+
+    async def mock_get(url, **kwargs):
+        call_count["n"] += 1
+        if "$data-requirements" in url:
+            return _make_response(200, empty_lib)
+        return _make_response(200, everything_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    assert len(resources) == 1
+    assert resources[0]["resourceType"] == "Patient"
+    assert call_count["n"] >= 2
+
+
+async def test_data_requirements_strategy_falls_back_on_error():
+    """DataRequirementsStrategy falls back to $everything when $data-requirements raises."""
+    import httpx as _httpx_module
+
+    everything_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
+        "link": [],
+    }
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            raise _httpx_module.ConnectError("MCS unreachable")
+        return _make_response(200, everything_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    assert len(resources) == 1
+
+
+async def test_data_requirements_strategy_fetch_fails_falls_back_to_everything():
+    """DataRequirementsStrategy falls back to $everything when CDR fetch raises."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [{"type": "Patient"}],
+    }
+    everything_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
+        "link": [],
+    }
+
+    call_count = {"n": 0}
+
+    async def mock_get(url, **kwargs):
+        call_count["n"] += 1
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        if "Patient/p1" in url and "$everything" not in url:
+            raise httpx.ConnectError("CDR unreachable")
+        # fallback $everything call
+        return _make_response(200, everything_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    # Should have fallen back to $everything and returned the patient
+    assert any(r.get("resourceType") == "Patient" for r in resources)
+
+
+async def test_data_requirements_strategy_dedup_skips_duplicate_types():
+    """DataRequirementsStrategy skips a resource type that appears twice in requirements."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [
+            {"type": "Observation"},
+            {"type": "Observation"},  # duplicate — should only query once
+        ],
+    }
+    obs_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Observation", "id": "o1"}}],
+        "link": [],
+    }
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(
+            side_effect=lambda url, **kw: (
+                _make_response(200, data_req_response)
+                if "$data-requirements" in url
+                else _make_response(200, obs_bundle)
+            )
+        )
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    # Only one Observation even though type appeared twice
+    obs_resources = [r for r in resources if r.get("resourceType") == "Observation"]
+    assert len(obs_resources) == 1
+
+
+async def test_data_requirements_strategy_non_200_patient_not_appended():
+    """DataRequirementsStrategy skips Patient resource when CDR returns non-200."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [{"type": "Patient"}],
+    }
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(
+            side_effect=lambda url, **kw: (
+                _make_response(200, data_req_response)
+                if "$data-requirements" in url
+                else _make_response(404, {"resourceType": "OperationOutcome"})
+            )
+        )
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    # 404 from CDR means no resources returned (no fallback for non-200 within _fetch_by_requirements)
+    assert resources == []
+
+
+async def test_data_requirements_strategy_non_200_resource_entries_skipped():
+    """DataRequirementsStrategy skips entries when CDR returns non-200 for a resource type."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [{"type": "Condition"}],
+    }
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(
+            side_effect=lambda url, **kw: (
+                _make_response(200, data_req_response)
+                if "$data-requirements" in url
+                else _make_response(500, {"resourceType": "OperationOutcome"})
+            )
+        )
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    assert resources == []
+
+
+async def test_fetch_by_requirements_code_filter_appends_code_in():
+    """codeFilter.valueSet is translated to code:in= search parameter (AC2)."""
+    vs_url = "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.198.12.1134"
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [
+            {
+                "type": "Observation",
+                "codeFilter": [{"valueSet": vs_url}],
+            }
+        ],
+    }
+    obs_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Observation", "id": "o1"}}],
+        "link": [],
+    }
+
+    captured_urls: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        captured_urls.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        return _make_response(200, obs_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    obs_url = next((u for u in captured_urls if "Observation" in u), None)
+    assert obs_url is not None
+    assert "code:in=" in obs_url
+    assert vs_url in obs_url
+    assert len(resources) == 1
+
+
+async def test_fetch_by_requirements_date_filter_does_not_add_params():
+    """dateFilter entries do not modify the URL — type-only query used (AC2)."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [
+            {
+                "type": "Observation",
+                "dateFilter": [{"path": "effective", "valuePeriod": {"start": "2024-01-01", "end": "2024-12-31"}}],
+            }
+        ],
+    }
+    obs_bundle = {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []}
+
+    captured_urls: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        captured_urls.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        return _make_response(200, obs_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    obs_url = next((u for u in captured_urls if "Observation" in u), None)
+    assert obs_url is not None
+    assert "code:in" not in obs_url
+
+
+async def test_fetch_by_requirements_no_filter_type_only():
+    """dataRequirement with no codeFilter generates plain type+subject query (AC2 baseline)."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [{"type": "Encounter"}],
+    }
+    enc_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Encounter", "id": "e1"}}],
+        "link": [],
+    }
+
+    captured_urls: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        captured_urls.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        return _make_response(200, enc_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    enc_url = next((u for u in captured_urls if "Encounter" in u), None)
+    assert enc_url is not None
+    assert "code:in" not in enc_url
+    assert len(resources) == 1
+
+
+async def test_fetch_by_requirements_one_type_fails_partial_result_no_fallback():
+    """One type fails CDR fetch — others succeed; partial result returned without $everything (AC5)."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [
+            {"type": "Observation"},
+            {"type": "Condition"},
+        ],
+    }
+    obs_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Observation", "id": "o1"}}],
+        "link": [],
+    }
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        if "Observation" in url:
+            return _make_response(200, obs_bundle)
+        if "Condition" in url:
+            raise httpx.ConnectError("CDR unreachable for Condition")
+        return _make_response(200, {"resourceType": "Bundle", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        resources = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    # Observation fetched; Condition skipped; no $everything fallback
+    assert any(r.get("resourceType") == "Observation" for r in resources)
+    assert not any(r.get("resourceType") == "Condition" for r in resources)
+    everything_calls = [c for c in mock_ctx.get.call_args_list if "$everything" in str(c)]
+    assert len(everything_calls) == 0
+
+
+async def test_data_requirements_strategy_gather_patients_delegates_to_batch():
+    """DataRequirementsStrategy.gather_patients uses the same BatchQuery logic."""
+    patient_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
+        "link": [],
+    }
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=_make_response(200, patient_bundle))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1")
+        patients = await strategy.gather_patients("http://cdr/fhir", {})
+
+    assert len(patients) == 1
+    assert patients[0]["id"] == "p1"

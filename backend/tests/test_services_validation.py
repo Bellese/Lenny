@@ -417,38 +417,42 @@ class TestTriageTestBundle:
         # Measure + Library = 2 measure defs → push_resources called once for defs
         assert result["measures_loaded"] == 1  # only Measure type counts
         assert result["expected_results_loaded"] == 1  # one isTestCase MeasureReport
-        # clinical data (Patient + Observation) was pushed because CDR == DEFAULT_CDR_URL
+        # clinical data (Patient + Observation) was pushed because CDR is not read-only
         assert result["patients_loaded"] == 1  # one Patient resource
+        assert result.get("warning_message") is None
         assert mock_push.call_count >= 1
 
     async def test_external_cdr_clinical_is_pushed(self, test_session, mock_test_bundle_with_expected):
         """When an external CDR is active, clinical data IS pushed to that CDR."""
-        from app.models.config import CDRConfig
+        from app.models.config import AuthType, CDRConfig
 
-        # Insert an active external CDR config
+        # Insert an active external CDR config (marked read-only in DB, but guard is removed)
         external_cdr = CDRConfig(
             cdr_url="http://external-cdr.example.com/fhir",
+            auth_type=AuthType.none,
             is_active=True,
+            name="External CDR",
+            is_default=False,
+            is_read_only=True,
         )
         test_session.add(external_cdr)
         await test_session.commit()
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
-            with patch("app.services.validation.settings") as mock_settings:
-                mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                orig_execute = test_session.execute
+            orig_execute = test_session.execute
 
-                async def _execute_interceptor(stmt, *args, **kwargs):
-                    if hasattr(stmt, "excluded"):
-                        return MagicMock()
-                    return await orig_execute(stmt, *args, **kwargs)
+            async def _execute_interceptor(stmt, *args, **kwargs):
+                if hasattr(stmt, "excluded"):
+                    return MagicMock()
+                return await orig_execute(stmt, *args, **kwargs)
 
-                test_session.execute = _execute_interceptor
+            test_session.execute = _execute_interceptor
 
-                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         # clinical data IS pushed to the external CDR
         assert result["patients_loaded"] == 1
+        assert result.get("warning_message") is None
         # Verify push_resources was called with the external CDR URL for clinical data
         clinical_push_calls = [
             call
@@ -605,7 +609,12 @@ class TestProcessBundleUpload:
                 ctx.__aexit__ = AsyncMock(return_value=False)
                 return ctx
 
-            triage_summary = {"measures_loaded": 1, "patients_loaded": 1, "expected_results_loaded": 1}
+            triage_summary = {
+                "measures_loaded": 1,
+                "patients_loaded": 1,
+                "expected_results_loaded": 1,
+                "warning_message": None,
+            }
 
             with patch("app.services.validation.async_session", side_effect=lambda: make_ctx()):
                 with patch(  # noqa: E501
@@ -621,6 +630,58 @@ class TestProcessBundleUpload:
             assert upload.measures_loaded == 1
             assert upload.patients_loaded == 1
             assert upload.expected_results_loaded == 1
+            assert upload.warning_message is None
+        finally:
+            os.unlink(tmp_path)
+
+    async def test_process_bundle_upload_stores_triage_warning_message(self, test_session):
+        """process_bundle_upload stores warning_message on the upload when triage returns one."""
+        import json
+        import os
+        import tempfile
+
+        from app.models.validation import BundleUpload, ValidationStatus
+
+        bundle_data = {"resourceType": "Bundle", "type": "transaction", "entry": []}
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(bundle_data, f)
+            tmp_path = f.name
+
+        try:
+            upload = BundleUpload(
+                filename="test.json",
+                file_path=tmp_path,
+                status=ValidationStatus.queued,
+            )
+            test_session.add(upload)
+            await test_session.commit()
+            await test_session.refresh(upload)
+            upload_id = upload.id
+
+            def make_ctx():
+                ctx = MagicMock()
+                ctx.__aenter__ = AsyncMock(return_value=test_session)
+                ctx.__aexit__ = AsyncMock(return_value=False)
+                return ctx
+
+            triage_summary = {
+                "measures_loaded": 0,
+                "patients_loaded": 0,
+                "expected_results_loaded": 0,
+                "warning_message": "Clinical test data was not loaded because the active CDR is read-only.",
+            }
+
+            with patch("app.services.validation.async_session", side_effect=lambda: make_ctx()):
+                with patch(
+                    "app.services.validation.triage_test_bundle",
+                    new_callable=AsyncMock,
+                    return_value=triage_summary,
+                ):
+                    await process_bundle_upload(upload_id)
+
+            await test_session.refresh(upload)
+            assert upload.status == ValidationStatus.complete
+            assert upload.warning_message == "Clinical test data was not loaded because the active CDR is read-only."
         finally:
             os.unlink(tmp_path)
 

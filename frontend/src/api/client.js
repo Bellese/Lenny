@@ -33,7 +33,21 @@ async function request(path, options = {}) {
     } catch {
       // Response may not be JSON
     }
-    const message = body?.detail || body?.message || `Request failed: ${response.status} ${response.statusText}`;
+    const raw = body?.detail || body?.message;
+    let message;
+    if (!raw) {
+      message = `Request failed: ${response.status} ${response.statusText}`;
+    } else if (typeof raw === 'string') {
+      message = raw;
+    } else if (raw?.issue?.[0]?.diagnostics) {
+      // FHIR OperationOutcome
+      message = raw.issue[0].diagnostics;
+    } else if (Array.isArray(raw)) {
+      // FastAPI validation error array
+      message = raw.map(e => e.msg || JSON.stringify(e)).join('; ');
+    } else {
+      message = `Request failed: ${response.status} ${response.statusText}`;
+    }
     throw new ApiError(message, response.status, body);
   }
 
@@ -105,16 +119,35 @@ export function getEvaluatedResources(resultId) {
   return request(`/results/${resultId}/evaluated-resources`);
 }
 
-// Settings
-export function getSettings() {
-  return request('/settings');
+// Connections
+export function getConnections() {
+  return request('/settings/connections');
 }
 
-export function updateSettings(data) {
-  return request('/settings', {
+export function createConnection(data) {
+  return request('/settings/connections', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function getConnection(id) {
+  return request(`/settings/connections/${id}`);
+}
+
+export function updateConnection(id, data) {
+  return request(`/settings/connections/${id}`, {
     method: 'PUT',
     body: JSON.stringify(data),
   });
+}
+
+export function deleteConnection(id) {
+  return request(`/settings/connections/${id}`, { method: 'DELETE' });
+}
+
+export function activateConnection(id) {
+  return request(`/settings/connections/${id}/activate`, { method: 'POST' });
 }
 
 export function testConnection(data) {
@@ -155,4 +188,9 @@ export function getValidationRuns() {
 
 export function getValidationRun(runId) {
   return request(`/validation/runs/${runId}`);
+}
+
+// Comparison
+export function getJobComparison(jobId) {
+  return request(`/jobs/${jobId}/comparison`);
 }

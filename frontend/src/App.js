@@ -70,6 +70,8 @@ const NAV_ITEMS = [
 export default function App() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [cdrStatus, setCdrStatus] = useState('unknown');
+  const [cdrName, setCdrName] = useState('');
+  const [cdrReadOnly, setCdrReadOnly] = useState(false);
   const location = useLocation();
 
   // Close sidebar on navigation
@@ -82,8 +84,12 @@ export default function App() {
     try {
       const health = await getHealth();
       setCdrStatus(health?.cdr?.status ?? 'unknown');
+      setCdrName(health?.cdr?.name ?? '');
+      setCdrReadOnly(health?.cdr?.is_read_only ?? false);
     } catch {
       setCdrStatus('unknown');
+      setCdrName('');
+      setCdrReadOnly(false);
     }
   }, []);
 
@@ -115,9 +121,9 @@ export default function App() {
         </button>
         <Link to="/measures" className={styles.logo}>MCT2</Link>
         <div className={styles.topbarRight}>
-          <div className={styles.cdrIndicator} aria-label={`CDR status: ${cdrStatus}`}>
+          <div className={styles.cdrIndicator} aria-label={`CDR: ${cdrName || 'Local CDR'}${cdrReadOnly ? ' (read-only)' : ''}, status: ${cdrStatus}`}>
             <span className={styles.cdrDot} data-status={cdrStatus} aria-hidden="true" />
-            <span>CDR: Default</span>
+            <span>CDR: {cdrName || 'Local CDR'}{cdrReadOnly ? ' (read-only)' : ''}</span>
           </div>
           <NavLink
             to="/settings"

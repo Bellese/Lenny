@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -66,7 +67,7 @@ async def upload_bundle(
     await asyncio.to_thread(os.makedirs, UPLOAD_DIR, exist_ok=True)
     timestamp = int(time.time())
     # Sanitize filename to prevent path traversal (e.g. ../../etc/cron.d/evil.json)
-    safe_filename = f"{timestamp}-{os.path.basename(file.filename)}"
+    safe_filename = f"{timestamp}-{uuid.uuid4().hex}-{os.path.basename(file.filename)}"
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
 
     def _write_file() -> None:
@@ -107,6 +108,7 @@ async def list_uploads(session: AsyncSession = Depends(get_session)) -> dict:
                 "patients_loaded": u.patients_loaded,
                 "expected_results_loaded": u.expected_results_loaded,
                 "error_message": u.error_message,
+                "warning_message": u.warning_message,
                 "created_at": u.created_at.isoformat() if u.created_at else None,
                 "completed_at": u.completed_at.isoformat() if u.completed_at else None,
             }

@@ -5,7 +5,7 @@
 **Why:** Batch queries work for ~4,000 patients but may not scale to larger populations. $export returns NDJSON files asynchronously and is purpose-built for bulk extraction — 10-100x faster for large populations with less CDR load.
 **Cons:** Not all CDRs support $export yet. Requires async polling for export completion.
 **Context:** The `DataAcquisitionStrategy` ABC is already in place (v1 ships with `BatchQueryStrategy`). This is a clean plug-in addition — implement the interface, register alongside BatchQueryStrategy, expose in settings UI.
-**Depends on:** v1 strategy pattern in `fhir_client.py`.
+**Depends on:** Strategy pattern in `fhir_client.py` (v0.0.3 ships `DataRequirementsStrategy` as default, `BatchQueryStrategy` as fallback).
 
 ## SMART on FHIR / OAuth2 Authentication
 **What:** Add SMART on FHIR backend services auth flow for CDR connections.
