@@ -83,9 +83,6 @@ def main() -> None:
 
     all_types = set(bundle_resource_types.keys())
 
-    # Types that are neither measure defs nor known clinical types — unknown routing
-    neither = all_types - MEASURE_DEF_TYPES - TEST_CASE_TYPES
-
     # Clinical candidates: not measure defs, not test-case containers
     clinical_types = all_types - MEASURE_DEF_TYPES - TEST_CASE_TYPES
 
