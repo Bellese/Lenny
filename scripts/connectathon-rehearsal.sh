@@ -391,8 +391,8 @@ OVERALL_PASS=true
 
 while IFS= read -r manifest_line; do
     measure_id=$(echo "$manifest_line" | jq -r '.id')
-    expected_cases=$(echo "$manifest_line" | jq '.expected_test_cases')
-    known_issues=$(echo "$manifest_line" | jq -r '.known_issues | join("; ")')
+    expected_cases=$(echo "$manifest_line" | jq '.expected_test_cases // 0')
+    known_issues=$(echo "$manifest_line" | jq -r '(.known_issues // []) | join("; ")')
 
     # --- loaded? ---
     found_in_api=$(echo "$measures_body" | jq -r --arg id "$measure_id" \
