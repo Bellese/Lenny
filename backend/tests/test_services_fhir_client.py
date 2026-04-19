@@ -7,6 +7,7 @@ import pytest
 
 from app.services.fhir_client import (
     BatchQueryStrategy,
+    DataRequirementsStrategy,
     _acquire_smart_token,
     _build_auth_headers,
     evaluate_measure,
@@ -677,8 +678,6 @@ async def test_verify_fhir_connection_ssrf_blocked():
 # ---------------------------------------------------------------------------
 # DataRequirementsStrategy
 # ---------------------------------------------------------------------------
-
-from app.services.fhir_client import DataRequirementsStrategy
 
 
 async def test_data_requirements_strategy_uses_requirements():

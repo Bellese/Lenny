@@ -327,7 +327,9 @@ async def test_create_job_stamps_cdr_auth_type_as_string_value(client, test_sess
 async def test_get_comparison_httpx_exception_returns_no_expected(client, test_session):
     """Returns has_expected=False when httpx raises while resolving measure URL."""
     from unittest.mock import AsyncMock, patch
+
     import httpx as _httpx
+
     from app.models.job import Job, JobStatus, MeasureResult
 
     job = Job(
@@ -366,7 +368,9 @@ async def test_get_comparison_httpx_exception_returns_no_expected(client, test_s
 async def test_get_comparison_patient_not_in_expected_skipped(client, test_session):
     """Actual patients with no matching ExpectedResult are excluded from comparison output."""
     from unittest.mock import AsyncMock, patch
+
     import httpx as _httpx
+
     from app.models.job import Job, JobStatus, MeasureResult
     from app.models.validation import ExpectedResult
 
@@ -428,7 +432,9 @@ async def test_get_comparison_patient_not_in_expected_skipped(client, test_sessi
 async def test_get_comparison_with_mismatch(client, test_session):
     """Returns match=False and mismatches list when actual populations differ from expected."""
     from unittest.mock import AsyncMock, patch
+
     import httpx as _httpx
+
     from app.models.job import Job, JobStatus, MeasureResult
     from app.models.validation import ExpectedResult
 
@@ -522,7 +528,9 @@ async def test_get_comparison_no_results(client, test_session):
 async def test_get_comparison_no_expected_in_db(client, test_session):
     """Returns has_expected=False when MeasureResults exist but no ExpectedResult in DB."""
     from unittest.mock import AsyncMock, patch
+
     import httpx as _httpx
+
     from app.models.job import Job, JobStatus, MeasureResult
 
     job = Job(
@@ -564,7 +572,9 @@ async def test_get_comparison_no_expected_in_db(client, test_session):
 async def test_get_comparison_with_match(client, test_session):
     """Returns comparison data when expected results exist and populations match."""
     from unittest.mock import AsyncMock, patch
+
     import httpx as _httpx
+
     from app.models.job import Job, JobStatus, MeasureResult
     from app.models.validation import ExpectedResult
 
