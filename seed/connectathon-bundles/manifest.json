@@ -1,0 +1,126 @@
+{
+  "version": "2026-05",
+  "track": "MADiE May 2026 Connectathon",
+  "measures": [
+    {
+      "id": "CMS1017FHIRHHFI",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS1017FHIRHHFI",
+      "bundle_file": "CMS1017FHIRHHFI-bundle.json",
+      "sha256": "457cfded9614281ef4ef56a12892599f19c1fb8f4b5085ea634d2815f21bef01",
+      "expected_test_cases": 65,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS1218FHIRHHRF",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS1218FHIRHHRF",
+      "bundle_file": "CMS1218FHIRHHRF-bundle.json",
+      "sha256": "eb907e0e5be10adca2d81bdfe3dd5bfaf647879ae08b6d177f3701549e105714",
+      "expected_test_cases": 75,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS816FHIRHHHypo",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS816FHIRHHHypo",
+      "bundle_file": "CMS816FHIRHHHypo-bundle.json",
+      "sha256": "184209635f36c7420bb40b62ae0c616ff67aee2396f1c6d4ae06c5bcb576d598",
+      "expected_test_cases": 28,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "EXM104_FHIR4-8.1.000",
+      "canonical_url": "http://hl7.org/fhir/us/cqfmeasures/Measure/measure-exm104-FHIR4",
+      "bundle_file": "EXM104_FHIR4-8.1.000-bundle.json",
+      "sha256": "2def72de505b376d31b8c27bced059b4dfcb5d22baa551d2b436a6d7b47a7e3f",
+      "expected_test_cases": 2,
+      "period": {"start": "2019-01-01", "end": "2019-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "EXM105_FHIR4-8.1.000",
+      "canonical_url": "http://hl7.org/fhir/us/cqfmeasures/Measure/measure-exm105-FHIR4",
+      "bundle_file": "EXM105_FHIR4-8.1.000-bundle.json",
+      "sha256": "63ba8b9b6234702d34a431206776123ab1aebe22e7016f682d1dc7969cefc3f7",
+      "expected_test_cases": 2,
+      "period": {"start": "2019-01-01", "end": "2019-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "EXM108_FHIR4-8.2.000",
+      "canonical_url": "http://hl7.org/fhir/us/cqfmeasures/Measure/measure-exm108-FHIR4",
+      "bundle_file": "EXM108_FHIR4-8.2.000-bundle.json",
+      "sha256": "67e26b598224599871f20922bc8f862286a131671360c5b34aa461f4055391aa",
+      "expected_test_cases": 2,
+      "period": {"start": "2019-01-01", "end": "2019-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "EXM124_FHIR4-8.2.000",
+      "canonical_url": "http://hl7.org/fhir/us/cqfmeasures/Measure/measure-exm124-FHIR4",
+      "bundle_file": "EXM124_FHIR4-8.2.000-bundle.json",
+      "sha256": "9b86f111ade1ab905828724058f8c5b0ebada3112474cffc21bc116962178dd4",
+      "expected_test_cases": 2,
+      "period": {"start": "2019-01-01", "end": "2019-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "EXM125_FHIR4-7.2.000",
+      "canonical_url": "http://hl7.org/fhir/us/cqfmeasures/Measure/measure-exm125-FHIR4",
+      "bundle_file": "EXM125_FHIR4-7.2.000-bundle.json",
+      "sha256": "6eee0df4cb4d9b05078cd2730c1da040359701bd0466f17962d6c4fd9076108a",
+      "expected_test_cases": 2,
+      "period": {"start": "2019-01-01", "end": "2019-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "EXM130_FHIR4-7.2.000",
+      "canonical_url": "http://hl7.org/fhir/us/cqfmeasures/Measure/measure-exm130-FHIR4",
+      "bundle_file": "EXM130_FHIR4-7.2.000-bundle.json",
+      "sha256": "87213df16c05136b956c3f5e8f9be9dec3fd1f01d3c5b9787596163c823f2be1",
+      "expected_test_cases": 2,
+      "period": {"start": "2018-01-01", "end": "2018-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "EXM165_FHIR4-8.5.000",
+      "canonical_url": "http://hl7.org/fhir/us/cqfmeasures/Measure/measure-exm165-FHIR",
+      "bundle_file": "EXM165_FHIR4-8.5.000-bundle.json",
+      "sha256": "428aeff77cc4a9026b52813308de8e5d6309a3e9229b71f982f19948a22fbd3b",
+      "expected_test_cases": 0,
+      "period": {"start": "2019-01-01", "end": "2019-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "EXM506_FHIR4-2.1.000",
+      "canonical_url": "http://hl7.org/fhir/us/cqfmeasures/Measure/measure-exm506-FHIR4",
+      "bundle_file": "EXM506_FHIR4-2.1.000-bundle.json",
+      "sha256": "87d6286a427c380223f9703fd1ded49748dd8937fdfd0b2e18b3757b3d26a955",
+      "expected_test_cases": 0,
+      "period": {"start": "2020-01-01", "end": "2020-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "EXM529_FHIR4-1.0.000",
+      "canonical_url": "http://hl7.org/fhir/us/cqfmeasures/Measure/measure-EXM529-FHIR",
+      "bundle_file": "EXM529_FHIR4-1.0.000-bundle.json",
+      "sha256": "2a42fe51342c7535b5270c3171be85a823c1da3bc6e056d374d06d53f9b0c1c9",
+      "expected_test_cases": 0,
+      "period": {"start": "2019-01-01", "end": "2019-12-31"},
+      "strict": true,
+      "known_issues": []
+    }
+  ]
+}
