@@ -11,11 +11,19 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://mct2:${POSTGRES_PASSWORD}@db:5432/mct2
       ALLOWED_ORIGINS: https://${CADDY_HOST}
+    volumes:
+      - ./seed/connectathon-bundles:/seed/connectathon-bundles:ro
 
   db:
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+  hapi-fhir-cdr:
+    restart: unless-stopped
+
+  hapi-fhir-measure:
+    restart: unless-stopped
 
   caddy:
     restart: unless-stopped
