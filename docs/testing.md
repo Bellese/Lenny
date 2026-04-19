@@ -90,12 +90,27 @@ mkdir -p backend/tests/integration/golden/my-measure
 
 The test runner (`test_golden_measures.py`) discovers and runs all bundles automatically.
 
-**Golden tests currently assert structural correctness only:**
-- Response is a `MeasureReport`
-- At least one population group is present
-- Patient reference is present
+**Golden tests validate exact population counts** against the expected MeasureReports
+embedded in each bundle. For each test case MeasureReport in the bundle, the test
+calls `$evaluate-measure` and compares actual vs. expected population counts for
+`initial-population`, `denominator`, `denominator-exclusion`, `numerator`, and
+`numerator-exclusion`.
 
-Exact population count assertions should be added once HAPI evaluation behavior is confirmed stable on CI runners.
+**Active golden bundles** (EXM124 + 8 connectathon bundles, all in `golden/`):
+
+| Bundle | Test cases | Notes |
+|--------|-----------|-------|
+| EXM124_FHIR4-8.2.000 | 2 | numer + denom patients |
+| EXM104_FHIR4-8.1.000 | 2 | numer + denom patients |
+| EXM105_FHIR4-8.1.000 | 2 | numer + denom patients |
+| EXM108_FHIR4-8.2.000 | 2 | numer + denom patients |
+| EXM125_FHIR4-7.2.000 | 2 | numer + denom patients |
+| EXM130_FHIR4-7.2.000 | 2 | numer + denom patients |
+| EXM165_FHIR4-8.5.000 | 0 | measure-only bundle, no patients — skipped |
+| EXM506_FHIR4-2.1.000 | 0 | patients present but no expected MeasureReports — skipped |
+| EXM529_FHIR4-1.0.000 | 0 | patient present but no expected MeasureReports — skipped |
+
+Bundles with 0 test cases are skipped by pytest (not failed); a warning is emitted.
 
 ---
 
