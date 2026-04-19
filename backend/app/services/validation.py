@@ -237,7 +237,7 @@ async def triage_test_bundle(
 
     - Measure/Library/ValueSet → measure engine
     - MeasureReport (isTestCase) → ExpectedResult table
-    - Patient/clinical data → bundled CDR only (if using default CDR)
+    - Patient/clinical data → active CDR (default or external)
 
     Returns summary dict with counts.
     """
@@ -274,24 +274,19 @@ async def triage_test_bundle(
         await session.execute(stmt)
     await session.commit()
 
-    # Push clinical data to CDR — only if using the default bundled CDR
+    # Push clinical data to active CDR (default or external)
     patients_loaded = 0
     if clinical:
-        # Check if active CDR config is the default bundled one
         cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         active_cdr = cdr_result.scalar_one_or_none()
         cdr_url = active_cdr.cdr_url if active_cdr else settings.DEFAULT_CDR_URL
-
-        if cdr_url == settings.DEFAULT_CDR_URL:
-            await push_resources(clinical, target_url=settings.DEFAULT_CDR_URL)
-            # Count unique Patient resources
-            patients_loaded = sum(1 for r in clinical if r.get("resourceType") == "Patient")
-        else:
-            logger.warning(
-                "External CDR configured — test patients NOT pushed to CDR. "
-                "Only measure definitions were loaded to the measure engine.",
-                extra={"active_cdr": cdr_url},
-            )
+        cdr_auth = _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials) if active_cdr else {}
+        await push_resources(clinical, target_url=cdr_url, auth_headers=cdr_auth)
+        patients_loaded = sum(1 for r in clinical if r.get("resourceType") == "Patient")
+        logger.info(
+            "Clinical resources loaded to CDR",
+            extra={"count": len(clinical), "cdr_url": cdr_url},
+        )
 
     return {
         "measures_loaded": sum(1 for r in measure_defs if r.get("resourceType") == "Measure"),
