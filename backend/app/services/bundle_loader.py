@@ -5,17 +5,40 @@ Called once during FastAPI lifespan startup. Safe to re-run (upserts).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import pathlib
 from typing import Any
 
+import httpx
+
+from app.config import settings
 from app.db import async_session
 from app.services.validation import triage_test_bundle
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_DIR = pathlib.Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles"
+_HAPI_READY_RETRIES = 20
+_HAPI_RETRY_DELAY = 5.0
+
+
+async def _wait_for_hapi() -> None:
+    """Block until both HAPI instances respond, retrying up to _HAPI_READY_RETRIES times."""
+    urls = [settings.MEASURE_ENGINE_URL, settings.DEFAULT_CDR_URL]
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        for attempt in range(_HAPI_READY_RETRIES):
+            try:
+                for url in urls:
+                    await client.get(f"{url}/metadata")
+                logger.info("HAPI instances ready, starting bundle load")
+                return
+            except Exception:
+                if attempt == 0:
+                    logger.info("Waiting for HAPI instances to be ready...")
+                await asyncio.sleep(_HAPI_RETRY_DELAY)
+    logger.warning("HAPI instances not ready after %d attempts, proceeding anyway", _HAPI_READY_RETRIES)
 
 
 async def load_connectathon_bundles(
@@ -46,6 +69,8 @@ async def load_connectathon_bundles(
             extra={"directory": str(scan_dir)},
         )
         return {"loaded": 0, "failed": 0, "details": []}
+
+    await _wait_for_hapi()
 
     loaded = 0
     failed = 0

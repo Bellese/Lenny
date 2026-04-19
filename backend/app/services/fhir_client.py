@@ -333,6 +333,17 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
 # ---------------------------------------------------------------------------
 
 
+def _normalize_measure_def(r: dict[str, Any]) -> dict[str, Any]:
+    """Ensure Library resources have a url so HAPI 8.x can resolve canonical refs.
+
+    DBCG FHIR4 bundles omit Library.url; HAPI resolves Measure.library references
+    by canonical URL search, so we backfill url = "Library/{id}" when absent.
+    """
+    if r.get("resourceType") == "Library" and not r.get("url") and r.get("id"):
+        r = {**r, "url": f"Library/{r['id']}"}
+    return r
+
+
 async def push_resources(
     resources: list[dict[str, Any]],
     target_url: Optional[str] = None,
@@ -344,7 +355,7 @@ async def push_resources(
         "type": "transaction",
         "entry": [
             {
-                "resource": r,
+                "resource": _normalize_measure_def(r),
                 "request": {
                     "method": "PUT",
                     "url": f"{r['resourceType']}/{r['id']}",

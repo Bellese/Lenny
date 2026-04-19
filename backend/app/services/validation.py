@@ -243,9 +243,15 @@ async def triage_test_bundle(
     """
     measure_defs, clinical, test_cases = _classify_bundle_entries(bundle_json)
 
-    # Push measure definitions to measure engine
+    # Push measure definitions to measure engine in two phases so shared ValueSets
+    # (which trigger HAPI-0902 on re-upload) never block the Measure/Library load.
     if measure_defs:
-        await push_resources(measure_defs)
+        primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
+        secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
+        if secondary:
+            await push_resources(secondary)  # ValueSets/CodeSystems — HAPI-0902 is OK
+        if primary:
+            await push_resources(primary)  # Measure + Library always pushed
 
     # Upsert expected results atomically (avoids TOCTOU on concurrent uploads)
     for tc in test_cases:

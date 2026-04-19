@@ -683,7 +683,8 @@
                 "criteria": {
                   "language": "text/cql",
                   "expression": "Initial Population"
-                }
+                },
+                "id": "group-1-pop-1"
               },
               {
                 "code": {
@@ -698,7 +699,8 @@
                 "criteria": {
                   "language": "text/cql",
                   "expression": "Numerator"
-                }
+                },
+                "id": "group-1-pop-2"
               },
               {
                 "code": {
@@ -713,7 +715,8 @@
                 "criteria": {
                   "language": "text/cql",
                   "expression": "Denominator"
-                }
+                },
+                "id": "group-1-pop-3"
               },
               {
                 "code": {
@@ -728,7 +731,8 @@
                 "criteria": {
                   "language": "text/cql",
                   "expression": "Denominator Exclusion"
-                }
+                },
+                "id": "group-1-pop-4"
               }
             ]
           }
@@ -751,7 +755,8 @@
             "criteria": {
               "language": "text/cql",
               "expression": "SDE Ethnicity"
-            }
+            },
+            "id": "supplemental-1"
           },
           {
             "code": {
@@ -770,7 +775,8 @@
             "criteria": {
               "language": "text/cql",
               "expression": "SDE Payer"
-            }
+            },
+            "id": "supplemental-2"
           },
           {
             "code": {
@@ -789,7 +795,8 @@
             "criteria": {
               "language": "text/cql",
               "expression": "SDE Race"
-            }
+            },
+            "id": "supplemental-3"
           },
           {
             "code": {
@@ -808,7 +815,8 @@
             "criteria": {
               "language": "text/cql",
               "expression": "SDE Sex"
-            }
+            },
+            "id": "supplemental-4"
           }
         ]
       },
