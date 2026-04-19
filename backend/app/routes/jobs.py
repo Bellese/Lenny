@@ -5,15 +5,19 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db import get_session
 from app.dependencies import CDRContext, get_active_cdr
-from app.models.job import Job, JobStatus
+from app.models.job import Job, JobStatus, MeasureResult
+from app.models.validation import ExpectedResult
 from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups
+from app.services.validation import _extract_population_counts, compare_populations
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -265,3 +269,80 @@ async def cancel_job(
 
     logger.info("Job cancelled", extra={"job_id": job_id})
     return _job_to_response(job)
+
+
+@router.get("/{job_id}/comparison")
+async def get_job_comparison(
+    job_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Compare actual population counts against expected test case values."""
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "not-found", "diagnostics": f"Job {job_id} not found"}],
+            },
+        )
+
+    result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
+    actual_results = result.scalars().all()
+
+    if not actual_results:
+        return {"has_expected": False, "matched": None, "total": None, "patients": []}
+
+    measure_url = ""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{settings.MEASURE_ENGINE_URL}/Measure/{job.measure_id}")
+            if resp.status_code == 200:
+                measure_url = resp.json().get("url", "")
+    except Exception:
+        logger.warning("Could not resolve measure URL for comparison", extra={"measure_id": job.measure_id})
+
+    if not measure_url:
+        return {"has_expected": False, "matched": None, "total": None, "patients": []}
+
+    exp_result = await session.execute(
+        select(ExpectedResult).where(
+            ExpectedResult.measure_url == measure_url,
+            ExpectedResult.period_start == job.period_start,
+            ExpectedResult.period_end == job.period_end,
+        )
+    )
+    expected_by_patient = {er.patient_ref: er for er in exp_result.scalars().all()}
+
+    if not expected_by_patient:
+        return {"has_expected": False, "matched": None, "total": None, "patients": []}
+
+    patients_list = []
+    matched_count = 0
+
+    for mr in actual_results:
+        expected = expected_by_patient.get(mr.patient_id)
+        if not expected:
+            continue
+
+        actual_counts = _extract_population_counts(mr.measure_report)
+        passed, mismatches = compare_populations(expected.expected_populations, actual_counts)
+        if passed:
+            matched_count += 1
+
+        patients_list.append(
+            {
+                "subject_reference": f"Patient/{mr.patient_id}",
+                "match": passed,
+                "mismatches": mismatches,
+                "expected": expected.expected_populations,
+                "actual": actual_counts,
+            }
+        )
+
+    return {
+        "has_expected": True,
+        "matched": matched_count,
+        "total": len(patients_list),
+        "patients": patients_list,
+    }

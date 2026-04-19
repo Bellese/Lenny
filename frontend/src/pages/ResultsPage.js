@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import styles from './ResultsPage.module.css';
 import { getJobs, getResults, getResult } from '../api/client';
 import PatientDetail from '../components/PatientDetail';
+import ComparisonView from '../components/ComparisonView';
 
 function PopulationCard({ label, count, variant = 'default' }) {
   return (
@@ -279,6 +280,8 @@ export default function ResultsPage() {
               </tbody>
             </table>
           </div>
+          {/* Comparison vs expected results */}
+          <ComparisonView jobId={selectedJobId} />
         </>
       )}
 

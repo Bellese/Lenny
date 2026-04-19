@@ -189,3 +189,8 @@ export function getValidationRuns() {
 export function getValidationRun(runId) {
   return request(`/validation/runs/${runId}`);
 }
+
+// Comparison
+export function getJobComparison(jobId) {
+  return request(`/jobs/${jobId}/comparison`);
+}

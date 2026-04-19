@@ -33,7 +33,8 @@ These tests use an **in-memory SQLite database** and mock all FHIR service calls
 | `test_routes_results.py` | Result inspection endpoints |
 | `test_routes_settings.py` | CDR configuration endpoints |
 | `test_routes_validation.py` | Bundle upload and validation run endpoints |
-| `test_services_fhir_client.py` | FHIR client utilities |
+| `test_services_bundle_loader.py` | Startup connectathon bundle loading |
+| `test_services_fhir_client.py` | FHIR client utilities, DataRequirementsStrategy, BatchQueryStrategy |
 | `test_services_orchestrator.py` | Job orchestration service |
 | `test_services_validation.py` | Bundle triage, population extraction, comparison |
 | `test_cors.py` | CORS middleware behavior |

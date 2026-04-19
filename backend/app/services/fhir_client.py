@@ -7,6 +7,7 @@ import abc
 import asyncio
 import ipaddress
 import logging
+import re
 import time
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -218,9 +219,163 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
         return resources
 
 
+class DataRequirementsStrategy(DataAcquisitionStrategy):
+    """DEQM spec-compliant data acquisition using $data-requirements.
+
+    Calls GET /Measure/{id}/$data-requirements on the measure engine,
+    translates each dataRequirement entry into a CDR REST query, and
+    collects only the resources the measure actually needs.
+
+    Falls back to BatchQueryStrategy ($everything) if $data-requirements
+    returns an empty list or raises any exception.
+    """
+
+    def __init__(self, measure_id: str) -> None:
+        self._measure_id = measure_id
+        self._fallback = BatchQueryStrategy()
+
+    async def gather_patients(
+        self,
+        cdr_url: str,
+        auth_headers: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Delegate patient listing to BatchQueryStrategy (CDR search is the same)."""
+        return await self._fallback.gather_patients(cdr_url, auth_headers)
+
+    async def gather_patient_data(
+        self,
+        cdr_url: str,
+        patient_id: str,
+        auth_headers: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        """Fetch only the resources the measure needs, using $data-requirements."""
+        try:
+            requirements = await self._get_data_requirements()
+        except Exception as exc:
+            logger.warning(
+                "$data-requirements failed, falling back to $everything",
+                extra={"measure_id": self._measure_id, "patient_id": patient_id, "error": str(exc)},
+            )
+            return await self._fallback.gather_patient_data(cdr_url, patient_id, auth_headers)
+
+        if not requirements:
+            logger.info(
+                "$data-requirements returned no entries, falling back to $everything",
+                extra={"measure_id": self._measure_id, "patient_id": patient_id},
+            )
+            return await self._fallback.gather_patient_data(cdr_url, patient_id, auth_headers)
+
+        try:
+            return await self._fetch_by_requirements(cdr_url, patient_id, auth_headers, requirements)
+        except Exception as exc:
+            logger.warning(
+                "CDR fetch by requirements failed, falling back to $everything",
+                extra={"measure_id": self._measure_id, "patient_id": patient_id, "error": str(exc)},
+            )
+            return await self._fallback.gather_patient_data(cdr_url, patient_id, auth_headers)
+
+    async def _get_data_requirements(self) -> list[dict[str, Any]]:
+        """Call $data-requirements on MCS and return the dataRequirement entries."""
+        url = f"{settings.MEASURE_ENGINE_URL}/Measure/{self._measure_id}/$data-requirements"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+            library = resp.json()
+            return library.get("dataRequirement", [])
+
+    async def _fetch_by_requirements(
+        self,
+        cdr_url: str,
+        patient_id: str,
+        auth_headers: dict[str, str],
+        requirements: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Translate dataRequirement entries to CDR REST queries and collect resources.
+
+        Translates codeFilter[].valueSet into code:in={valueSetUrl} search parameters.
+        Per-type failures are logged and skipped; only raises if all types fail (triggering
+        the outer $everything fallback).
+        """
+        resources: list[dict[str, Any]] = []
+        seen_types: set[str] = set()
+        failed_types: set[str] = set()
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for req in requirements:
+                resource_type = req.get("type", "")
+                if not resource_type or not re.match(r"^[A-Za-z][A-Za-z0-9]{0,127}$", resource_type):
+                    continue
+                if resource_type in seen_types:
+                    continue
+                seen_types.add(resource_type)
+
+                try:
+                    if resource_type == "Patient":
+                        resp = await client.get(f"{cdr_url}/Patient/{patient_id}", headers=auth_headers)
+                        if resp.status_code == 200:
+                            resources.append(resp.json())
+                    else:
+                        # Translate codeFilter[].valueSet to code:in search parameter
+                        params = f"subject=Patient/{patient_id}&_count=100"
+                        for cf in req.get("codeFilter", []):
+                            vs = cf.get("valueSet")
+                            if vs:
+                                params += f"&code:in={vs}"
+                                break  # Use first valueSet codeFilter only
+                        page_url: Optional[str] = f"{cdr_url}/{resource_type}?{params}"
+                        while page_url:
+                            resp = await client.get(page_url, headers=auth_headers)
+                            if resp.status_code != 200:
+                                break
+                            bundle = resp.json()
+                            for entry in bundle.get("entry", []):
+                                resource = entry.get("resource")
+                                if resource:
+                                    resources.append(resource)
+                            page_url = None
+                            for link in bundle.get("link", []):
+                                if link.get("relation") == "next":
+                                    page_url = link.get("url")
+                                    break
+                except Exception as exc:
+                    failed_types.add(resource_type)
+                    logger.warning(
+                        "CDR fetch failed for resource type %s, skipping — %s",
+                        resource_type,
+                        str(exc),
+                        extra={"resource_type": resource_type, "patient_id": patient_id, "error": str(exc)},
+                    )
+
+        # Only propagate failure (triggering outer $everything fallback) when all types fail
+        if seen_types and failed_types == seen_types:
+            raise RuntimeError(f"All resource types failed CDR fetch: {sorted(failed_types)}")
+
+        logger.info(
+            "Fetched patient data via $data-requirements",
+            extra={
+                "measure_id": self._measure_id,
+                "patient_id": patient_id,
+                "resource_count": len(resources),
+                "requirement_types": list(seen_types),
+            },
+        )
+        return resources
+
+
 # ---------------------------------------------------------------------------
 # Direct FHIR helper functions (measure engine interaction)
 # ---------------------------------------------------------------------------
+
+
+def _normalize_measure_def(r: dict[str, Any]) -> dict[str, Any]:
+    """Ensure Library resources have a url so HAPI 8.x can resolve canonical refs.
+
+    DBCG FHIR4 bundles omit Library.url; HAPI resolves Measure.library references
+    by canonical URL search, so we backfill url = "Library/{id}" when absent.
+    """
+    if r.get("resourceType") == "Library" and not r.get("url") and r.get("id"):
+        r = {**r, "url": f"Library/{r['id']}"}
+    return r
 
 
 async def push_resources(
@@ -234,7 +389,7 @@ async def push_resources(
         "type": "transaction",
         "entry": [
             {
-                "resource": r,
+                "resource": _normalize_measure_def(r),
                 "request": {
                     "method": "PUT",
                     "url": f"{r['resourceType']}/{r['id']}",
@@ -253,6 +408,10 @@ async def push_resources(
             json=bundle,
             headers={"Content-Type": "application/fhir+json"},
         )
+        # HAPI-0902: duplicate canonical URL+version — resources already loaded; treat as success
+        if resp.status_code == 422 and "HAPI-0902" in resp.text:
+            logger.info("Resources already present (HAPI-0902)", extra={"target": base})
+            return
         resp.raise_for_status()
     logger.info("Pushed resources", extra={"count": len(bundle["entry"]), "target": base})
 

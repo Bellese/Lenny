@@ -29,7 +29,8 @@ backend/app/
 
   routes/
     health.py       GET /health
-    jobs.py         POST /jobs, GET /jobs, GET /jobs/{id}
+    jobs.py         POST /jobs, GET /jobs, GET /jobs/{id}, POST /jobs/{id}/cancel,
+                    GET /jobs/{id}/comparison (actual vs. expected population counts)
     measures.py     GET /measures, POST /measures/upload
     results.py      GET /results, GET /results/{job_id}
     settings.py     GET /settings, PUT /settings, POST /settings/test
@@ -38,9 +39,15 @@ backend/app/
   services/
     orchestrator.py  Core job execution. Pulls patients, runs $evaluate-measure in batches,
                      stores MeasureReports. Group filtering via group_id param.
-    fhir_client.py   All FHIR server communication. DataAcquisitionStrategy ABC with
-                     BatchQueryStrategy (v1). Handles group membership, patient fetch,
-                     measure evaluation.
+    fhir_client.py   All FHIR server communication. DataAcquisitionStrategy ABC with two
+                     implementations: BatchQueryStrategy (paginated /Patient + $everything)
+                     and DataRequirementsStrategy (DEQM spec — calls $data-requirements on
+                     the measure engine, then fetches only the required resource types from
+                     the CDR; falls back to $everything on any failure).
+    bundle_loader.py Startup bundle loader. Called once during FastAPI lifespan. Scans
+                     seed/connectathon-bundles/, waits for HAPI readiness, then loads each
+                     .json file via triage_test_bundle (Measure/Library → MCS, clinical
+                     resources → CDR, test-case MeasureReports → ExpectedResult table).
     validation.py    Test bundle parsing, ExpectedResult comparison, pass/fail logic.
     worker.py        Background task queue, priority ordering, job lifecycle management.
 ```
@@ -57,6 +64,7 @@ frontend/src/
     SettingsPage.js   CDR connection configuration
     ValidationPage.js Upload test bundles, view pass/fail results
   components/
+    ComparisonView.js Per-patient actual vs. expected population comparison panel
     PatientDetail.js  Per-patient result expansion panel
     ProgressBar.js    Job progress indicator
     Toast.js          Notification component
@@ -97,6 +105,8 @@ Critical settings and why they are set:
 | `hapi.fhir.client_id_strategy` | cdr | `ANY` | Accepts CMS numeric patient IDs (not just UUIDs) |
 | `hapi.fhir.allow_external_references` | cdr | `true` | Required for CMS FHIR bundles with cross-resource references |
 | `hapi.fhir.defer_indexing_for_codesystems_of_size` | both | `0` | Disables deferred indexing to avoid startup latency |
+| `spring.jpa.properties.hibernate.search.enabled` | measure | `true` | Enables Hibernate Search / Lucene full-text indexing (required for `$data-requirements` and value-set expansion lookups) |
+| `spring.jpa.properties.hibernate.search.backend.type` | measure | `lucene` | Uses embedded Lucene backend (no external search cluster needed) |
 
 Storage: both instances use H2 file-based storage under `/data/hapi` (mounted as Docker volumes). This is appropriate for local/demo use. Production deployments should use external Postgres.
 

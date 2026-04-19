@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.3.0] - 2026-04-19
+
+### Added
+- **$data-requirements strategy**: Lenny now uses the DEQM-compliant `$data-requirements`
+  endpoint to fetch only the clinical resources a measure actually needs, replacing the
+  broad `$everything` call. Falls back to `$everything` automatically if the measure engine
+  does not support `$data-requirements` or returns an empty list. codeFilter.valueSet entries
+  are translated to `code:in={valueSetUrl}` CDR search parameters, and per-resource-type
+  failures are isolated so one failing type does not abort all others.
+- **Startup bundle loader**: 12 connectathon bundles (9 DBCG FHIR4 + 3 QICore 2025 Hospital Harm)
+  load automatically on backend startup. Measures, patients, and expected results are available
+  immediately without manual upload. Clinical data now always loads to the active CDR regardless
+  of whether it is the default or an external CDR.
+- **Comparison view on Results page**: A new comparison table shows each patient's actual
+  vs. expected population results side-by-side, including match/mismatch indicators.
+  Requires expected results from loaded test bundles.
+- **`GET /jobs/{id}/comparison` endpoint**: Returns per-patient comparison data against
+  stored expected results for a job.
+- **Golden integration test fixtures**: 12 end-to-end regression fixtures under
+  `tests/integration/golden/` (EXM104–529, CMS816/1017/1218) assert that each seed bundle
+  evaluates to correct population counts after a full HAPI startup.
+
+### Changed
+- Orchestrator uses `DataRequirementsStrategy` by default instead of `BatchQueryStrategy`.
+- `_fetch_by_requirements` now follows FHIR pagination (`link.next`) for resource type queries,
+  preventing silent truncation at 100 resources for patients with large datasets.
+
+### Fixed
+- HAPI FHIR 8.6 measure engine now uses Hibernate Search Lucene backend, fixing ValueSet
+  expansion failures that caused all-zero population counts.
+- Golden integration tests use FHIR batch bundles instead of transaction bundles to avoid
+  HAPI reference validation failures when test fixtures contain partial resource graphs.
+
 ## [0.0.2.2] - 2026-04-10
 
 ### Added

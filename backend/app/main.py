@@ -13,6 +13,7 @@ from app.config import settings as app_settings
 from app.db import engine
 from app.models import Base
 from app.routes import health, jobs, measures, results, settings, validation
+from app.services.bundle_loader import load_connectathon_bundles
 from app.services.worker import request_shutdown, worker_loop
 
 # ---------------------------------------------------------------------------
@@ -150,6 +151,13 @@ async def lifespan(app: FastAPI):
             """)
             )
     logger.info("Database tables created")
+
+    # Load connectathon bundles at startup (no-op if directory missing)
+    try:
+        summary = await load_connectathon_bundles()
+        logger.info("Startup bundle load complete", extra=summary)
+    except Exception:
+        logger.exception("Startup bundle load failed — continuing startup")
 
     # Start background worker
     worker_task = asyncio.create_task(worker_loop())

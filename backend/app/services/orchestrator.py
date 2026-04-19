@@ -14,6 +14,7 @@ from app.db import async_session
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
 from app.services.fhir_client import (
     BatchQueryStrategy,
+    DataRequirementsStrategy,
     _build_auth_headers,
     evaluate_measure,
     get_group_members,
@@ -229,7 +230,6 @@ async def _process_single_batch(
         batch.status = BatchStatus.running
         await session.commit()
 
-    strategy = BatchQueryStrategy()
     retry_count = 0
 
     while retry_count <= settings.MAX_RETRIES:
@@ -245,6 +245,8 @@ async def _process_single_batch(
                 measure_id = job.measure_id
                 period_start = job.period_start
                 period_end = job.period_end
+
+            strategy = DataRequirementsStrategy(measure_id)
 
             # ----------------------------------------------------------
             # Phase 1: Gather all patient data and push to measure engine
