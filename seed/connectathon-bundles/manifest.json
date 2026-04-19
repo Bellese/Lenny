@@ -100,7 +100,7 @@
       "expected_test_cases": 0,
       "period": {"start": "2019-01-01", "end": "2019-12-31"},
       "strict": true,
-      "known_issues": []
+      "known_issues": ["definition-only bundle: no test-case MeasureReports included"]
     },
     {
       "id": "EXM506_FHIR4-2.1.000",
@@ -110,7 +110,7 @@
       "expected_test_cases": 0,
       "period": {"start": "2020-01-01", "end": "2020-12-31"},
       "strict": true,
-      "known_issues": []
+      "known_issues": ["definition-only bundle: no test-case MeasureReports included"]
     },
     {
       "id": "EXM529_FHIR4-1.0.000",
@@ -120,7 +120,7 @@
       "expected_test_cases": 0,
       "period": {"start": "2019-01-01", "end": "2019-12-31"},
       "strict": true,
-      "known_issues": []
+      "known_issues": ["definition-only bundle: no test-case MeasureReports included"]
     }
   ]
 }
