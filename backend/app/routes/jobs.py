@@ -11,6 +11,7 @@ from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db import get_session
 from app.dependencies import CDRContext, get_active_cdr
 from app.models.job import Job, JobStatus, MeasureResult
