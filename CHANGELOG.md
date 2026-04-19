@@ -2,6 +2,31 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.3.0] - 2026-04-19
+
+### Added
+- **$data-requirements strategy**: Lenny now uses the DEQM-compliant `$data-requirements`
+  endpoint to fetch only the clinical resources a measure actually needs, replacing the
+  broad `$everything` call. Falls back to `$everything` automatically if the measure engine
+  does not support `$data-requirements` or returns an empty list.
+- **Startup bundle loader**: 9 DBCG connectathon bundles (EXM104, EXM105, EXM108, EXM124,
+  EXM125, EXM130, EXM165, EXM506, EXM529) are loaded automatically on backend startup.
+  Measures and test-case expected results become available immediately without manual upload.
+- **Comparison view on Results page**: A new comparison table shows each patient's actual
+  vs. expected population results side-by-side, including match/mismatch indicators.
+  Requires expected results from loaded test bundles.
+- **`GET /jobs/{id}/comparison` endpoint**: Returns per-patient comparison data against
+  stored expected results for a job.
+- **Golden integration test for EXM124**: `tests/integration/golden/EXM124_FHIR4-8.2.000/`
+  provides an end-to-end measure evaluation regression fixture.
+
+### Changed
+- Orchestrator uses `DataRequirementsStrategy` by default instead of `BatchQueryStrategy`.
+
+### Fixed
+- HAPI FHIR 8.6 measure engine now uses Hibernate Search Lucene backend, fixing ValueSet
+  expansion failures that caused all-zero population counts.
+
 ## [0.0.2.2] - 2026-04-10
 
 ### Added
