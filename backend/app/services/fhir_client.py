@@ -7,6 +7,7 @@ import abc
 import asyncio
 import ipaddress
 import logging
+import re
 import time
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -296,7 +297,9 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
         async with httpx.AsyncClient(timeout=60.0) as client:
             for req in requirements:
                 resource_type = req.get("type", "")
-                if not resource_type or resource_type in seen_types:
+                if not resource_type or not re.match(r'^[A-Za-z][A-Za-z0-9]{0,127}$', resource_type):
+                    continue
+                if resource_type in seen_types:
                     continue
                 seen_types.add(resource_type)
 

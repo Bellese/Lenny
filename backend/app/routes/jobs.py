@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.dependencies import CDRContext, get_active_cdr
-from app.models.job import Job, JobStatus
+from app.models.job import Job, JobStatus, MeasureResult
 from app.models.validation import ExpectedResult
 from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups
 from app.services.validation import _extract_population_counts, compare_populations
@@ -276,8 +276,6 @@ async def get_job_comparison(
     session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Compare actual population counts against expected test case values."""
-    from app.models.job import MeasureResult
-
     job = await session.get(Job, job_id)
     if not job:
         raise HTTPException(
