@@ -199,12 +199,15 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                 headers=headers,
                 timeout=120,
             )
-            try:
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                pytest.fail(
-                    f"Failed to load measure defs for '{name}': {exc}\n{resp.text[:300]}"
-                )
+            if resp.status_code == 422 and "HAPI-0902" in resp.text:
+                import warnings
+
+                warnings.warn(f"[{name}] measure defs already loaded (HAPI-0902 uniqueness constraint)")
+            else:
+                try:
+                    resp.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    pytest.fail(f"Failed to load measure defs for '{name}': {exc}\n{resp.text[:300]}")
 
         if clinical:
             tx = _make_tx_bundle(clinical)
@@ -217,9 +220,7 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
-                pytest.fail(
-                    f"Failed to load clinical data for '{name}': {exc}\n{resp.text[:300]}"
-                )
+                pytest.fail(f"Failed to load clinical data for '{name}': {exc}\n{resp.text[:300]}")
 
 
 _PARAMETRIZE_BUNDLES = _get_golden_bundles() or [
@@ -254,9 +255,7 @@ def test_golden_measure_evaluates(name: str, bundle: dict[str, Any]) -> None:
     measure_ref = test_cases[0]["measure_url"]
     measure_id = _resolve_measure_id(measure_ref)
     if not measure_id:
-        pytest.skip(
-            f"Measure not found on test MCS for '{name}' (ref={measure_ref!r})"
-        )
+        pytest.skip(f"Measure not found on test MCS for '{name}' (ref={measure_ref!r})")
 
     failures: list[str] = []
     skipped_cases: list[str] = []
@@ -281,15 +280,12 @@ def test_golden_measure_evaluates(name: str, bundle: dict[str, Any]) -> None:
             continue
 
         if resp.status_code != 200:
-            skipped_cases.append(
-                f"  {patient_ref}: HAPI returned {resp.status_code} — {resp.text[:150]}"
-            )
+            skipped_cases.append(f"  {patient_ref}: HAPI returned {resp.status_code} — {resp.text[:150]}")
             continue
 
         report = resp.json()
         assert report.get("resourceType") == "MeasureReport", (
-            f"Expected MeasureReport for '{name}/{patient_ref}', "
-            f"got {report.get('resourceType')}"
+            f"Expected MeasureReport for '{name}/{patient_ref}', got {report.get('resourceType')}"
         )
 
         actual = _extract_population_counts(report)
@@ -298,25 +294,17 @@ def test_golden_measure_evaluates(name: str, bundle: dict[str, Any]) -> None:
 
         if not passed:
             failures.append(
-                f"  {patient_ref}: mismatched codes {mismatches}\n"
-                f"    expected: {expected}\n"
-                f"    actual:   {actual}"
+                f"  {patient_ref}: mismatched codes {mismatches}\n    expected: {expected}\n    actual:   {actual}"
             )
 
     if skipped_cases:
         import warnings
 
-        warnings.warn(
-            f"[{name}] {len(skipped_cases)} test case(s) skipped:\n"
-            + "\n".join(skipped_cases)
-        )
+        warnings.warn(f"[{name}] {len(skipped_cases)} test case(s) skipped:\n" + "\n".join(skipped_cases))
 
-    assert not failures, (
-        f"Population count mismatches in '{name}' "
-        f"({len(failures)}/{evaluated} failed):\n" + "\n".join(failures)
+    assert not failures, f"Population count mismatches in '{name}' ({len(failures)}/{evaluated} failed):\n" + "\n".join(
+        failures
     )
 
     if evaluated == 0 and test_cases:
-        pytest.skip(
-            f"All {len(test_cases)} test case(s) for '{name}' were skipped by HAPI"
-        )
+        pytest.skip(f"All {len(test_cases)} test case(s) for '{name}' were skipped by HAPI")

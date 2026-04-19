@@ -387,17 +387,23 @@ async def test_get_comparison_patient_not_in_expected_skipped(client, test_sessi
 
     # p1 has expected results; p2 does not
     for pid in ("p1", "p2"):
-        test_session.add(MeasureResult(
-            job_id=job.id,
-            patient_id=pid,
-            measure_report={
-                "resourceType": "MeasureReport",
-                "group": [{"population": [
-                    {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
-                ]}],
-            },
-            populations={"initial_population": True},
-        ))
+        test_session.add(
+            MeasureResult(
+                job_id=job.id,
+                patient_id=pid,
+                measure_report={
+                    "resourceType": "MeasureReport",
+                    "group": [
+                        {
+                            "population": [
+                                {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
+                            ]
+                        }
+                    ],
+                },
+                populations={"initial_population": True},
+            )
+        )
 
     er = ExpectedResult(
         measure_url="https://example.com/Measure/CMS124",
@@ -455,11 +461,15 @@ async def test_get_comparison_with_mismatch(client, test_session):
         patient_id="p1",
         measure_report={
             "resourceType": "MeasureReport",
-            "group": [{"population": [
-                {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
-                {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
-                {"code": {"coding": [{"code": "numerator"}]}, "count": 0},
-            ]}],
+            "group": [
+                {
+                    "population": [
+                        {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
+                        {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
+                        {"code": {"coding": [{"code": "numerator"}]}, "count": 0},
+                    ]
+                }
+            ],
         },
         populations={"initial_population": True, "denominator": True, "numerator": False},
     )
@@ -594,13 +604,15 @@ async def test_get_comparison_with_match(client, test_session):
         patient_id="p1",
         measure_report={
             "resourceType": "MeasureReport",
-            "group": [{
-                "population": [
-                    {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
-                    {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
-                    {"code": {"coding": [{"code": "numerator"}]}, "count": 1},
-                ]
-            }],
+            "group": [
+                {
+                    "population": [
+                        {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
+                        {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
+                        {"code": {"coding": [{"code": "numerator"}]}, "count": 1},
+                    ]
+                }
+            ],
         },
         populations={"initial_population": True, "denominator": True, "numerator": True},
     )

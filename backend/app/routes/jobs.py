@@ -283,14 +283,11 @@ async def get_job_comparison(
             status_code=404,
             detail={
                 "resourceType": "OperationOutcome",
-                "issue": [{"severity": "error", "code": "not-found",
-                           "diagnostics": f"Job {job_id} not found"}],
+                "issue": [{"severity": "error", "code": "not-found", "diagnostics": f"Job {job_id} not found"}],
             },
         )
 
-    result = await session.execute(
-        select(MeasureResult).where(MeasureResult.job_id == job_id)
-    )
+    result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
     actual_results = result.scalars().all()
 
     if not actual_results:
@@ -333,13 +330,15 @@ async def get_job_comparison(
         if passed:
             matched_count += 1
 
-        patients_list.append({
-            "subject_reference": f"Patient/{mr.patient_id}",
-            "match": passed,
-            "mismatches": mismatches,
-            "expected": expected.expected_populations,
-            "actual": actual_counts,
-        })
+        patients_list.append(
+            {
+                "subject_reference": f"Patient/{mr.patient_id}",
+                "match": passed,
+                "mismatches": mismatches,
+                "expected": expected.expected_populations,
+                "actual": actual_counts,
+            }
+        )
 
     return {
         "has_expected": True,

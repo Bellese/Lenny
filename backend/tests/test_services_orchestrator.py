@@ -396,9 +396,7 @@ async def test_process_batch_uses_data_requirements_strategy(test_session, sessi
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
     ):
         mock_strategy = MagicMock()
-        mock_strategy.gather_patient_data = AsyncMock(
-            return_value=[{"resourceType": "Patient", "id": "p1"}]
-        )
+        mock_strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p1"}])
         mock_strategy_cls.return_value = mock_strategy
 
         await _process_single_batch(

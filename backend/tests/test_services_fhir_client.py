@@ -691,7 +691,8 @@ async def test_data_requirements_strategy_uses_requirements():
     }
     patient_resource = {"resourceType": "Patient", "id": "p1"}
     obs_bundle = {
-        "resourceType": "Bundle", "type": "searchset",
+        "resourceType": "Bundle",
+        "type": "searchset",
         "entry": [{"resource": {"resourceType": "Observation", "id": "o1"}}],
         "link": [],
     }
@@ -726,7 +727,8 @@ async def test_data_requirements_strategy_falls_back_on_empty():
     """DataRequirementsStrategy falls back to $everything when $data-requirements returns no entries."""
     empty_lib = {"resourceType": "Library", "dataRequirement": []}
     everything_bundle = {
-        "resourceType": "Bundle", "type": "searchset",
+        "resourceType": "Bundle",
+        "type": "searchset",
         "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
         "link": [],
     }
@@ -756,8 +758,10 @@ async def test_data_requirements_strategy_falls_back_on_empty():
 async def test_data_requirements_strategy_falls_back_on_error():
     """DataRequirementsStrategy falls back to $everything when $data-requirements raises."""
     import httpx as _httpx_module
+
     everything_bundle = {
-        "resourceType": "Bundle", "type": "searchset",
+        "resourceType": "Bundle",
+        "type": "searchset",
         "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
         "link": [],
     }
@@ -786,7 +790,8 @@ async def test_data_requirements_strategy_fetch_fails_falls_back_to_everything()
         "dataRequirement": [{"type": "Patient"}],
     }
     everything_bundle = {
-        "resourceType": "Bundle", "type": "searchset",
+        "resourceType": "Bundle",
+        "type": "searchset",
         "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
         "link": [],
     }
@@ -825,17 +830,21 @@ async def test_data_requirements_strategy_dedup_skips_duplicate_types():
         ],
     }
     obs_bundle = {
-        "resourceType": "Bundle", "type": "searchset",
+        "resourceType": "Bundle",
+        "type": "searchset",
         "entry": [{"resource": {"resourceType": "Observation", "id": "o1"}}],
         "link": [],
     }
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
         mock_ctx = AsyncMock()
-        mock_ctx.get = AsyncMock(side_effect=lambda url, **kw: (
-            _make_response(200, data_req_response) if "$data-requirements" in url
-            else _make_response(200, obs_bundle)
-        ))
+        mock_ctx.get = AsyncMock(
+            side_effect=lambda url, **kw: (
+                _make_response(200, data_req_response)
+                if "$data-requirements" in url
+                else _make_response(200, obs_bundle)
+            )
+        )
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -856,10 +865,13 @@ async def test_data_requirements_strategy_non_200_patient_not_appended():
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
         mock_ctx = AsyncMock()
-        mock_ctx.get = AsyncMock(side_effect=lambda url, **kw: (
-            _make_response(200, data_req_response) if "$data-requirements" in url
-            else _make_response(404, {"resourceType": "OperationOutcome"})
-        ))
+        mock_ctx.get = AsyncMock(
+            side_effect=lambda url, **kw: (
+                _make_response(200, data_req_response)
+                if "$data-requirements" in url
+                else _make_response(404, {"resourceType": "OperationOutcome"})
+            )
+        )
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -879,10 +891,13 @@ async def test_data_requirements_strategy_non_200_resource_entries_skipped():
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
         mock_ctx = AsyncMock()
-        mock_ctx.get = AsyncMock(side_effect=lambda url, **kw: (
-            _make_response(200, data_req_response) if "$data-requirements" in url
-            else _make_response(500, {"resourceType": "OperationOutcome"})
-        ))
+        mock_ctx.get = AsyncMock(
+            side_effect=lambda url, **kw: (
+                _make_response(200, data_req_response)
+                if "$data-requirements" in url
+                else _make_response(500, {"resourceType": "OperationOutcome"})
+            )
+        )
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -895,7 +910,8 @@ async def test_data_requirements_strategy_non_200_resource_entries_skipped():
 async def test_data_requirements_strategy_gather_patients_delegates_to_batch():
     """DataRequirementsStrategy.gather_patients uses the same BatchQuery logic."""
     patient_bundle = {
-        "resourceType": "Bundle", "type": "searchset",
+        "resourceType": "Bundle",
+        "type": "searchset",
         "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
         "link": [],
     }

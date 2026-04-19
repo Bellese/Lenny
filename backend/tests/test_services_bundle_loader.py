@@ -1,7 +1,6 @@
 """Tests for startup bundle loader."""
 
 import json
-import pathlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
