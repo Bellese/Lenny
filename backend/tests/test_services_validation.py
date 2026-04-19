@@ -579,7 +579,7 @@ class TestProcessBundleUpload:
         finally:
             os.unlink(tmp_path)
 
-    async def test_sets_warning_message_when_read_only(self, test_session):
+    async def test_process_bundle_upload_stores_triage_warning_message(self, test_session):
         """process_bundle_upload stores warning_message on the upload when triage returns one."""
         import json
         import os
