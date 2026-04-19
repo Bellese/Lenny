@@ -11,6 +11,8 @@ services:
   backend:
     build: ./backend
     ports: ["8000:8000"]
+    volumes:
+      - ./seed/connectathon-bundles:/seed/connectathon-bundles:ro
     depends_on:
       db:
         condition: service_healthy

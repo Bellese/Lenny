@@ -363,6 +363,10 @@ async def push_resources(
             json=bundle,
             headers={"Content-Type": "application/fhir+json"},
         )
+        # HAPI-0902: duplicate canonical URL+version — resources already loaded; treat as success
+        if resp.status_code == 422 and "HAPI-0902" in resp.text:
+            logger.info("Resources already present (HAPI-0902)", extra={"target": base})
+            return
         resp.raise_for_status()
     logger.info("Pushed resources", extra={"count": len(bundle["entry"]), "target": base})
 

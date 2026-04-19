@@ -2096,7 +2096,7 @@
         "id": "coverage-ip-EXM349-FHIR4",
         "status": "active",
         "beneficiary": {
-          "reference": "Patient/ip-EXM529-FHIR4"
+          "reference": "Patient/ip-EXM349-FHIR4"
         },
         "period": {
           "start": "2018-05-30T00:00:00-00:00",
@@ -2104,7 +2104,7 @@
         },
         "payor": [
           {
-            "reference": "Patient/ip-EXM529-FHIR4"
+            "reference": "Patient/ip-EXM349-FHIR4"
           }
         ]
       },

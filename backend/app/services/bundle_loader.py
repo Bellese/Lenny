@@ -66,7 +66,9 @@ async def load_connectathon_bundles(
             failed += 1
             details.append({"file": bundle_path.name, "status": "failed", "error": str(exc)})
             logger.warning(
-                "Failed to load connectathon bundle",
+                "Failed to load connectathon bundle: %s — %s",
+                bundle_path.name,
+                str(exc),
                 extra={"file": bundle_path.name, "error": str(exc)},
             )
 
