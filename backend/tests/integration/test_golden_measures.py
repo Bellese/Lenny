@@ -23,6 +23,7 @@ from app.services.validation import (
     _extract_population_counts,
     compare_populations,
 )
+from tests.integration._helpers import make_put_bundle
 from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL
 
 pytestmark = pytest.mark.integration
@@ -52,31 +53,6 @@ def _get_golden_bundles() -> list[tuple[str, dict]]:
     if not _GOLDEN_BUNDLES:
         _GOLDEN_BUNDLES = _load_golden_bundles()
     return _GOLDEN_BUNDLES
-
-
-def _make_tx_bundle(resources: list[dict[str, Any]]) -> dict[str, Any]:
-    """Wrap a list of resources in a FHIR batch bundle for test data loading.
-
-    Uses batch (not transaction) so HAPI processes entries independently —
-    test fixtures may reference resources (e.g. Practitioner) that are not
-    included in the bundle, and transaction mode would reject those as
-    referential integrity violations.
-    """
-    return {
-        "resourceType": "Bundle",
-        "type": "batch",
-        "entry": [
-            {
-                "resource": r,
-                "request": {
-                    "method": "PUT",
-                    "url": f"{r['resourceType']}/{r['id']}",
-                },
-            }
-            for r in resources
-            if "resourceType" in r and "id" in r
-        ],
-    }
 
 
 def _is_test_case_measure_report(report: dict[str, Any]) -> bool:
@@ -198,7 +174,7 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
         measure_defs, clinical, _test_cases = _classify_bundle_entries(bundle)
 
         if measure_defs:
-            tx = _make_tx_bundle(measure_defs)
+            tx = make_put_bundle(measure_defs)
             resp = httpx.post(
                 TEST_MEASURE_URL,
                 json=tx,
@@ -216,7 +192,7 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                     pytest.fail(f"Failed to load measure defs for '{name}': {exc}\n{resp.text[:300]}")
 
         if clinical:
-            tx = _make_tx_bundle(clinical)
+            tx = make_put_bundle(clinical)
             resp = httpx.post(
                 TEST_CDR_URL,
                 json=tx,

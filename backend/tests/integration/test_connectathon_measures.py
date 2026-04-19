@@ -36,7 +36,7 @@ from app.services.validation import (
     _extract_population_counts,
     compare_populations,
 )
-from tests.integration._helpers import fail_with_context
+from tests.integration._helpers import fail_with_context, make_put_bundle
 from tests.integration.conftest import TEST_MEASURE_URL, TEST_CDR_URL
 
 pytestmark = pytest.mark.integration
@@ -87,8 +87,9 @@ def _load_connectathon_test_cases() -> list[tuple]:
 
         _measure_defs, _clinical, test_cases = _classify_bundle_entries(bundle)
 
+        cases_for_this_bundle: list[tuple] = []
         for tc in test_cases:
-            cases.append(
+            cases_for_this_bundle.append(
                 (
                     measure_id,
                     canonical_url,
@@ -98,6 +99,14 @@ def _load_connectathon_test_cases() -> list[tuple]:
                     tc["expected_populations"],
                 )
             )
+
+        if len(cases_for_this_bundle) != expected_count:
+            warnings.warn(
+                f"[{measure_id}] manifest declares {expected_count} test cases "
+                f"but bundle parse yielded {len(cases_for_this_bundle)}"
+            )
+
+        cases.extend(cases_for_this_bundle)
 
     return cases
 
@@ -139,25 +148,6 @@ else:
 # ---------------------------------------------------------------------------
 
 
-def _make_put_bundle(resources: list[dict[str, Any]]) -> dict[str, Any]:
-    """Wrap resources in a FHIR batch bundle using PUT (idempotent)."""
-    return {
-        "resourceType": "Bundle",
-        "type": "batch",
-        "entry": [
-            {
-                "resource": r,
-                "request": {
-                    "method": "PUT",
-                    "url": f"{r['resourceType']}/{r['id']}",
-                },
-            }
-            for r in resources
-            if "resourceType" in r and "id" in r
-        ],
-    }
-
-
 @pytest.fixture(scope="module", autouse=True)
 def _load_connectathon_bundles_to_hapi(_require_infrastructure):
     """Load all connectathon bundles into the test HAPI instances.
@@ -185,7 +175,7 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
         measure_defs, clinical, _test_cases = _classify_bundle_entries(bundle)
 
         if measure_defs:
-            tx = _make_put_bundle(measure_defs)
+            tx = make_put_bundle(measure_defs)
             resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
             if resp.status_code == 422 and "HAPI-0902" in resp.text:
                 warnings.warn(f"[{measure_id}] measure defs already loaded (HAPI-0902)")
@@ -196,7 +186,7 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
                     pytest.fail(f"[{measure_id}] Failed to load measure defs: {exc}\n{resp.text[:300]}")
 
         if clinical:
-            tx = _make_put_bundle(clinical)
+            tx = make_put_bundle(clinical)
             resp = httpx.post(TEST_CDR_URL, json=tx, headers=headers, timeout=120)
             try:
                 resp.raise_for_status()
