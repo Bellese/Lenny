@@ -138,6 +138,23 @@ async def loader_result(integration_session_factory):
     return result
 
 
+@pytest_asyncio.fixture(scope="module")
+async def expected_counts_by_measure(loader_result, integration_session_factory):
+    """Capture ExpectedResult row counts per canonical URL immediately after loading.
+
+    This fixture is module-scoped and runs right after loader_result — before any
+    function-scoped _truncate_tables teardowns clear the expected_results table.
+    Returns a dict mapping canonical_url → row count.
+    """
+    async with integration_session_factory() as session:
+        result = await session.execute(
+            select(ExpectedResult.measure_url, func.count().label("cnt"))
+            .group_by(ExpectedResult.measure_url)
+        )
+        rows = result.all()
+    return {row.measure_url: row.cnt for row in rows}
+
+
 # ---------------------------------------------------------------------------
 # Integration tests — require live infrastructure
 # ---------------------------------------------------------------------------
@@ -205,31 +222,29 @@ async def test_loader_canonical_urls_on_measure_engine(loader_result):
 
 
 @pytest.mark.asyncio
-async def test_expected_results_counts(loader_result, integration_session_factory):
-    """For each manifest entry with expected_test_cases > 0, the DB must contain
-    exactly that many ExpectedResult rows for the measure's canonical URL.
+async def test_expected_results_counts(expected_counts_by_measure):
+    """For each manifest entry with expected_test_cases > 0, the DB must have contained
+    exactly that many ExpectedResult rows for the measure's canonical URL at load time.
+
+    Uses expected_counts_by_measure (module-scoped) which captures row counts immediately
+    after load_connectathon_bundles() completes — before function-scoped _truncate_tables
+    teardowns clear the expected_results table between other tests.
     """
     manifest = _load_manifest()
     mismatches: list[str] = []
 
-    async with integration_session_factory() as session:
-        for entry in manifest["measures"]:
-            if entry["expected_test_cases"] == 0:
-                continue  # definition-only bundle — skip
+    for entry in manifest["measures"]:
+        if entry["expected_test_cases"] == 0:
+            continue  # definition-only bundle — skip
 
-            canonical_url = entry["canonical_url"]
-            count_result = await session.execute(
-                select(func.count()).select_from(ExpectedResult).where(
-                    ExpectedResult.measure_url == canonical_url
-                )
+        canonical_url = entry["canonical_url"]
+        actual_count = expected_counts_by_measure.get(canonical_url, 0)
+
+        if actual_count != entry["expected_test_cases"]:
+            mismatches.append(
+                f"  {entry['id']} ({canonical_url!r}): "
+                f"expected {entry['expected_test_cases']}, got {actual_count}"
             )
-            actual_count = count_result.scalar_one()
-
-            if actual_count != entry["expected_test_cases"]:
-                mismatches.append(
-                    f"  {entry['id']} ({canonical_url!r}): "
-                    f"expected {entry['expected_test_cases']}, got {actual_count}"
-                )
 
     assert not mismatches, (
         f"ExpectedResult count mismatch for {len(mismatches)} measure(s):\n"
