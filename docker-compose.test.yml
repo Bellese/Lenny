@@ -72,6 +72,7 @@ services:
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_external_references=true
       - hapi.fhir.cr.enabled=true
+      - hapi.fhir.enforce_referential_integrity_on_write=false
 
 volumes:
   test_pgdata:
