@@ -456,11 +456,11 @@ class TestTriageTestBundle:
             if call.kwargs.get("target_url") == "http://external-cdr.example.com/fhir"
         ]
         assert len(clinical_push_calls) == 1
-        # Measure defs are still pushed (to measure engine)
+        # Measure defs are still pushed (to measure engine, not the external CDR)
         push_calls_for_defs = [
             call
             for call in mock_push.call_args_list
-            if any(r.get("resourceType") in {"Measure", "Library"} for r in call.args[0])
+            if call.kwargs.get("target_url") != "http://external-cdr.example.com/fhir"
         ]
         assert len(push_calls_for_defs) == 1
 
@@ -503,6 +503,15 @@ class TestTriageTestBundle:
         auth_headers = clinical_push_calls[0].kwargs.get("auth_headers", {})
         assert "Authorization" in auth_headers
         assert auth_headers["Authorization"] == "Basic dXNlcjpwYXNz"
+
+        # Measure-def push must NOT carry CDR auth headers
+        def_push_calls = [
+            call
+            for call in mock_push.call_args_list
+            if call.kwargs.get("target_url") != "http://external-cdr.example.com/fhir"
+        ]
+        for def_call in def_push_calls:
+            assert "Authorization" not in (def_call.kwargs.get("auth_headers") or {})
 
     async def test_bundle_with_only_measure_defs(self, test_session):
         """Bundle containing only measure defs: no expected results, no clinical push."""
