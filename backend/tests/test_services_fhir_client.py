@@ -246,6 +246,30 @@ async def test_push_resources_empty():
     mock_ctx.post.assert_not_called()
 
 
+async def test_push_resources_with_auth_headers():
+    """push_resources forwards auth_headers alongside Content-Type."""
+    resources = [{"resourceType": "Patient", "id": "p1"}]
+    mock_response = _make_response(200, {"resourceType": "Bundle"})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.post = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await push_resources(
+            resources,
+            target_url="http://test-measure/",
+            auth_headers={"Authorization": "Basic dXNlcjpwYXNz"},
+        )
+
+    mock_ctx.post.assert_called_once()
+    call_args = mock_ctx.post.call_args
+    sent_headers = call_args.kwargs.get("headers") or call_args[1].get("headers")
+    assert sent_headers.get("Authorization") == "Basic dXNlcjpwYXNz"
+    assert sent_headers.get("Content-Type", "").startswith("application/fhir+json")
+
+
 # ---------------------------------------------------------------------------
 # evaluate_measure
 # ---------------------------------------------------------------------------
