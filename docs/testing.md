@@ -48,6 +48,9 @@ Integration tests spin up real HAPI FHIR instances and a PostgreSQL database via
 **Prerequisites:**
 
 ```bash
+# Pre-pull the HAPI image on a new machine (~2.5 GB — do this before your first run)
+docker pull hapiproject/hapi:v8.6.0-1
+
 # Start test infrastructure
 docker compose -f docker-compose.test.yml up -d
 
@@ -63,6 +66,74 @@ docker compose -f docker-compose.test.yml up -d
 The script waits for HAPI health checks, runs the tests, and tears down containers automatically.
 
 Integration tests are marked `@pytest.mark.integration` and live in `backend/tests/integration/`.
+
+---
+
+## Connectathon Measure Tests (manifest-driven)
+
+`backend/tests/integration/test_connectathon_measures.py` runs one parametrized pytest case per test-case `MeasureReport` found in the connectathon bundles. The set of measures under test — and which ones trigger strict assertions — is controlled entirely by `seed/connectathon-bundles/manifest.json`.
+
+### Manifest structure
+
+Each entry in `manifest.json` has a `"strict"` field. All current entries have `"strict": true`. Entries with `"expected_test_cases": 0` are definition-only bundles (no patient-level test cases) and produce no parametrized test cases; they are silently skipped.
+
+```json
+{
+  "id": "CMS1017FHIRHHFI",
+  "bundle_file": "CMS1017FHIRHHFI-bundle.json",
+  "expected_test_cases": 65,
+  "strict": true,
+  "known_issues": []
+}
+```
+
+### STRICT_STU6 env var
+
+The `STRICT_STU6` environment variable controls how population-count mismatches are handled during test runs:
+
+| Value | Behavior |
+|-------|----------|
+| `STRICT_STU6=1` (default) | Hard-fail on any population mismatch or HTTP error. CI uses this mode. |
+| `STRICT_STU6=0` | Log the mismatch as a warning and mark the test as skipped rather than failed. Use this while onboarding a new measure whose CQL is known to diverge from MADiE. |
+
+```bash
+# Strict mode (default — same as omitting the var)
+STRICT_STU6=1 ./scripts/run-integration-tests.sh
+
+# Soft mode — mismatches warn instead of fail
+STRICT_STU6=0 ./scripts/run-integration-tests.sh
+```
+
+Rollout plan: run `STRICT_STU6=0` for the first week after adding a new QI-Core measure to catch unexpected engine differences without blocking CI. Flip to `STRICT_STU6=1` once population counts are confirmed correct.
+
+---
+
+## Connectathon Rehearsal Script
+
+`scripts/connectathon-rehearsal.sh` is an operator-level end-to-end smoke test for the full connectathon workflow. Run it before a connectathon event or after a significant infrastructure change.
+
+**What it does (six steps):**
+
+1. Cold-starts Docker services (`docker compose down -v && up -d`) unless `--no-restart` is passed.
+2. Polls `GET /health` until all services (db, measure engine, CDR) report connected — up to 5 minutes.
+3. Asserts all measures listed in `manifest.json` are loaded via `GET /measures`.
+4. Triggers `$evaluate-measure` for the first measure with `expected_test_cases > 0`, polls until complete, and prints population counts.
+5. Prints a full status table: one row per manifest measure showing `loaded | evaluated | populations_match | notes`.
+6. Exits nonzero if any row fails; exits zero on full pass.
+
+**Usage:**
+
+```bash
+# Full cold-start rehearsal (tears down volumes — wipes HAPI data)
+./scripts/connectathon-rehearsal.sh
+
+# Rehearsal against already-running containers (no restart)
+./scripts/connectathon-rehearsal.sh --no-restart
+```
+
+All output is written to the console and appended to `rehearsal.log` in the repo root. The log file is gitignored and safe to keep between runs as a timing history.
+
+**When to run:** before any connectathon event, after pulling a new HAPI image, or after updating measure bundles. The `--no-restart` flag is useful for quick re-checks after a code fix without waiting for HAPI to reload IGs from scratch.
 
 ---
 
