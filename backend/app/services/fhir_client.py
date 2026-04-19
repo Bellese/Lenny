@@ -322,13 +322,21 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                             if vs:
                                 params += f"&code:in={vs}"
                                 break  # Use first valueSet codeFilter only
-                        url = f"{cdr_url}/{resource_type}?{params}"
-                        resp = await client.get(url, headers=auth_headers)
-                        if resp.status_code == 200:
-                            for entry in resp.json().get("entry", []):
+                        page_url: Optional[str] = f"{cdr_url}/{resource_type}?{params}"
+                        while page_url:
+                            resp = await client.get(page_url, headers=auth_headers)
+                            if resp.status_code != 200:
+                                break
+                            bundle = resp.json()
+                            for entry in bundle.get("entry", []):
                                 resource = entry.get("resource")
                                 if resource:
                                     resources.append(resource)
+                            page_url = None
+                            for link in bundle.get("link", []):
+                                if link.get("relation") == "next":
+                                    page_url = link.get("url")
+                                    break
                 except Exception as exc:
                     failed_types.add(resource_type)
                     logger.warning(

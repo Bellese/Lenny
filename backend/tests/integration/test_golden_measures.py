@@ -55,10 +55,16 @@ def _get_golden_bundles() -> list[tuple[str, dict]]:
 
 
 def _make_tx_bundle(resources: list[dict[str, Any]]) -> dict[str, Any]:
-    """Wrap a list of resources in a FHIR transaction bundle."""
+    """Wrap a list of resources in a FHIR batch bundle for test data loading.
+
+    Uses batch (not transaction) so HAPI processes entries independently —
+    test fixtures may reference resources (e.g. Practitioner) that are not
+    included in the bundle, and transaction mode would reject those as
+    referential integrity violations.
+    """
     return {
         "resourceType": "Bundle",
-        "type": "transaction",
+        "type": "batch",
         "entry": [
             {
                 "resource": r,

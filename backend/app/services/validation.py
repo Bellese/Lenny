@@ -237,7 +237,7 @@ async def triage_test_bundle(
 
     - Measure/Library/ValueSet → measure engine
     - MeasureReport (isTestCase) → ExpectedResult table
-    - Patient/clinical data → bundled CDR only (if using default CDR)
+    - Patient/clinical data → active CDR (default or external)
 
     Returns summary dict with counts.
     """
