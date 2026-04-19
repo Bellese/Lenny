@@ -143,7 +143,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
 
 async def push_resources(
     resources: list[dict[str, Any]],
-    target_url: Optional[str] = None,
+    target_url: str | None = None,
     auth_headers: dict[str, str] | None = None,
 ) -> None:
     """POST a transaction Bundle of resources to the target FHIR server."""
