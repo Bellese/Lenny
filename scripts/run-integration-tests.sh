@@ -32,6 +32,9 @@ cleanup() {
 
 trap cleanup EXIT
 
+echo "==> Pulling HAPI FHIR image (avoids compose startup timeout on cold pull)..."
+docker pull hapiproject/hapi:v8.6.0-1
+
 echo "==> Starting test infrastructure..."
 docker compose -f "$COMPOSE_FILE" up -d
 
