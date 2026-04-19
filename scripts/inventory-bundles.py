@@ -36,6 +36,12 @@ WIPE_TYPES: set[str] = {
     "ServiceRequest",
     "Coverage",
     "Claim",
+    "DeviceRequest",
+    "MedicationAdministration",
+    "AdverseEvent",
+    "Location",
+    "Practitioner",
+    "Organization",
 }
 
 # From fhir_client.py gather_patient_data() _SKIP_TYPES
