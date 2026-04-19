@@ -324,6 +324,173 @@ async def test_create_job_stamps_cdr_auth_type_as_string_value(client, test_sess
 # ---------------------------------------------------------------------------
 
 
+async def test_get_comparison_httpx_exception_returns_no_expected(client, test_session):
+    """Returns has_expected=False when httpx raises while resolving measure URL."""
+    from unittest.mock import AsyncMock, patch
+    import httpx as _httpx
+    from app.models.job import Job, JobStatus, MeasureResult
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2019-01-01",
+        period_end="2019-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    mr = MeasureResult(
+        job_id=job.id,
+        patient_id="p1",
+        measure_report={"resourceType": "MeasureReport", "group": []},
+        populations={"initial_population": True},
+    )
+    test_session.add(mr)
+    await test_session.commit()
+
+    with patch("app.routes.jobs.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=_httpx.ConnectError("unreachable"))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get(f"/jobs/{job.id}/comparison")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["has_expected"] is False
+
+
+async def test_get_comparison_patient_not_in_expected_skipped(client, test_session):
+    """Actual patients with no matching ExpectedResult are excluded from comparison output."""
+    from unittest.mock import AsyncMock, patch
+    import httpx as _httpx
+    from app.models.job import Job, JobStatus, MeasureResult
+    from app.models.validation import ExpectedResult
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2019-01-01",
+        period_end="2019-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    # p1 has expected results; p2 does not
+    for pid in ("p1", "p2"):
+        test_session.add(MeasureResult(
+            job_id=job.id,
+            patient_id=pid,
+            measure_report={
+                "resourceType": "MeasureReport",
+                "group": [{"population": [
+                    {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
+                ]}],
+            },
+            populations={"initial_population": True},
+        ))
+
+    er = ExpectedResult(
+        measure_url="https://example.com/Measure/CMS124",
+        patient_ref="p1",
+        expected_populations={"initial-population": 1},
+        period_start="2019-01-01",
+        period_end="2019-12-31",
+        source_bundle="test",
+    )
+    test_session.add(er)
+    await test_session.commit()
+
+    measure_json = {"resourceType": "Measure", "id": "CMS124", "url": "https://example.com/Measure/CMS124"}
+    mock_resp = _httpx.Response(200, json=measure_json, request=_httpx.Request("GET", "http://test"))
+
+    with patch("app.routes.jobs.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_resp)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get(f"/jobs/{job.id}/comparison")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["has_expected"] is True
+    # Only p1 appears — p2 had no expected result and was skipped
+    assert data["total"] == 1
+    assert data["patients"][0]["subject_reference"] == "Patient/p1"
+
+
+async def test_get_comparison_with_mismatch(client, test_session):
+    """Returns match=False and mismatches list when actual populations differ from expected."""
+    from unittest.mock import AsyncMock, patch
+    import httpx as _httpx
+    from app.models.job import Job, JobStatus, MeasureResult
+    from app.models.validation import ExpectedResult
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2019-01-01",
+        period_end="2019-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    # Actual: numerator=0; Expected: numerator=1 → mismatch
+    mr = MeasureResult(
+        job_id=job.id,
+        patient_id="p1",
+        measure_report={
+            "resourceType": "MeasureReport",
+            "group": [{"population": [
+                {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
+                {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
+                {"code": {"coding": [{"code": "numerator"}]}, "count": 0},
+            ]}],
+        },
+        populations={"initial_population": True, "denominator": True, "numerator": False},
+    )
+    test_session.add(mr)
+
+    er = ExpectedResult(
+        measure_url="https://example.com/Measure/CMS124",
+        patient_ref="p1",
+        expected_populations={"initial-population": 1, "denominator": 1, "numerator": 1},
+        period_start="2019-01-01",
+        period_end="2019-12-31",
+        source_bundle="test",
+    )
+    test_session.add(er)
+    await test_session.commit()
+
+    measure_json = {"resourceType": "Measure", "id": "CMS124", "url": "https://example.com/Measure/CMS124"}
+    mock_resp = _httpx.Response(200, json=measure_json, request=_httpx.Request("GET", "http://test"))
+
+    with patch("app.routes.jobs.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_resp)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get(f"/jobs/{job.id}/comparison")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["has_expected"] is True
+    assert data["matched"] == 0
+    assert data["total"] == 1
+    patient = data["patients"][0]
+    assert patient["match"] is False
+    assert len(patient["mismatches"]) > 0
+
+
 async def test_get_comparison_no_job(client):
     """Returns 404 when job does not exist."""
     resp = await client.get("/jobs/999/comparison")

@@ -65,3 +65,18 @@ async def test_load_connectathon_bundles_continues_on_error(tmp_path):
 
     assert summary["loaded"] == 1
     assert summary["failed"] == 1
+
+
+async def test_load_connectathon_bundles_empty_directory(tmp_path):
+    """load_connectathon_bundles returns early when directory has no .json files."""
+    from app.services.bundle_loader import load_connectathon_bundles
+
+    # Directory exists but contains no .json files
+    (tmp_path / "readme.txt").write_text("not a bundle")
+
+    with patch("app.services.bundle_loader.triage_test_bundle") as mock_triage:
+        summary = await load_connectathon_bundles(directory=tmp_path)
+
+    assert summary["loaded"] == 0
+    assert summary["failed"] == 0
+    mock_triage.assert_not_called()
