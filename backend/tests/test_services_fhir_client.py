@@ -292,6 +292,36 @@ async def test_wipe_patient_data():
     assert mock_ctx.delete.call_count >= 10  # At least 10 resource types
 
 
+async def test_wipe_patient_data_includes_qi_core_types():
+    """wipe_patient_data includes QI-Core clinical types added for STU6 bundles."""
+    mock_response = _make_response(200, {})
+    deleted_urls: list[str] = []
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+
+        async def capture_delete(url, **kwargs):
+            deleted_urls.append(url)
+            return mock_response
+
+        mock_ctx.delete = AsyncMock(side_effect=capture_delete)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await wipe_patient_data()
+
+    wiped_types = {url.split("/")[-1].split("?")[0] for url in deleted_urls}
+    for expected_type in (
+        "DeviceRequest",
+        "MedicationAdministration",
+        "AdverseEvent",
+        "Location",
+        "Practitioner",
+        "Organization",
+    ):
+        assert expected_type in wiped_types, f"{expected_type} missing from wipe list"
+
+
 # ---------------------------------------------------------------------------
 # test_connection
 # ---------------------------------------------------------------------------

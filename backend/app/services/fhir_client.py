@@ -200,8 +200,9 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
                 resp = await client.get(url, headers=auth_headers)
                 resp.raise_for_status()
                 bundle = resp.json()
-                # Skip Group and MeasureReport resources — they reference
-                # other patients and are not needed for evaluation
+                # Group: population container that references other patients — not
+                # a clinical resource for this patient.
+                # MeasureReport: test-case expected-result artifact, not clinical data.
                 _SKIP_TYPES = {"Group", "MeasureReport"}
                 for entry in bundle.get("entry", []):
                     resource = entry.get("resource")
@@ -467,15 +468,21 @@ async def wipe_patient_data() -> None:
         "Encounter",
         "Procedure",
         "MedicationRequest",
+        "MedicationAdministration",
         "Immunization",
         "DiagnosticReport",
         "AllergyIntolerance",
+        "AdverseEvent",
         "CarePlan",
         "CareTeam",
         "Goal",
         "ServiceRequest",
+        "DeviceRequest",
         "Coverage",
         "Claim",
+        "Location",
+        "Practitioner",
+        "Organization",
     ]
     async with httpx.AsyncClient(timeout=60.0) as client:
         for rt in resource_types:
