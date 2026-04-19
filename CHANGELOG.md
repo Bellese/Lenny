@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.3.0] - 2026-04-19
+
+### Fixed
+- Bundle upload now pushes clinical data (Patient, Encounter, Observation, etc.) to
+  the active CDR regardless of whether it is the default bundled CDR or an externally
+  configured CDR. Previously, clinical resources were silently skipped when an external
+  CDR was active, causing connectathon demos to produce empty results.
+- When the active CDR has authentication configured (Basic or Bearer), auth headers
+  are now correctly forwarded during clinical data push. Previously, `push_resources`
+  had no auth support, which would produce 401 errors against auth-required external CDRs.
+
 ## [0.0.2.0] - 2026-04-09
 
 ### Added
