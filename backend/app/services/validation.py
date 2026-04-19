@@ -90,7 +90,7 @@ def _extract_population_counts(measure_report: dict[str, Any]) -> dict[str, int]
             for coding in pop.get("code", {}).get("coding", []):
                 code = coding.get("code", "")
                 if code in valid_codes:
-                    populations[code] = pop.get("count", 0)
+                    populations[code] = populations.get(code, 0) + pop.get("count", 0)
     return populations
 
 
@@ -294,6 +294,7 @@ async def triage_test_bundle(
         "measures_loaded": sum(1 for r in measure_defs if r.get("resourceType") == "Measure"),
         "patients_loaded": patients_loaded,
         "expected_results_loaded": len(test_cases),
+        "warning_message": None,
     }
 
 
