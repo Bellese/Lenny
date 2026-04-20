@@ -59,6 +59,14 @@ New backend features require tests in `backend/tests/`. Match existing naming (`
 
 Frontend has no test suite yet.
 
+**Full workflow tests on large changes:** `tests/integration/test_full_workflow.py` runs nightly, not on PRs. For any change that touches the measure evaluation pipeline, FHIR data flow, or job orchestration, run these locally before merging:
+
+```bash
+./scripts/run-integration-tests.sh tests/integration/test_full_workflow.py
+```
+
+Or trigger the nightly workflow manually via GitHub Actions → Connectathon Measures → Run workflow.
+
 ## AWS
 
 - **Profile:** `leonard` (account `439475769170`). Always use `AWS_PROFILE=leonard` for any AWS CLI commands.
