@@ -42,4 +42,4 @@ jobs:
         run: pip install -r requirements.txt -r requirements-test.txt
 
       - name: Run connectathon measure evaluation tests
-        run: ./scripts/run-integration-tests.sh tests/integration/test_connectathon_measures.py
+        run: ./scripts/run-integration-tests.sh tests/integration/test_connectathon_measures.py tests/integration/test_full_workflow.py
