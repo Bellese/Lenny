@@ -3,6 +3,8 @@
 Handles all HTTP communication with HAPI FHIR servers (CDR and measure engine).
 """
 
+from __future__ import annotations
+
 import abc
 import asyncio
 import ipaddress
@@ -381,9 +383,10 @@ def _normalize_measure_def(r: dict[str, Any]) -> dict[str, Any]:
 
 async def push_resources(
     resources: list[dict[str, Any]],
-    target_url: Optional[str] = None,
+    target_url: str | None = None,
+    auth_headers: dict[str, str] | None = None,
 ) -> None:
-    """POST a transaction Bundle of resources to the measure engine."""
+    """POST a transaction Bundle of resources to the target FHIR server."""
     base = target_url or settings.MEASURE_ENGINE_URL
     bundle = {
         "resourceType": "Bundle",
@@ -403,11 +406,12 @@ async def push_resources(
     if not bundle["entry"]:
         logger.warning("No valid resources to push")
         return
+    headers = {"Content-Type": "application/fhir+json", **(auth_headers or {})}
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(
             base,
             json=bundle,
-            headers={"Content-Type": "application/fhir+json"},
+            headers=headers,
         )
         # HAPI-0902: duplicate canonical URL+version — resources already loaded; treat as success
         if resp.status_code == 422 and "HAPI-0902" in resp.text:

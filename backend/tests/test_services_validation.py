@@ -522,7 +522,7 @@ class TestTriageTestBundle:
         assert mock_push.call_count >= 1
 
     async def test_external_cdr_clinical_is_pushed(self, test_session, mock_test_bundle_with_expected):
-        """When an external CDR is active, clinical data is pushed to it (#81)."""
+        """When an external CDR is active, clinical data IS pushed to that CDR."""
         from app.models.config import AuthType, CDRConfig
 
         # Insert an active external CDR config (marked read-only in DB, but guard is removed)
@@ -549,17 +549,72 @@ class TestTriageTestBundle:
 
             result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
-        # Clinical data IS pushed to external CDR regardless of is_read_only flag
+        # clinical data IS pushed to the external CDR
         assert result["patients_loaded"] == 1
         assert result.get("warning_message") is None
-        # Verify push was called for clinical data targeting the external CDR URL
+        # Verify push_resources was called with the external CDR URL for clinical data
         clinical_push_calls = [
             call
             for call in mock_push.call_args_list
             if call.kwargs.get("target_url") == "http://external-cdr.example.com/fhir"
-            or (len(call.args) > 1 and call.args[1] == "http://external-cdr.example.com/fhir")
         ]
-        assert len(clinical_push_calls) >= 1
+        assert len(clinical_push_calls) == 1
+        # Measure defs are still pushed (to measure engine, not the external CDR)
+        push_calls_for_defs = [
+            call
+            for call in mock_push.call_args_list
+            if call.kwargs.get("target_url") != "http://external-cdr.example.com/fhir"
+        ]
+        assert len(push_calls_for_defs) == 1
+
+    async def test_external_cdr_with_auth_forwards_headers(self, test_session, mock_test_bundle_with_expected):
+        """When an external CDR has basic auth configured, auth headers are forwarded."""
+        from app.models.config import AuthType, CDRConfig
+
+        # Insert an active external CDR config with basic auth
+        external_cdr = CDRConfig(
+            cdr_url="http://external-cdr.example.com/fhir",
+            is_active=True,
+            auth_type=AuthType.basic,
+            auth_credentials={"username": "user", "password": "pass"},
+        )
+        test_session.add(external_cdr)
+        await test_session.commit()
+
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+            with patch("app.services.validation.settings") as mock_settings:
+                mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
+                orig_execute = test_session.execute
+
+                async def _execute_interceptor(stmt, *args, **kwargs):
+                    if hasattr(stmt, "excluded"):
+                        return MagicMock()
+                    return await orig_execute(stmt, *args, **kwargs)
+
+                test_session.execute = _execute_interceptor
+
+                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+
+        # clinical data pushed with auth headers
+        assert result["patients_loaded"] == 1
+        clinical_push_calls = [
+            call
+            for call in mock_push.call_args_list
+            if call.kwargs.get("target_url") == "http://external-cdr.example.com/fhir"
+        ]
+        assert len(clinical_push_calls) == 1
+        auth_headers = clinical_push_calls[0].kwargs.get("auth_headers", {})
+        assert "Authorization" in auth_headers
+        assert auth_headers["Authorization"] == "Basic dXNlcjpwYXNz"
+
+        # Measure-def push must NOT carry CDR auth headers
+        def_push_calls = [
+            call
+            for call in mock_push.call_args_list
+            if call.kwargs.get("target_url") != "http://external-cdr.example.com/fhir"
+        ]
+        for def_call in def_push_calls:
+            assert "Authorization" not in (def_call.kwargs.get("auth_headers") or {})
 
     async def test_bundle_with_only_measure_defs(self, test_session):
         """Bundle containing only measure defs: no expected results, no clinical push."""

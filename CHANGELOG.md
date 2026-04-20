@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.4.0] - 2026-04-19
+
+### Fixed
+- Bundle upload now forwards auth headers (Basic or Bearer) when pushing clinical data
+  to an external CDR. `push_resources` now accepts an optional `auth_headers` parameter
+  that is merged into the POST request, matching the auth behavior already present in
+  `run_validation`. External CDRs requiring authentication would previously receive a 401.
+
 ## [0.0.3.0] - 2026-04-19
 
 ### Added

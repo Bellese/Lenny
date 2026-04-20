@@ -330,15 +330,19 @@ async def triage_test_bundle(
         await session.execute(stmt)
     await session.commit()
 
-    # Push clinical data to whatever CDR is active (external or bundled default)
+    # Push clinical data to active CDR (default or external)
     patients_loaded = 0
     if clinical:
         cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         active_cdr = cdr_result.scalar_one_or_none()
         cdr_url = active_cdr.cdr_url if active_cdr else settings.DEFAULT_CDR_URL
-
-        await push_resources(clinical, target_url=cdr_url)
+        cdr_auth = await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials) if active_cdr else {}
+        await push_resources(clinical, target_url=cdr_url, auth_headers=cdr_auth)
         patients_loaded = sum(1 for r in clinical if r.get("resourceType") == "Patient")
+        logger.info(
+            "Clinical resources loaded to CDR",
+            extra={"count": len(clinical), "cdr_url": cdr_url},
+        )
 
     return {
         "measures_loaded": sum(1 for r in measure_defs if r.get("resourceType") == "Measure"),

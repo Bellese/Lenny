@@ -4,10 +4,10 @@
 
 ```bash
 # Unit tests (run from repo root)
-cd backend && python -m pytest tests/ --ignore=tests/integration -v
+cd backend && python3 -m pytest tests/ --ignore=tests/integration -v
 
 # Unit tests with coverage (floor: 70%)
-cd backend && python -m pytest tests/ --ignore=tests/integration --cov=app --cov-report=term-missing
+cd backend && python3 -m pytest tests/ --ignore=tests/integration --cov=app --cov-report=term-missing
 
 # Integration tests (spins up real HAPI FHIR + Postgres containers)
 ./scripts/run-integration-tests.sh
