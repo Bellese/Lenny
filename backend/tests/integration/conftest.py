@@ -68,15 +68,21 @@ def _fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict
             if has_vs_refs:
                 r = copy.deepcopy(r)
                 codes_by_system: dict[str, list[dict[str, str]]] = {}
-                for ce in r["expansion"].get("contains", []):
-                    sys = ce.get("system", "")
-                    code = ce.get("code", "")
-                    disp = ce.get("display", "")
-                    if sys and code:
-                        entry: dict[str, str] = {"code": code}
-                        if disp:
-                            entry["display"] = disp
-                        codes_by_system.setdefault(sys, []).append(entry)
+
+                def _flatten_contains(nodes: list[dict[str, Any]]) -> None:
+                    for ce in nodes:
+                        sys = ce.get("system", "")
+                        code = ce.get("code", "")
+                        disp = ce.get("display", "")
+                        if sys and code:
+                            entry: dict[str, str] = {"code": code}
+                            if disp:
+                                entry["display"] = disp
+                            codes_by_system.setdefault(sys, []).append(entry)
+                        if ce.get("contains"):
+                            _flatten_contains(ce["contains"])
+
+                _flatten_contains(r["expansion"].get("contains", []))
                 r["compose"] = {
                     "include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]
                 }

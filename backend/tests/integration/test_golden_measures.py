@@ -159,7 +159,11 @@ def _extract_test_case_info(report: dict[str, Any]) -> dict[str, Any] | None:
     if not patient_ref:
         subject_ref = report.get("subject", {}).get("reference", "")
         if subject_ref:
-            # Strip "Patient/" prefix if present to get bare patient id
+            # Strip "Patient/" prefix if present to get bare patient id.
+            # Skip absolute URLs and contained refs — they can't be passed as
+            # a plain ID in the $evaluate-measure subject parameter.
+            if subject_ref.startswith(("#", "http://", "https://")):
+                return None
             patient_ref = subject_ref.removeprefix("Patient/")
 
     if not patient_ref:
