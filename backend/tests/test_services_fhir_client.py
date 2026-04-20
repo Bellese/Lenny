@@ -313,6 +313,8 @@ async def test_wipe_patient_data_includes_qi_core_types():
     wiped_types = {url.split("/")[-1].split("?")[0] for url in deleted_urls}
     for expected_type in (
         "DeviceRequest",
+        "Medication",
+        "Task",
         "MedicationAdministration",
         "AdverseEvent",
         "Location",

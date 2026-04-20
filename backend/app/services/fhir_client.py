@@ -478,6 +478,8 @@ async def wipe_patient_data() -> None:
         "Goal",
         "ServiceRequest",
         "DeviceRequest",
+        "Medication",
+        "Task",
         "Coverage",
         "Claim",
         "Location",
