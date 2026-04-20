@@ -26,12 +26,27 @@ All notable changes to this project will be documented in this file.
 - `_KNOWN_CLINICAL_TYPES` in `validation.py` updated to include `Medication` and `Task`,
   eliminating spurious unknown-type log warnings when processing QICore6 bundles.
 - Rehearsal script `jq` calls use `-r` flag to prevent quoted string IDs in URLs.
+- `bundle_loader.py` now skips `manifest.json` when globbing bundle files, preventing it
+  from being loaded as a FHIR bundle.
+- Measure push switched from transaction to batch bundle to avoid HAPI-2001 (`Patient ref
+  unknown`) when clinical subjects are absent from the measure engine.
+- `docker-compose.test.yml` `server_address` corrected from Docker-internal hostname to
+  `localhost` so HAPI pagination links resolve from the CI host.
+- CMS1218 `expected_test_cases` corrected from 75 to 69 (6 duplicate patient refs in the
+  MADiE bundle produce 69 unique DB rows via `ON CONFLICT DO UPDATE`).
+- `test_cdr_qicore_implementation_guide_resource` marked skip: HAPI loads the QI-Core IG
+  for profile validation but does not persist it as a queryable FHIR resource.
+- Added Lucene `io.refresh_interval=100ms` and `reuse_cached_search_results_millis=0` to
+  the measure engine test config to eliminate indexing race conditions in integration tests.
 
 ### Changed
 - Test HAPI FHIR bumped from `v7.4.0` to `v8.6.0-1` in `docker-compose.test.yml`, aligning
   with production and enabling QI-Core STU6 evaluation.
 - `STRICT_STU6=0` soft default added to CI workflow for one-week rollout; flip to `1` once
   all 12 connectathon measures pass evaluation.
+- Per-patient `$evaluate-measure` tests (`test_connectathon_measures.py`, ~548 cases,
+  15-20 min) moved to a dedicated nightly workflow (`connectathon-measures.yml`) with a
+  60-minute timeout and manual `STRICT_STU6` override. PR gate now runs in ≤ 20 minutes.
 
 ## [0.0.4.0] - 2026-04-19
 
