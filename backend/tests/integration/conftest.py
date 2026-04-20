@@ -95,13 +95,21 @@ def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encoun
 
     headers = {"Content-Type": "application/fhir+json"}
     params = {"resourceType": "Parameters", "parameter": [{"name": "type", "valueString": "Encounter"}]}
-    _httpx.post(f"{base_url}/$reindex", json=params, headers=headers, timeout=30)
+    import warnings as _warnings
+
+    r = _httpx.post(f"{base_url}/$reindex", json=params, headers=headers, timeout=30)
+    if r.status_code >= 400:
+        _warnings.warn(f"$reindex trigger at {base_url} returned {r.status_code}: {r.text[:200]}")
 
     deadline = time.monotonic() + _REINDEX_TIMEOUT
     while time.monotonic() < deadline:
         resp = _httpx.get(f"{base_url}/Encounter?patient={probe_patient_id}&_count=1", timeout=10)
-        if resp.status_code == 200 and resp.json().get("entry"):
-            return
+        if resp.status_code == 200:
+            try:
+                if resp.json().get("entry"):
+                    return
+            except Exception:
+                pass
         time.sleep(_REINDEX_POLL_INTERVAL)
 
     raise RuntimeError(

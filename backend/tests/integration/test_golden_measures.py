@@ -11,8 +11,10 @@ tests/integration/golden/.
 
 from __future__ import annotations
 
+import base64
 import json
 import pathlib
+import warnings
 from typing import Any
 
 import httpx
@@ -25,6 +27,8 @@ from app.services.validation import (
 )
 from tests.integration._helpers import make_put_bundle
 from tests.integration.conftest import (
+    _REINDEX_POLL_INTERVAL,
+    _REINDEX_TIMEOUT,
     TEST_CDR_URL,
     TEST_MEASURE_URL,
     _fix_valueset_compose_for_hapi,
@@ -68,8 +72,6 @@ def _get_missing_valueset_stubs(bundle: dict[str, Any]) -> list[dict[str, Any]]:
     succeed; the stub expands to 0 codes, so criteria that check membership return
     false (and criteria for *not* in the set return true).
     """
-    import base64 as _b64
-
     elm_declared_urls: set[str] = set()
     for entry in bundle.get("entry", []):
         r = entry.get("resource", {})
@@ -77,10 +79,8 @@ def _get_missing_valueset_stubs(bundle: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         for content in r.get("content", []):
             if content.get("contentType") == "application/elm+json":
-                import json as _json
-
                 try:
-                    elm = _json.loads(_b64.b64decode(content["data"]))
+                    elm = json.loads(base64.b64decode(content["data"]))
                 except Exception:
                     continue
                 for vs in elm.get("library", {}).get("valueSets", {}).get("def", []):
@@ -243,6 +243,9 @@ def _get_hapi_valueset_urls(base_url: str) -> set[str]:
     while next_url:
         resp = httpx.get(next_url, timeout=30)
         if resp.status_code != 200:
+            warnings.warn(
+                f"ValueSet pagination failed at {next_url}: {resp.status_code} — dedup guard may be incomplete"
+            )
             break
         d = resp.json()
         for e in d.get("entry", []):
@@ -320,8 +323,6 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                     tx = make_put_bundle(_fix_valueset_compose_for_hapi(filtered_non_measures))
                     resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
                     if resp.status_code == 422 and "HAPI-0902" in resp.text:
-                        import warnings
-
                         warnings.warn(f"[{name}] measure defs already loaded (HAPI-0902 uniqueness constraint)")
                     else:
                         try:
@@ -384,17 +385,23 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
             "parameter": [{"name": "type", "valueString": "Encounter"}],
         }
         for target in (TEST_CDR_URL, TEST_MEASURE_URL):
-            httpx.post(f"{target}/$reindex", json=reindex_params, headers=headers, timeout=30)
+            r = httpx.post(f"{target}/$reindex", json=reindex_params, headers=headers, timeout=30)
+            if r.status_code >= 400:
+                warnings.warn(f"$reindex trigger at {target} returned {r.status_code}: {r.text[:200]}")
 
-        deadline = _time.monotonic() + 300
+        deadline = _time.monotonic() + _REINDEX_TIMEOUT
         while _time.monotonic() < deadline:
-            all_indexed = all(
-                httpx.get(f"{TEST_MEASURE_URL}/Encounter?patient={pat}&_count=1", timeout=10).json().get("entry")
-                for pat, _ in probe_pairs
-            )
-            if all_indexed:
+
+            def _probe_indexed(pat: str) -> bool:
+                try:
+                    resp = httpx.get(f"{TEST_MEASURE_URL}/Encounter?patient={pat}&_count=1", timeout=10)
+                    return bool(resp.status_code == 200 and resp.json().get("entry"))
+                except Exception:
+                    return False
+
+            if all(_probe_indexed(pat) for pat, _ in probe_pairs):
                 break
-            _time.sleep(5)
+            _time.sleep(_REINDEX_POLL_INTERVAL)
 
 
 # EXM bundles (DBCG connectathon era, ~2019-2020) use CQL 1.3 syntax
@@ -546,8 +553,6 @@ def test_golden_measure_evaluates(name: str, bundle: dict[str, Any]) -> None:
             )
 
     if skipped_cases:
-        import warnings
-
         warnings.warn(f"[{name}] {len(skipped_cases)} test case(s) skipped:\n" + "\n".join(skipped_cases))
 
     assert not failures, f"Population count mismatches in '{name}' ({len(failures)}/{evaluated} failed):\n" + "\n".join(
