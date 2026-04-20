@@ -122,11 +122,19 @@ def test_bundle_sha256_matches(entry: dict):
 
 @pytest_asyncio.fixture(scope="module")
 async def loader_result(integration_session_factory):
-    """Call load_connectathon_bundles() once per module and return the result dict.
+    """Call load_connectathon_bundles() once per module and return a result dict.
 
     Patches settings so the loader talks to the test HAPI instances and uses
     the test PostgreSQL session factory (via the async_session context manager
     used inside bundle_loader).
+
+    Returns a dict with keys:
+      - ``failed``         — number of failed bundle loads
+      - ``loaded``         — number of successfully loaded bundles
+      - ``details``        — per-bundle detail list from load_connectathon_bundles()
+      - ``counts_by_measure`` — dict mapping canonical_url → ExpectedResult row count,
+                                captured atomically right after loading (before any
+                                function-scoped _truncate_tables teardown can clear rows)
     """
     with (
         patch("app.config.settings.MEASURE_ENGINE_URL", TEST_MEASURE_URL),
@@ -135,24 +143,23 @@ async def loader_result(integration_session_factory):
     ):
         result = await load_connectathon_bundles(_BUNDLE_DIR)
 
-    return result
-
-
-@pytest_asyncio.fixture(scope="module")
-async def expected_counts_by_measure(loader_result, integration_session_factory):
-    """Capture ExpectedResult row counts per canonical URL immediately after loading.
-
-    This fixture is module-scoped and runs right after loader_result — before any
-    function-scoped _truncate_tables teardowns clear the expected_results table.
-    Returns a dict mapping canonical_url → row count.
-    """
+    # Capture ExpectedResult counts immediately — before any function-scoped
+    # _truncate_tables teardown can wipe the expected_results table.
     async with integration_session_factory() as session:
-        result = await session.execute(
+        count_result = await session.execute(
             select(ExpectedResult.measure_url, func.count().label("cnt"))
             .group_by(ExpectedResult.measure_url)
         )
-        rows = result.all()
-    return {row.measure_url: row.cnt for row in rows}
+        rows = count_result.all()
+
+    counts_by_measure = {row.measure_url: row.cnt for row in rows}
+
+    return {
+        "failed": result.get("failed", -1),
+        "loaded": result.get("loaded", 0),
+        "details": result.get("details", []),
+        "counts_by_measure": counts_by_measure,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -163,9 +170,8 @@ async def expected_counts_by_measure(loader_result, integration_session_factory)
 @pytest.mark.asyncio
 async def test_loader_zero_failures(loader_result):
     """load_connectathon_bundles() must complete with failed == 0."""
-    result = loader_result
-    failed = result.get("failed", -1)
-    details = result.get("details", [])
+    failed = loader_result["failed"]
+    details = loader_result["details"]
     failed_details = [d for d in details if d.get("status") == "failed"]
     assert failed == 0, (
         f"load_connectathon_bundles() reported {failed} failure(s):\n"
@@ -182,8 +188,7 @@ async def test_loader_all_bundles_loaded(loader_result):
     manifest = _load_manifest()
     expected_files = {entry["bundle_file"] for entry in manifest["measures"]}
 
-    result = loader_result
-    details = result.get("details", [])
+    details = loader_result["details"]
     loaded_files = {d["file"] for d in details if d.get("status") == "loaded"}
 
     assert loaded_files == expected_files, (
@@ -222,15 +227,16 @@ async def test_loader_canonical_urls_on_measure_engine(loader_result):
 
 
 @pytest.mark.asyncio
-async def test_expected_results_counts(expected_counts_by_measure):
+async def test_expected_results_counts(loader_result):
     """For each manifest entry with expected_test_cases > 0, the DB must have contained
     exactly that many ExpectedResult rows for the measure's canonical URL at load time.
 
-    Uses expected_counts_by_measure (module-scoped) which captures row counts immediately
-    after load_connectathon_bundles() completes — before function-scoped _truncate_tables
-    teardowns clear the expected_results table between other tests.
+    Uses loader_result["counts_by_measure"] which is captured atomically inside the
+    module-scoped loader_result fixture, immediately after load_connectathon_bundles()
+    completes — before any function-scoped _truncate_tables teardown can clear rows.
     """
     manifest = _load_manifest()
+    counts_by_measure = loader_result["counts_by_measure"]
     mismatches: list[str] = []
 
     for entry in manifest["measures"]:
@@ -238,7 +244,7 @@ async def test_expected_results_counts(expected_counts_by_measure):
             continue  # definition-only bundle — skip
 
         canonical_url = entry["canonical_url"]
-        actual_count = expected_counts_by_measure.get(canonical_url, 0)
+        actual_count = counts_by_measure.get(canonical_url, 0)
 
         if actual_count != entry["expected_test_cases"]:
             mismatches.append(
