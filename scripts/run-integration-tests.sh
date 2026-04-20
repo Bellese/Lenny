@@ -130,7 +130,7 @@ _phase_done "PostgreSQL ready"
 echo "==> Running integration tests..."
 cd "$PROJECT_ROOT/backend"
 pytest_exit=0
-python -m pytest tests/integration/ -m integration -v --tb=short "$@" || pytest_exit=$?
+python3 -m pytest tests/integration/ -m integration -v --tb=short "$@" || pytest_exit=$?
 
 echo ""
 if [ "$pytest_exit" -eq 0 ]; then
