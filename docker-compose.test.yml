@@ -67,6 +67,8 @@ services:
       - spring.jpa.properties.hibernate.search.backend.analysis.configurer=ca.uhn.fhir.jpa.search.HapiHSearchAnalysisConfigurers$$HapiLuceneAnalysisConfigurer
       - spring.jpa.properties.hibernate.search.backend.directory.root=/data/hapi/lucene
       - spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
+      - spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100
+      - hapi.fhir.reuse_cached_search_results_millis=0
 
 volumes:
   test_pgdata:
