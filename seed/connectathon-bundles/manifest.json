@@ -1,7 +1,7 @@
 {
   "version": "2026-05",
   "track": "MADiE May 2026 Connectathon",
-  "notes": "CMS529 (Hybrid Hospital-Wide Readmission) pending MADiE access for QICore6 v1.0.000 bundle. Current set: 11 of 12 target measures loaded.",
+  "notes": "12 of 12 target measures loaded. CMS529 sourced from MADiE v0.5.001 Draft (QI-Core v6.0.0); measurement period 2026-07-01/2027-06-30.",
   "measures": [
     {
       "id": "CMS2FHIRPCSDepressionScreenAndFollowUp",
@@ -87,8 +87,8 @@
       "id": "CMS816FHIRHHHypo",
       "canonical_url": "https://madie.cms.gov/Measure/CMS816FHIRHHHypo",
       "bundle_file": "CMS816FHIRHHHypo-bundle.json",
-      "sha256": "184209635f36c7420bb40b62ae0c616ff67aee2396f1c6d4ae06c5bcb576d598",
-      "expected_test_cases": 28,
+      "sha256": "811be739f670dc96c0d0158ae8bc12bbef95f9c40a25e2e6e577b4ca86358815",
+      "expected_test_cases": 9,
       "period": {"start": "2026-01-01", "end": "2026-12-31"},
       "strict": true,
       "known_issues": []
@@ -104,11 +104,21 @@
       "known_issues": []
     },
     {
+      "id": "CMS529FHIRHybridHospitalWideReadmission",
+      "canonical_url": "https://madie.cms.gov/Measure/CMSFHIR529HybridHospitalWideReadmission",
+      "bundle_file": "CMS529FHIRHybridHospitalWideReadmission-bundle.json",
+      "sha256": "8fa63ce36b25d45ea9c642f0a21d685b956fbe83289e3c929ca901e7649ef05d",
+      "expected_test_cases": 53,
+      "period": {"start": "2026-07-01", "end": "2027-06-30"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
       "id": "CMS1218FHIRHHRF",
       "canonical_url": "https://madie.cms.gov/Measure/CMS1218FHIRHHRF",
       "bundle_file": "CMS1218FHIRHHRF-bundle.json",
-      "sha256": "eb907e0e5be10adca2d81bdfe3dd5bfaf647879ae08b6d177f3701549e105714",
-      "expected_test_cases": 69,
+      "sha256": "cbaef9dc136cb54da9d6cfd40b9003f72c7f318b9ebee373793ea3c851522768",
+      "expected_test_cases": 55,
       "period": {"start": "2026-01-01", "end": "2026-12-31"},
       "strict": true,
       "known_issues": []

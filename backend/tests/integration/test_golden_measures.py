@@ -408,47 +408,11 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
             _time.sleep(_REINDEX_POLL_INTERVAL)
 
 
-# CMS1218 (Hip/Knee Replacement Functional/Pain): two independent HAPI v8.6.0 issues.
-# (1) FHIRHelpers 4.0.0 bundled with HAPI does not define ToQuantity(CodeableConcept),
-#     causing exceptions for patients whose Observation values are typed as
-#     CodeableConcept rather than Quantity (~4 patients).
-# (2) The CMS1218 bundle shares ValueSet canonical URLs with the seed measure bundle
-#     (CMS122).  Without careful dedup on first load, HAPI accumulates duplicates and
-#     raises "Multiple ValueSets resolved" on evaluation (~4 patients on stale
-#     containers).  The _get_hapi_valueset_urls dedup guard prevents this on fresh
-#     containers, but stale containers hit the duplicate path.
-# Both issues are HAPI v8.6.0 regressions; mark xfail to keep CI green.
-_HAPI_PARTIAL_COMPAT = frozenset(
-    {
-        "CMS1218FHIRHHRF",
-        # CMS816 (Hospital Harm - Hypoglycemia): 12/28 patients lack Encounter resources
-        # in the connectathon bundle.  HAPI v8.6.0 requires explicit Encounter context for
-        # initial-population criteria; without it the patients evaluate to IP=0 even though
-        # the expected MeasureReports (generated against an earlier reference implementation)
-        # say IP=1.  This is a known connectathon bundle/HAPI v8.6.0 incompatibility.
-        "CMS816FHIRHHHypo",
-    }
-)
-
-_XFAIL_PARTIAL = pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Bundle has known partial incompatibilities with HAPI v8.6.0: "
-        "CMS1218 — ToQuantity(CodeableConcept) unresolved in bundled FHIRHelpers "
-        "and duplicate canonical ValueSet URLs on stale containers; "
-        "CMS816 — connectathon bundle missing Encounter resources for ~12 patients"
-    ),
-)
-
-
 def _parametrize_bundles() -> list:
     bundles = _get_golden_bundles()
     if not bundles:
         return [pytest.param("_empty", {}, marks=pytest.mark.skip(reason="No golden bundles found"))]
-    return [
-        pytest.param(name, bundle, marks=_XFAIL_PARTIAL if name in _HAPI_PARTIAL_COMPAT else ())
-        for name, bundle in bundles
-    ]
+    return [pytest.param(name, bundle) for name, bundle in bundles]
 
 
 _PARAMETRIZE_BUNDLES = _parametrize_bundles()
