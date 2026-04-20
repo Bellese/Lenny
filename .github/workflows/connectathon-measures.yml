@@ -1,0 +1,45 @@
+name: Connectathon Measures
+
+# Non-blocking: runs nightly and on manual trigger.
+# Per-patient $evaluate-measure calls (~548 test cases across 11 bundles)
+# take ~15-20 min, too long for the PR gate.
+#
+# When STRICT_STU6 flips to "1" this job will hard-fail on population
+# mismatches, giving a daily signal of connectathon readiness.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # 03:00 UTC nightly
+  workflow_dispatch:
+    inputs:
+      strict_stu6:
+        description: "STRICT_STU6 value (0=warn, 1=hard-fail)"
+        required: false
+        default: "0"
+
+env:
+  PYTHON_VERSION: "3.10"
+
+jobs:
+  connectathon-measures:
+    name: Connectathon Measures (per-patient evaluation)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      # workflow_dispatch input or nightly soft default
+      STRICT_STU6: ${{ github.event.inputs.strict_stu6 || '0' }}
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-test.txt
+
+      - name: Run connectathon measure evaluation tests
+        run: ./scripts/run-integration-tests.sh tests/integration/test_connectathon_measures.py

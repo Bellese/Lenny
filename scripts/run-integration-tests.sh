@@ -89,7 +89,7 @@ echo "==> Running integration tests..."
 cd "$PROJECT_ROOT/backend"
 pip install -r requirements.txt -r requirements-test.txt
 pytest_exit=0
-python -m pytest tests/integration/ -m integration -v --tb=short || pytest_exit=$?
+python -m pytest tests/integration/ -m integration -v --tb=short "$@" || pytest_exit=$?
 
 echo ""
 if [ "$pytest_exit" -eq 0 ]; then
