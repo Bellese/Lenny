@@ -37,7 +37,7 @@ from app.services.validation import (
     compare_populations,
 )
 from tests.integration._helpers import fail_with_context, make_put_bundle
-from tests.integration.conftest import TEST_MEASURE_URL, TEST_CDR_URL
+from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL
 
 pytestmark = pytest.mark.integration
 
