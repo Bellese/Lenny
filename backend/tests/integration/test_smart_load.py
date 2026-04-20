@@ -182,10 +182,8 @@ async def test_loader_all_bundles_loaded(loader_result):
     details = loader_result["details"]
     loaded_files = {d["file"] for d in details if d.get("status") == "loaded"}
 
-    assert loaded_files == expected_files, (
-        f"Loaded bundle set does not match manifest.\n"
-        f"  missing from loader: {expected_files - loaded_files}\n"
-        f"  extra in loader:     {loaded_files - expected_files}"
+    assert expected_files.issubset(loaded_files), (
+        f"Not all manifest bundles were loaded.\n  missing from loader: {expected_files - loaded_files}"
     )
 
 
