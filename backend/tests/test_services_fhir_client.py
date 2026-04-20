@@ -207,7 +207,7 @@ async def test_gather_patient_data():
 
 
 async def test_push_resources():
-    """push_resources sends a transaction bundle to the measure engine."""
+    """push_resources sends a batch bundle to the measure engine."""
     resources = [
         {"resourceType": "Patient", "id": "p1"},
         {"resourceType": "Condition", "id": "c1"},
@@ -227,7 +227,7 @@ async def test_push_resources():
     call_args = mock_ctx.post.call_args
     posted_bundle = call_args.kwargs.get("json") or call_args[1].get("json")
     assert posted_bundle["resourceType"] == "Bundle"
-    assert posted_bundle["type"] == "transaction"
+    assert posted_bundle["type"] == "batch"
     assert len(posted_bundle["entry"]) == 2
 
 

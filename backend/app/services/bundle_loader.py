@@ -77,6 +77,8 @@ async def load_connectathon_bundles(
     details: list[dict[str, Any]] = []
 
     for bundle_path in bundle_files:
+        if bundle_path.name == "manifest.json":
+            continue
         try:
             bundle_json = json.loads(bundle_path.read_bytes())
             async with async_session() as session:

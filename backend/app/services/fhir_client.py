@@ -386,11 +386,16 @@ async def push_resources(
     target_url: str | None = None,
     auth_headers: dict[str, str] | None = None,
 ) -> None:
-    """POST a transaction Bundle of resources to the target FHIR server."""
+    """POST a batch Bundle of resources to the target FHIR server.
+
+    Uses batch (not transaction) so HAPI does not validate cross-references
+    between entries — avoids HAPI-2001 when clinical subjects are absent from
+    the measure engine.
+    """
     base = target_url or settings.MEASURE_ENGINE_URL
     bundle = {
         "resourceType": "Bundle",
-        "type": "transaction",
+        "type": "batch",
         "entry": [
             {
                 "resource": _normalize_measure_def(r),
@@ -413,10 +418,6 @@ async def push_resources(
             json=bundle,
             headers=headers,
         )
-        # HAPI-0902: duplicate canonical URL+version — resources already loaded; treat as success
-        if resp.status_code == 422 and "HAPI-0902" in resp.text:
-            logger.info("Resources already present (HAPI-0902)", extra={"target": base})
-            return
         resp.raise_for_status()
     logger.info("Pushed resources", extra={"count": len(bundle["entry"]), "target": base})
 
