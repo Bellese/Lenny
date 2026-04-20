@@ -97,6 +97,37 @@ The orchestrator fetches patients from the CDR (all patients, or group members i
 
 ## HAPI FHIR Configuration
 
+### Implementation Guide Installation (QI-Core STU6)
+
+Both HAPI instances (CDR and Measure Engine) are configured to install the QI-Core 6.0.0 IG and its dependencies on startup via `hapi.fhir.implementationguides.*` environment variables. HAPI downloads the npm packages from the HL7 registry during first boot and caches them in the H2 volume.
+
+The six env vars (identical on both services):
+
+| Variable | Value |
+|----------|-------|
+| `hapi.fhir.implementationguides.qicore.name` | `hl7.fhir.us.qicore` |
+| `hapi.fhir.implementationguides.qicore.version` | `6.0.0` |
+| `hapi.fhir.implementationguides.uscore.name` | `hl7.fhir.us.core` |
+| `hapi.fhir.implementationguides.uscore.version` | `6.1.0` |
+| `hapi.fhir.implementationguides.cql.name` | `hl7.fhir.uv.cql` |
+| `hapi.fhir.implementationguides.cql.version` | `1.0.0` |
+
+What this does: once HAPI starts, these IGs are registered in the server's package registry and their profiles, value sets, and code systems become available for resource validation and CQL evaluation. Both the CDR and the Measure Engine carry the same IG set so that profiles are consistent across validation and calculation.
+
+**Verifying IG installation.** After startup you can confirm the IGs loaded correctly:
+
+```bash
+# List installed IGs via CapabilityStatement (look for qi-core in implementationGuide[])
+curl -s http://localhost:8180/fhir/metadata | jq '.implementationGuide'
+
+# Or query the ImplementationGuide resource directly
+curl -s "http://localhost:8180/fhir/ImplementationGuide?name=qicore" | jq '.entry[].resource.version'
+```
+
+Port mapping for local dev: CDR is exposed on `8180`, Measure Engine on `8181` (via `docker-compose.test.yml`). In the main stack both run on internal port `8080`.
+
+### Runtime Settings
+
 Critical settings and why they are set:
 
 | Setting | Service | Value | Reason |

@@ -11,6 +11,7 @@ from app.services.validation import (
     _extract_test_case_info,
     _is_test_case_measure_report,
     _resolve_measure_id,
+    _warn_unknown_bundle_types,
     compare_populations,
     process_bundle_upload,
     sanitize_error,
@@ -342,6 +343,104 @@ class TestClassifyBundleEntries:
         assert len(measure_defs) == 0
         assert len(clinical) == 0
         assert len(test_cases) == 0
+
+
+# ---------------------------------------------------------------------------
+# _warn_unknown_bundle_types
+# ---------------------------------------------------------------------------
+
+
+class TestWarnUnknownBundleTypes:
+    def test_known_clinical_types_no_warning(self, caplog):
+        """Known clinical types produce no warning."""
+        import logging
+
+        bundle = {
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "p1"}},
+                {"resource": {"resourceType": "Condition", "id": "c1"}},
+                {"resource": {"resourceType": "DeviceRequest", "id": "dr1"}},
+                {"resource": {"resourceType": "MedicationAdministration", "id": "ma1"}},
+                {"resource": {"resourceType": "AdverseEvent", "id": "ae1"}},
+            ]
+        }
+        with caplog.at_level(logging.WARNING, logger="app.services.validation"):
+            _warn_unknown_bundle_types(bundle)
+        assert not caplog.records
+
+    def test_measure_def_types_no_warning(self, caplog):
+        """Measure def types (Measure, Library, ValueSet, CodeSystem) produce no warning."""
+        import logging
+
+        bundle = {
+            "entry": [
+                {"resource": {"resourceType": "Measure", "id": "m1"}},
+                {"resource": {"resourceType": "Library", "id": "l1"}},
+                {"resource": {"resourceType": "ValueSet", "id": "vs1"}},
+                {"resource": {"resourceType": "CodeSystem", "id": "cs1"}},
+            ]
+        }
+        with caplog.at_level(logging.WARNING, logger="app.services.validation"):
+            _warn_unknown_bundle_types(bundle)
+        assert not caplog.records
+
+    def test_measure_report_no_warning(self, caplog):
+        """MeasureReport (test case container) produces no warning."""
+        import logging
+
+        bundle = {"entry": [{"resource": {"resourceType": "MeasureReport", "id": "mr1"}}]}
+        with caplog.at_level(logging.WARNING, logger="app.services.validation"):
+            _warn_unknown_bundle_types(bundle)
+        assert not caplog.records
+
+    def test_unknown_type_emits_warning(self, caplog):
+        """An unrecognised resource type triggers a warning log."""
+        import logging
+
+        bundle = {"entry": [{"resource": {"resourceType": "InventoryItem", "id": "x1"}}]}
+        with caplog.at_level(logging.WARNING, logger="app.services.validation"):
+            _warn_unknown_bundle_types(bundle)
+        # extra fields are attached directly as LogRecord attributes by structlog/stdlib
+        assert any(
+            getattr(r, "resourceType", None) == "InventoryItem" or "InventoryItem" in r.getMessage()
+            for r in caplog.records
+        )
+
+    def test_duplicate_unknown_type_warns_once(self, caplog):
+        """The same unknown type present multiple times only generates one warning."""
+        import logging
+
+        bundle = {
+            "entry": [
+                {"resource": {"resourceType": "InventoryItem", "id": "x1"}},
+                {"resource": {"resourceType": "InventoryItem", "id": "x2"}},
+            ]
+        }
+        with caplog.at_level(logging.WARNING, logger="app.services.validation"):
+            _warn_unknown_bundle_types(bundle)
+        warning_count = sum(
+            1
+            for r in caplog.records
+            if getattr(r, "resourceType", None) == "InventoryItem" or "InventoryItem" in r.getMessage()
+        )
+        assert warning_count == 1
+
+    def test_empty_bundle_no_warning(self, caplog):
+        """Empty bundle produces no warnings."""
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="app.services.validation"):
+            _warn_unknown_bundle_types({"entry": []})
+        assert not caplog.records
+
+    def test_skips_entries_without_resource(self, caplog):
+        """Entries missing 'resource' key are silently skipped."""
+        import logging
+
+        bundle = {"entry": [{"request": {"method": "DELETE"}}]}
+        with caplog.at_level(logging.WARNING, logger="app.services.validation"):
+            _warn_unknown_bundle_types(bundle)
+        assert not caplog.records
 
 
 # ---------------------------------------------------------------------------

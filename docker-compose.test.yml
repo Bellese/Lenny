@@ -22,21 +22,52 @@ services:
       retries: 5
 
   hapi-fhir-cdr:
-    image: hapiproject/hapi:v7.4.0
+    image: hapiproject/hapi:v8.6.0-1
+    user: root
     ports: ["8180:8080"]
     volumes: ["test_cdrdata:/data/hapi"]
     environment:
-      - hapi.fhir.server_address=http://hapi-fhir-cdr:8080/fhir
+      # QI-Core STU6 IG packages
+      - hapi.fhir.implementationguides.qicore.name=hl7.fhir.us.qicore
+      - hapi.fhir.implementationguides.qicore.version=6.0.0
+      - hapi.fhir.implementationguides.uscore.name=hl7.fhir.us.core
+      - hapi.fhir.implementationguides.uscore.version=6.1.0
+      - hapi.fhir.implementationguides.cql.name=hl7.fhir.uv.cql
+      - hapi.fhir.implementationguides.cql.version=1.0.0
+      - hapi.fhir.server_address=http://localhost:8180/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
-      - hapi.fhir.reuse_cached_search_results_millis=0
+      - hapi.fhir.client_id_strategy=ANY
+      - hapi.fhir.allow_external_references=true
+      - hapi.fhir.enforce_referential_integrity_on_write=false
+      - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
+      - spring.datasource.driverClassName=org.h2.Driver
 
   hapi-fhir-measure:
-    image: hapiproject/hapi:v7.4.0
+    image: hapiproject/hapi:v8.6.0-1
+    user: root
     ports: ["8181:8080"]
     volumes: ["test_measuredata:/data/hapi"]
     environment:
-      - hapi.fhir.server_address=http://hapi-fhir-measure:8080/fhir
+      # QI-Core STU6 IG packages
+      - hapi.fhir.implementationguides.qicore.name=hl7.fhir.us.qicore
+      - hapi.fhir.implementationguides.qicore.version=6.0.0
+      - hapi.fhir.implementationguides.uscore.name=hl7.fhir.us.core
+      - hapi.fhir.implementationguides.uscore.version=6.1.0
+      - hapi.fhir.implementationguides.cql.name=hl7.fhir.uv.cql
+      - hapi.fhir.implementationguides.cql.version=1.0.0
+      - hapi.fhir.server_address=http://localhost:8181/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
+      - hapi.fhir.client_id_strategy=ANY
+      - hapi.fhir.allow_multiple_delete=true
+      - hapi.fhir.cr.enabled=true
+      - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
+      - spring.datasource.driverClassName=org.h2.Driver
+      - spring.jpa.properties.hibernate.search.enabled=true
+      - spring.jpa.properties.hibernate.search.backend.type=lucene
+      - spring.jpa.properties.hibernate.search.backend.analysis.configurer=ca.uhn.fhir.jpa.search.HapiHSearchAnalysisConfigurers$$HapiLuceneAnalysisConfigurer
+      - spring.jpa.properties.hibernate.search.backend.directory.root=/data/hapi/lucene
+      - spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
+      - spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100
       - hapi.fhir.reuse_cached_search_results_millis=0
 
 volumes:

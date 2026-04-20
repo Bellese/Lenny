@@ -37,7 +37,9 @@ from app.services.fhir_client import (
 
 logger = logging.getLogger(__name__)
 
-# Resource types that belong on the measure engine (measure definitions)
+# Resource types that belong on the measure engine (measure definitions).
+# Scanned against all 12 connectathon bundles (2026-04-19): PlanDefinition,
+# ActivityDefinition, and Questionnaire are NOT present — not added.
 _MEASURE_DEF_TYPES = {"Measure", "Library", "ValueSet", "CodeSystem"}
 
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
@@ -219,8 +221,57 @@ def _classify_bundle_entries(
         elif rt != "MeasureReport":
             # Non-test-case MeasureReports are skipped; everything else is clinical
             clinical.append(resource)
+        # Note: non-test-case MeasureReports fall through silently (expected)
 
     return measure_defs, clinical, test_cases
+
+
+def _warn_unknown_bundle_types(bundle_json: dict[str, Any]) -> None:
+    """Log a warning for resource types that are neither measure defs nor known clinical types.
+
+    Runs once per bundle upload so unknown types are visible in logs rather than
+    silently misrouted. Does not affect routing — call before _classify_bundle_entries.
+    """
+    # Known clinical types present in the 12 connectathon bundles or seed/patient-bundle.json
+    _KNOWN_CLINICAL_TYPES = {
+        "Patient",
+        "Condition",
+        "Observation",
+        "Encounter",
+        "Procedure",
+        "MedicationRequest",
+        "MedicationAdministration",
+        "Immunization",
+        "DiagnosticReport",
+        "AllergyIntolerance",
+        "AdverseEvent",
+        "CarePlan",
+        "CareTeam",
+        "Goal",
+        "ServiceRequest",
+        "DeviceRequest",
+        "Medication",
+        "Task",
+        "Coverage",
+        "Claim",
+        "Location",
+        "Practitioner",
+        "Organization",
+    }
+    seen_unknown: set[str] = set()
+    for entry in bundle_json.get("entry", []):
+        resource = entry.get("resource")
+        if not resource or "resourceType" not in resource:
+            continue
+        rt = resource["resourceType"]
+        if rt in seen_unknown:
+            continue
+        if rt not in _MEASURE_DEF_TYPES and rt not in _KNOWN_CLINICAL_TYPES and rt != "MeasureReport":
+            seen_unknown.add(rt)
+            logger.warning(
+                "Unknown resource type in bundle — will route as clinical data",
+                extra={"resourceType": rt},
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +292,7 @@ async def triage_test_bundle(
 
     Returns summary dict with counts.
     """
+    _warn_unknown_bundle_types(bundle_json)
     measure_defs, clinical, test_cases = _classify_bundle_entries(bundle_json)
 
     # Push measure definitions to measure engine in two phases so shared ValueSets

@@ -1,0 +1,117 @@
+{
+  "version": "2026-05",
+  "track": "MADiE May 2026 Connectathon",
+  "notes": "CMS529 (Hybrid Hospital-Wide Readmission) pending MADiE access for QICore6 v1.0.000 bundle. Current set: 11 of 12 target measures loaded.",
+  "measures": [
+    {
+      "id": "CMS2FHIRPCSDepressionScreenAndFollowUp",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS2FHIRPCSDepressionScreenAndFollowUp",
+      "bundle_file": "CMS2FHIRPCSDepressionScreenAndFollowUp-bundle.json",
+      "sha256": "00ba26570757cb36d73d26e8a07e40b2b68725b0fd6acf6dedf597b38118458b",
+      "expected_test_cases": 36,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS71FHIRSTKAnticoagAFFlutter",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS71FHIRSTKAnticoagAFFlutter",
+      "bundle_file": "CMS71FHIRSTKAnticoagAFFlutter-bundle.json",
+      "sha256": "680c151c72309574c41405574d27bb3d7db7971967187a0ca8f59bc03008afbd",
+      "expected_test_cases": 83,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+      "bundle_file": "CMS122FHIRDiabetesAssessGreaterThan9Percent-bundle.json",
+      "sha256": "e4c86d839eb0076a3ca9c98c49a42aca8ed9de64fa0e39bfdf2ef2581acb6495",
+      "expected_test_cases": 56,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS124FHIRCervicalCancerScreening",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS124FHIRCervicalCancerScreening",
+      "bundle_file": "CMS124FHIRCervicalCancerScreening-bundle.json",
+      "sha256": "9c9fff40b0f49920c65a5e0de27d32b4befb3c66d7ba5db5a20f4eb4780de695",
+      "expected_test_cases": 33,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS125FHIRBreastCancerScreening",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS125FHIRBreastCancerScreening",
+      "bundle_file": "CMS125FHIRBreastCancerScreening-bundle.json",
+      "sha256": "fffa6563dd75fc753b174669f8a117021c51d671ebfba7d71a77ad42043f5f75",
+      "expected_test_cases": 66,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS130FHIRColorectalCancerScreening",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS130FHIRColorectalCancerScreening",
+      "bundle_file": "CMS130FHIRColorectalCancerScreening-bundle.json",
+      "sha256": "b734f2a58463c5beb74482316a8acdf6d2a59d6289f7022062168c7625868534",
+      "expected_test_cases": 64,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS165FHIRControllingHighBloodPressure",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS165FHIRControllingHighBloodPressure",
+      "bundle_file": "CMS165FHIRControllingHighBloodPressure-bundle.json",
+      "sha256": "bee8d9e9c3f25a34a598e367b2a69f8b2020a1f718a57a56e39911a70c8f98c4",
+      "expected_test_cases": 10,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS506FHIRSafeUseofOpioids",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS506FHIRSafeUseofOpioids",
+      "bundle_file": "CMS506FHIRSafeUseofOpioids-bundle.json",
+      "sha256": "0b4f96c1736c0b9388039d6eca78fc587f6007e51988853ec4f89669c85aa0f8",
+      "expected_test_cases": 38,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS816FHIRHHHypo",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS816FHIRHHHypo",
+      "bundle_file": "CMS816FHIRHHHypo-bundle.json",
+      "sha256": "184209635f36c7420bb40b62ae0c616ff67aee2396f1c6d4ae06c5bcb576d598",
+      "expected_test_cases": 28,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS1017FHIRHHFI",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS1017FHIRHHFI",
+      "bundle_file": "CMS1017FHIRHHFI-bundle.json",
+      "sha256": "457cfded9614281ef4ef56a12892599f19c1fb8f4b5085ea634d2815f21bef01",
+      "expected_test_cases": 65,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    },
+    {
+      "id": "CMS1218FHIRHHRF",
+      "canonical_url": "https://madie.cms.gov/Measure/CMS1218FHIRHHRF",
+      "bundle_file": "CMS1218FHIRHHRF-bundle.json",
+      "sha256": "eb907e0e5be10adca2d81bdfe3dd5bfaf647879ae08b6d177f3701549e105714",
+      "expected_test_cases": 69,
+      "period": {"start": "2026-01-01", "end": "2026-12-31"},
+      "strict": true,
+      "known_issues": []
+    }
+  ]
+}

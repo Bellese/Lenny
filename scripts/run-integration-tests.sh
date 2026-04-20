@@ -32,6 +32,9 @@ cleanup() {
 
 trap cleanup EXIT
 
+echo "==> Pulling HAPI FHIR image (avoids compose startup timeout on cold pull)..."
+docker pull hapiproject/hapi:v8.6.0-1
+
 echo "==> Starting test infrastructure..."
 docker compose -f "$COMPOSE_FILE" up -d
 
@@ -86,7 +89,7 @@ echo "==> Running integration tests..."
 cd "$PROJECT_ROOT/backend"
 pip install -r requirements.txt -r requirements-test.txt
 pytest_exit=0
-python -m pytest tests/integration/ -m integration -v --tb=short || pytest_exit=$?
+python -m pytest tests/integration/ -m integration -v --tb=short "$@" || pytest_exit=$?
 
 echo ""
 if [ "$pytest_exit" -eq 0 ]; then

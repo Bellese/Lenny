@@ -207,7 +207,7 @@ async def test_gather_patient_data():
 
 
 async def test_push_resources():
-    """push_resources sends a transaction bundle to the measure engine."""
+    """push_resources sends a batch bundle to the measure engine."""
     resources = [
         {"resourceType": "Patient", "id": "p1"},
         {"resourceType": "Condition", "id": "c1"},
@@ -227,7 +227,7 @@ async def test_push_resources():
     call_args = mock_ctx.post.call_args
     posted_bundle = call_args.kwargs.get("json") or call_args[1].get("json")
     assert posted_bundle["resourceType"] == "Bundle"
-    assert posted_bundle["type"] == "transaction"
+    assert posted_bundle["type"] == "batch"
     assert len(posted_bundle["entry"]) == 2
 
 
@@ -314,6 +314,38 @@ async def test_wipe_patient_data():
 
     # Should have made delete calls for each resource type
     assert mock_ctx.delete.call_count >= 10  # At least 10 resource types
+
+
+async def test_wipe_patient_data_includes_qi_core_types():
+    """wipe_patient_data includes QI-Core clinical types added for STU6 bundles."""
+    mock_response = _make_response(200, {})
+    deleted_urls: list[str] = []
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+
+        async def capture_delete(url, **kwargs):
+            deleted_urls.append(url)
+            return mock_response
+
+        mock_ctx.delete = AsyncMock(side_effect=capture_delete)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await wipe_patient_data()
+
+    wiped_types = {url.split("/")[-1].split("?")[0] for url in deleted_urls}
+    for expected_type in (
+        "DeviceRequest",
+        "Medication",
+        "Task",
+        "MedicationAdministration",
+        "AdverseEvent",
+        "Location",
+        "Practitioner",
+        "Organization",
+    ):
+        assert expected_type in wiped_types, f"{expected_type} missing from wipe list"
 
 
 # ---------------------------------------------------------------------------
