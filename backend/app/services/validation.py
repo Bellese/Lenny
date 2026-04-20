@@ -131,14 +131,19 @@ def compare_populations(expected: dict[str, int], actual: dict[str, int]) -> tup
 
 
 def _is_test_case_measure_report(resource: dict[str, Any]) -> bool:
-    """Check if a MeasureReport has the cqfm-isTestCase modifier extension."""
+    """Check if a MeasureReport represents a test case.
+
+    Supports two formats:
+    1. Modern: modifierExtension with cqfm-isTestCase valueBoolean=true
+    2. Legacy DBCG connectathon: type=individual and status=complete
+    """
     for ext in resource.get("modifierExtension", []):
         if (
             ext.get("url") == "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase"
             and ext.get("valueBoolean") is True
         ):
             return True
-    return False
+    return resource.get("type") == "individual" and resource.get("status") == "complete"
 
 
 def _extract_test_case_info(

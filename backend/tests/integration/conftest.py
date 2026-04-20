@@ -4,9 +4,12 @@ Prerequisites:
     docker compose -f docker-compose.test.yml up -d
 """
 
+import copy
 import json
 import pathlib
+import time
 from collections.abc import AsyncGenerator
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -28,6 +31,97 @@ SEED_DIR = pathlib.Path(__file__).resolve().parents[3] / "seed"
 SKIP_MESSAGE = (
     "Integration test infrastructure not running. Start with: docker compose -f docker-compose.test.yml up -d"
 )
+
+# HAPI v8.6.0 with CR enabled registers a DEQM SearchParameter ~40 seconds
+# after startup, which triggers an async REINDEX job.  Resources written to HAPI
+# (via batch bundle OR individual PUT) during that reindex do not get their
+# reference-type search parameters indexed, causing Encounter?patient=… to
+# return 0 results and $evaluate-measure to produce all-zero populations.
+#
+# Fix: after each bulk data load, trigger a fresh $reindex and poll until a
+# known patient's encounters appear in search results.
+_REINDEX_POLL_INTERVAL = 5  # seconds between probe checks
+_REINDEX_TIMEOUT = 300  # seconds before giving up
+
+
+def _fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Patch ValueSets so HAPI v8.6.0 can expand them without missing sub-ValueSets.
+
+    HAPI v8.6.0 ignores the pre-computed ``expansion`` element and always re-expands
+    ValueSets via their ``compose``.  When ``compose`` references sub-ValueSets not
+    present in HAPI (a common gap in connectathon bundles), ``$expand`` and CQL
+    evaluation fail with "Unknown ValueSet".
+
+    Fix: for ValueSets that have both ``expansion`` and ``compose`` with sub-ValueSet
+    references, extract the codes from ``expansion`` and inject them as direct
+    ``compose.include`` entries (grouped by code system).  HAPI can then expand the
+    ValueSet correctly without needing the missing sub-ValueSets.
+
+    Note: HAPI's Terminology service stores compose info in a separate database table
+    that persists even after a PUT update.  This fix must be applied on the FIRST
+    load — patching an already-loaded ValueSet will not clear the cached compose.
+    """
+    result = []
+    for r in resources:
+        if r.get("resourceType") == "ValueSet" and "expansion" in r and "compose" in r:
+            has_vs_refs = any(inc.get("valueSet") for inc in r.get("compose", {}).get("include", []))
+            if has_vs_refs:
+                r = copy.deepcopy(r)
+                codes_by_system: dict[str, list[dict[str, str]]] = {}
+
+                def _flatten_contains(nodes: list[dict[str, Any]]) -> None:
+                    for ce in nodes:
+                        sys = ce.get("system", "")
+                        code = ce.get("code", "")
+                        disp = ce.get("display", "")
+                        if sys and code:
+                            entry: dict[str, str] = {"code": code}
+                            if disp:
+                                entry["display"] = disp
+                            codes_by_system.setdefault(sys, []).append(entry)
+                        if ce.get("contains"):
+                            _flatten_contains(ce["contains"])
+
+                _flatten_contains(r["expansion"].get("contains", []))
+                r["compose"] = {
+                    "include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]
+                }
+        result.append(r)
+    return result
+
+
+def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encounter_id: str) -> None:
+    """Trigger HAPI $reindex and block until reference search indexes are ready.
+
+    Calls ``POST /fhir/$reindex`` then polls ``Encounter?patient={probe}``
+    until at least one result appears.  The probe resources must already
+    exist in HAPI (written before calling this function).
+    """
+    import httpx as _httpx
+
+    headers = {"Content-Type": "application/fhir+json"}
+    params = {"resourceType": "Parameters", "parameter": [{"name": "type", "valueString": "Encounter"}]}
+    import warnings as _warnings
+
+    r = _httpx.post(f"{base_url}/$reindex", json=params, headers=headers, timeout=30)
+    if r.status_code >= 400:
+        _warnings.warn(f"$reindex trigger at {base_url} returned {r.status_code}: {r.text[:200]}")
+
+    deadline = time.monotonic() + _REINDEX_TIMEOUT
+    while time.monotonic() < deadline:
+        resp = _httpx.get(f"{base_url}/Encounter?patient={probe_patient_id}&_count=1", timeout=10)
+        if resp.status_code == 200:
+            try:
+                if resp.json().get("entry"):
+                    return
+            except Exception:
+                pass
+        time.sleep(_REINDEX_POLL_INTERVAL)
+
+    raise RuntimeError(
+        f"HAPI at {base_url} reference-param indexing did not complete within {_REINDEX_TIMEOUT}s "
+        f"(probe: Encounter?patient={probe_patient_id})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -71,9 +165,40 @@ def measure_url() -> str:
 # ---------------------------------------------------------------------------
 
 
+def _make_seed_tx_bundle(resources: list[dict[str, Any]]) -> dict[str, Any]:
+    """Wrap seed resources in a FHIR batch bundle with PUT entries."""
+    return {
+        "resourceType": "Bundle",
+        "type": "batch",
+        "entry": [
+            {
+                "resource": r,
+                "request": {"method": "PUT", "url": f"{r['resourceType']}/{r['id']}"},
+            }
+            for r in resources
+            if "resourceType" in r and "id" in r
+        ],
+    }
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _load_seed_data(_require_infrastructure):
-    """Load measure-bundle.json and patient-bundle.json into the test HAPI instances."""
+    """Load measure-bundle.json and patient-bundle.json into the test HAPI instances.
+
+    Loading strategy:
+    - measure-bundle.json → measure server only (Measure + Libraries + ValueSets)
+      ValueSets with compose sub-ValueSet references are patched to use direct code
+      lists so HAPI can expand them without missing sub-ValueSets (HAPI v8.6.0
+      ignores the pre-computed expansion element).
+    - patient-bundle.json → CDR (canonical home) AND measure server ($evaluate-measure
+      resolves patient data from the same HAPI instance it runs on)
+
+    After loading, triggers a HAPI $reindex on both servers and waits for
+    reference-type search parameters to be indexed.  HAPI v8.6.0 with CR enabled
+    registers a DEQM SearchParameter shortly after startup, causing a background
+    REINDEX that prevents patient-reference searches from working until the reindex
+    settles.
+    """
     import httpx as _httpx
 
     measure_bundle_path = SEED_DIR / "measure-bundle.json"
@@ -81,19 +206,47 @@ def _load_seed_data(_require_infrastructure):
 
     headers = {"Content-Type": "application/fhir+json"}
 
-    # Load measure bundle into measure engine
+    # Load measure bundle into measure engine, patching ValueSets first
     if measure_bundle_path.exists():
         with open(measure_bundle_path) as f:
-            bundle = json.load(f)
-        resp = _httpx.post(TEST_MEASURE_URL, json=bundle, headers=headers, timeout=60)
-        resp.raise_for_status()
+            raw_bundle = json.load(f)
+        resources = [e["resource"] for e in raw_bundle.get("entry", []) if "resource" in e]
+        # Separate Measures (need individual PUT to preserve backbone element IDs)
+        # from everything else (load via batch bundle)
+        measures = [r for r in resources if r.get("resourceType") == "Measure"]
+        non_measures = [r for r in resources if r.get("resourceType") != "Measure"]
+        # Patch ValueSets with sub-ValueSet compose refs before loading
+        non_measures = _fix_valueset_compose_for_hapi(non_measures)
+        if non_measures:
+            tx = _make_seed_tx_bundle(non_measures)
+            resp = _httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
+            resp.raise_for_status()
+        for m in measures:
+            url = f"{TEST_MEASURE_URL}/{m['resourceType']}/{m['id']}"
+            resp = _httpx.put(url, json=m, headers=headers, timeout=60)
+            resp.raise_for_status()
 
-    # Load patient bundle into CDR
+    # Load patient bundle into CDR and measure server
+    probe_patient_id = None
+    probe_encounter_id = None
     if patient_bundle_path.exists():
         with open(patient_bundle_path) as f:
-            bundle = json.load(f)
-        resp = _httpx.post(TEST_CDR_URL, json=bundle, headers=headers, timeout=60)
-        resp.raise_for_status()
+            patient_bundle = json.load(f)
+        for target, label in [(TEST_CDR_URL, "CDR"), (TEST_MEASURE_URL, "measure server")]:
+            resp = _httpx.post(target, json=patient_bundle, headers=headers, timeout=120)
+            resp.raise_for_status()
+        # Find a patient+encounter pair to use as the reindex probe
+        entries = patient_bundle.get("entry", [])
+        encounter_entries = [e["resource"] for e in entries if e.get("resource", {}).get("resourceType") == "Encounter"]
+        if encounter_entries:
+            first_enc = encounter_entries[0]
+            probe_encounter_id = first_enc.get("id")
+            probe_patient_id = first_enc.get("subject", {}).get("reference", "").removeprefix("Patient/")
+
+    # Trigger $reindex on both servers and wait for reference search params to settle
+    if probe_patient_id and probe_encounter_id:
+        for target in (TEST_CDR_URL, TEST_MEASURE_URL):
+            _trigger_reindex_and_wait(target, probe_patient_id, probe_encounter_id)
 
 
 # ---------------------------------------------------------------------------

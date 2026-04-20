@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.6.0] - 2026-04-20
+
+### Fixed
+- **Golden measure tests now pass reliably against HAPI v8.6.0** — resolved two test failures
+  affecting CMS122 ("Betty-Bertha-*" patients showing `denominator-exclusion=0`) and all EXM
+  DBCG connectathon bundles. Root causes: HAPI ignores pre-computed ValueSet expansions and
+  always re-expands via compose; patient data must be loaded on the measure server (not just
+  the CDR) for `$evaluate-measure` to resolve it. Fixes include ValueSet compose patching,
+  dual-server patient loading, and post-load `$reindex` with indexed-resource polling.
+- **Duplicate ValueSet guard** — before loading each golden bundle's ValueSets, the test
+  fixture checks which canonical URLs are already in HAPI and skips any duplicates. Prevents
+  "Multiple ValueSets resolved" CQL evaluation errors when bundles share ValueSet URLs.
+- **All-bundle reindex wait** — the fixture now collects a probe encounter from every bundle
+  and waits until all probes are indexed before running tests, preventing a race where later
+  bundles' encounters were not indexed when tests started.
+- EXM bundles (DBCG connectathon era, CQL 1.3 syntax) marked `xfail` — HAPI v8.6.0's CQL
+  engine no longer supports the `timezone` keyword and old `DateTime()` signatures used in
+  these pre-2021 bundles.
+- Improved test robustness: `$reindex` failures now emit warnings, HAPI response parsing is
+  guarded against non-JSON bodies, nested `expansion.contains` entries are fully flattened,
+  and ELM decoding errors are caught rather than propagating as unhandled exceptions.
+
 ## [0.0.5.0] - 2026-04-19
 
 ### Added

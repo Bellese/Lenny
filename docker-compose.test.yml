@@ -69,6 +69,10 @@ services:
       - spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
       - spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100
       - hapi.fhir.reuse_cached_search_results_millis=0
+      - hapi.fhir.client_id_strategy=ANY
+      - hapi.fhir.allow_external_references=true
+      - hapi.fhir.cr.enabled=true
+      - hapi.fhir.enforce_referential_integrity_on_write=false
 
 volumes:
   test_pgdata:
