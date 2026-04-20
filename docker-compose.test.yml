@@ -34,7 +34,7 @@ services:
       - hapi.fhir.implementationguides.uscore.version=6.1.0
       - hapi.fhir.implementationguides.cql.name=hl7.fhir.uv.cql
       - hapi.fhir.implementationguides.cql.version=1.0.0
-      - hapi.fhir.server_address=http://hapi-fhir-cdr:8080/fhir
+      - hapi.fhir.server_address=http://localhost:8180/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_external_references=true
@@ -55,7 +55,7 @@ services:
       - hapi.fhir.implementationguides.uscore.version=6.1.0
       - hapi.fhir.implementationguides.cql.name=hl7.fhir.uv.cql
       - hapi.fhir.implementationguides.cql.version=1.0.0
-      - hapi.fhir.server_address=http://hapi-fhir-measure:8080/fhir
+      - hapi.fhir.server_address=http://localhost:8181/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_multiple_delete=true

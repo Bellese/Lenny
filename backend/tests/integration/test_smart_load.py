@@ -281,6 +281,13 @@ def test_cdr_capability_statement_references_qicore():
     )
 
 
+@pytest.mark.skip(
+    reason=(
+        "HAPI loads QI-Core IG packages for profile validation but does not persist the "
+        "ImplementationGuide resource in the FHIR store. "
+        "test_cdr_capability_statement_references_qicore covers the same intent."
+    )
+)
 def test_cdr_qicore_implementation_guide_resource():
     """Fallback: query the CDR for the QI-Core ImplementationGuide resource directly.
 

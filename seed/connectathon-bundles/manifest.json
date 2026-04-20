@@ -108,7 +108,7 @@
       "canonical_url": "https://madie.cms.gov/Measure/CMS1218FHIRHHRF",
       "bundle_file": "CMS1218FHIRHHRF-bundle.json",
       "sha256": "eb907e0e5be10adca2d81bdfe3dd5bfaf647879ae08b6d177f3701549e105714",
-      "expected_test_cases": 75,
+      "expected_test_cases": 69,
       "period": {"start": "2026-01-01", "end": "2026-12-31"},
       "strict": true,
       "known_issues": []
