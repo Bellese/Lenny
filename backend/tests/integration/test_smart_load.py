@@ -91,9 +91,7 @@ def test_manifest_has_measures():
 def test_bundle_file_exists(entry: dict):
     """Each manifest entry's bundle file must exist on disk."""
     bundle_path = _BUNDLE_DIR / entry["bundle_file"]
-    assert bundle_path.exists(), (
-        f"Bundle file missing for measure '{entry['id']}': {bundle_path}"
-    )
+    assert bundle_path.exists(), f"Bundle file missing for measure '{entry['id']}': {bundle_path}"
 
 
 @pytest.mark.parametrize(
@@ -109,9 +107,7 @@ def test_bundle_sha256_matches(entry: dict):
     actual = _sha256_file(bundle_path)
     expected = entry["sha256"]
     assert actual == expected, (
-        f"SHA256 mismatch for '{entry['id']}' ({entry['bundle_file']}):\n"
-        f"  expected: {expected}\n"
-        f"  actual:   {actual}"
+        f"SHA256 mismatch for '{entry['id']}' ({entry['bundle_file']}):\n  expected: {expected}\n  actual:   {actual}"
     )
 
 
@@ -147,8 +143,7 @@ async def loader_result(integration_session_factory):
     # _truncate_tables teardown can wipe the expected_results table.
     async with integration_session_factory() as session:
         count_result = await session.execute(
-            select(ExpectedResult.measure_url, func.count().label("cnt"))
-            .group_by(ExpectedResult.measure_url)
+            select(ExpectedResult.measure_url, func.count().label("cnt")).group_by(ExpectedResult.measure_url)
         )
         rows = count_result.all()
 
@@ -173,12 +168,8 @@ async def test_loader_zero_failures(loader_result):
     failed = loader_result["failed"]
     details = loader_result["details"]
     failed_details = [d for d in details if d.get("status") == "failed"]
-    assert failed == 0, (
-        f"load_connectathon_bundles() reported {failed} failure(s):\n"
-        + "\n".join(
-            f"  {d['file']}: {d.get('error', '(no error message)')}"
-            for d in failed_details
-        )
+    assert failed == 0, f"load_connectathon_bundles() reported {failed} failure(s):\n" + "\n".join(
+        f"  {d['file']}: {d.get('error', '(no error message)')}" for d in failed_details
     )
 
 
@@ -220,9 +211,8 @@ async def test_loader_canonical_urls_on_measure_engine(loader_result):
         except Exception as exc:
             missing.append(f"  {entry['id']}: {canonical_url!r} — request failed: {exc}")
 
-    assert not missing, (
-        f"{len(missing)} canonical URL(s) missing from measure engine after load:\n"
-        + "\n".join(missing)
+    assert not missing, f"{len(missing)} canonical URL(s) missing from measure engine after load:\n" + "\n".join(
+        missing
     )
 
 
@@ -248,14 +238,10 @@ async def test_expected_results_counts(loader_result):
 
         if actual_count != entry["expected_test_cases"]:
             mismatches.append(
-                f"  {entry['id']} ({canonical_url!r}): "
-                f"expected {entry['expected_test_cases']}, got {actual_count}"
+                f"  {entry['id']} ({canonical_url!r}): expected {entry['expected_test_cases']}, got {actual_count}"
             )
 
-    assert not mismatches, (
-        f"ExpectedResult count mismatch for {len(mismatches)} measure(s):\n"
-        + "\n".join(mismatches)
-    )
+    assert not mismatches, f"ExpectedResult count mismatch for {len(mismatches)} measure(s):\n" + "\n".join(mismatches)
 
 
 # ---------------------------------------------------------------------------

@@ -291,10 +291,7 @@ def test_connectathon_measure_per_patient(
         return
 
     if resp.status_code != 200:
-        msg = (
-            f"[{measure_id}] MCS returned {resp.status_code} for patient "
-            f"{patient_ref!r}: {resp.text[:200]}"
-        )
+        msg = f"[{measure_id}] MCS returned {resp.status_code} for patient {patient_ref!r}: {resp.text[:200]}"
         if strict:
             fail_with_context(
                 measure_id=measure_id,
@@ -320,10 +317,7 @@ def test_connectathon_measure_per_patient(
     passed, mismatches = compare_populations(expected_populations, actual_populations)
 
     if not passed:
-        msg = (
-            f"[{measure_id}] Population mismatch for patient {patient_ref!r} "
-            f"— mismatched codes: {mismatches}"
-        )
+        msg = f"[{measure_id}] Population mismatch for patient {patient_ref!r} — mismatched codes: {mismatches}"
         if strict:
             fail_with_context(
                 measure_id=measure_id,
