@@ -286,7 +286,7 @@ if [ -z "$job_response" ]; then
     exit 1
 fi
 
-JOB_ID=$(echo "$job_response" | jq '.id')
+JOB_ID=$(echo "$job_response" | jq -r '.id')
 if [ -z "$JOB_ID" ] || [ "$JOB_ID" = "null" ]; then
     fail "Failed to create job. Response:"
     echo "$job_response" | jq . || echo "$job_response"
@@ -407,7 +407,7 @@ while IFS= read -r manifest_line; do
     # --- evaluated? (find most recent completed job for this measure_id) ---
     last_job=$(echo "$all_jobs" | jq --arg mid "$measure_id" \
         '[.[] | select(.measure_id == $mid and .status == "completed")] | first // null')
-    last_job_id=$(echo "$last_job" | jq '.id // null')
+    last_job_id=$(echo "$last_job" | jq -r '.id // empty')
 
     if [ "$last_job_id" = "null" ] || [ -z "$last_job_id" ]; then
         evaluated="no"

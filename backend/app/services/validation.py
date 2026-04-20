@@ -250,6 +250,8 @@ def _warn_unknown_bundle_types(bundle_json: dict[str, Any]) -> None:
         "Goal",
         "ServiceRequest",
         "DeviceRequest",
+        "Medication",
+        "Task",
         "Coverage",
         "Claim",
         "Location",
