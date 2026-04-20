@@ -408,25 +408,6 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
             _time.sleep(_REINDEX_POLL_INTERVAL)
 
 
-# EXM bundles (DBCG connectathon era, ~2019-2020) use CQL 1.3 syntax
-# (e.g. the timezone keyword, old DateTime() signature) that HAPI v8.6.0's CQL
-# engine no longer supports.  The evaluations return all-zero populations because
-# the CQL engine emits errors when loading these libraries.  Mark as xfail so they
-# don't block CI; they will pass if HAPI ever adds CQL 1.3 compatibility.
-_EXM_CQL_INCOMPATIBLE = frozenset(
-    {
-        "EXM104_FHIR4-8.1.000",
-        "EXM105_FHIR4-8.1.000",
-        "EXM108_FHIR4-8.2.000",
-        "EXM124_FHIR4-8.2.000",
-        "EXM125_FHIR4-7.2.000",
-        "EXM130_FHIR4-7.2.000",
-        "EXM165_FHIR4-8.5.000",
-        "EXM506_FHIR4-2.1.000",
-        "EXM529_FHIR4-1.0.000",
-    }
-)
-
 # CMS1218 (Hip/Knee Replacement Functional/Pain): two independent HAPI v8.6.0 issues.
 # (1) FHIRHelpers 4.0.0 bundled with HAPI does not define ToQuantity(CodeableConcept),
 #     causing exceptions for patients whose Observation values are typed as
@@ -449,15 +430,6 @@ _HAPI_PARTIAL_COMPAT = frozenset(
     }
 )
 
-_XFAIL_CQL = pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "EXM bundle uses CQL 1.3 syntax (timezone keyword, old DateTime() "
-        "signature) incompatible with HAPI v8.6.0 CQL engine — evaluation "
-        "returns all-zero populations (see issue #84)"
-    ),
-)
-
 _XFAIL_PARTIAL = pytest.mark.xfail(
     strict=False,
     reason=(
@@ -473,15 +445,10 @@ def _parametrize_bundles() -> list:
     bundles = _get_golden_bundles()
     if not bundles:
         return [pytest.param("_empty", {}, marks=pytest.mark.skip(reason="No golden bundles found"))]
-    result = []
-    for name, bundle in bundles:
-        if name in _EXM_CQL_INCOMPATIBLE:
-            result.append(pytest.param(name, bundle, marks=_XFAIL_CQL))
-        elif name in _HAPI_PARTIAL_COMPAT:
-            result.append(pytest.param(name, bundle, marks=_XFAIL_PARTIAL))
-        else:
-            result.append(pytest.param(name, bundle))
-    return result
+    return [
+        pytest.param(name, bundle, marks=_XFAIL_PARTIAL if name in _HAPI_PARTIAL_COMPAT else ())
+        for name, bundle in bundles
+    ]
 
 
 _PARAMETRIZE_BUNDLES = _parametrize_bundles()
