@@ -52,9 +52,7 @@ def fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict[
                         _flatten_contains(ce["contains"])
 
             _flatten_contains(r["expansion"].get("contains", []))
-            r["compose"] = {
-                "include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]
-            }
+            r["compose"] = {"include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]}
         result.append(r)
     return result
 
@@ -96,7 +94,7 @@ def fix_library_deps_for_hapi(resources: list[dict[str, Any]]) -> list[dict[str,
         for ra in r.get("relatedArtifact", []):
             dep_url = ra.get("resource", "")
             if ra.get("type") == "depends-on" and dep_url.startswith(_ECQI_PREFIX):
-                tail = dep_url[len(_ECQI_PREFIX):]  # e.g. "FHIRHelpers|4.4.000"
+                tail = dep_url[len(_ECQI_PREFIX) :]  # e.g. "FHIRHelpers|4.4.000"
                 ra["resource"] = _MADIE_PREFIX + tail
         result.append(r)
     return result

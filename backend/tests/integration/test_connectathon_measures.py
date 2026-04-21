@@ -43,7 +43,12 @@ from tests.integration._helpers import (
     fix_valueset_compose_for_hapi,
     make_put_bundle,
 )
-from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL, _trigger_reindex_and_wait, _wait_for_valueset_expansion
+from tests.integration.conftest import (
+    TEST_CDR_URL,
+    TEST_MEASURE_URL,
+    _trigger_reindex_and_wait,
+    _wait_for_valueset_expansion,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -135,7 +140,15 @@ if _ALL_TEST_CASES:
             measure_strict,
             id=f"{measure_id}::{patient_ref}",
         )
-        for measure_id, canonical_url, patient_ref, period_start, period_end, expected_populations, measure_strict in _ALL_TEST_CASES
+        for (
+            measure_id,
+            canonical_url,
+            patient_ref,
+            period_start,
+            period_end,
+            expected_populations,
+            measure_strict,
+        ) in _ALL_TEST_CASES
     ]
 else:
     _PARAMETRIZE_CASES = [
@@ -233,10 +246,7 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
                 if entries:
                     hapi_id = entries[0]["resource"]["id"]
                     if hapi_id != r["id"]:
-                        warnings.warn(
-                            f"[VS conflict remap] {r['id']} → {hapi_id} "
-                            f"(url={r['url'][-50:]})"
-                        )
+                        warnings.warn(f"[VS conflict remap] {r['id']} → {hapi_id} (url={r['url'][-50:]})")
                         r["id"] = hapi_id
         except httpx.RequestError:
             pass
@@ -264,9 +274,7 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
         and sum(len(inc.get("concept", [])) for inc in r.get("compose", {}).get("include", [])) > 900
     ]
     if large_valueset_ids:
-        warnings.warn(
-            f"Waiting for HAPI to pre-expand {len(large_valueset_ids)} large ValueSet(s)..."
-        )
+        warnings.warn(f"Waiting for HAPI to pre-expand {len(large_valueset_ids)} large ValueSet(s)...")
         _wait_for_valueset_expansion(TEST_MEASURE_URL, large_valueset_ids)
 
     # Pass 4: load clinical data per bundle.
