@@ -21,7 +21,6 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
             set -e
-            cd /opt/leonard
             IDS=(
               measure-exm165-FHIR4
               measure-EXM529-FHIR4-1.0.000
@@ -33,11 +32,17 @@ jobs:
               measure-EXM130-FHIR4-7.2.000
               measure-EXM506-FHIR4-2.1.000
             )
+            BACKEND=$(docker ps --filter 'label=com.docker.compose.service=backend' --format '{{.Names}}' | head -1)
+            if [ -z "$BACKEND" ]; then
+              echo "ERROR: no running backend container found"
+              docker ps
+              exit 1
+            fi
+            echo "Using backend container: $BACKEND"
             BEFORE=$(curl -sf https://api.98-89-219-217.nip.io/measures | python3 -c 'import sys,json; print(json.load(sys.stdin)["total"])')
             echo "Before: $BEFORE measures"
             for id in "${IDS[@]}"; do
-              code=$(docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T backend \
-                curl -s -o /dev/null -w "%{http_code}" \
+              code=$(docker exec "$BACKEND" curl -s -o /dev/null -w "%{http_code}" \
                 -X DELETE "http://hapi-fhir-measure:8080/fhir/Measure/$id")
               case "$code" in
                 200|204) echo "  [OK]    $id (HTTP $code)" ;;
