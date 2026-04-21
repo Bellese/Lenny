@@ -165,7 +165,7 @@ def wait_for_expansion(vs_ids: list[str]) -> bool:
 
 def reindex_and_wait(patient_id: str, encounter_id: str) -> None:
     for target in (CDR, MCS):
-        params = {"resourceType": "Parameters"}  # full reindex, not just Encounter
+        params = {"resourceType": "Parameters", "parameter": [{"name": "type", "valueString": "Encounter"}]}
         httpx.post(f"{target}/$reindex", json=params, headers=HEADERS, timeout=30)
         deadline = time.monotonic() + 300
         while time.monotonic() < deadline:

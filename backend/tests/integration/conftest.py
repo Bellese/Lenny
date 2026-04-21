@@ -111,11 +111,7 @@ def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encoun
     import httpx as _httpx
 
     headers = {"Content-Type": "application/fhir+json"}
-    # Full reindex — no type restriction.  $evaluate-measure searches many resource
-    # types (Observation, Condition, MedicationRequest, MedicationAdministration, …)
-    # by patient reference.  Reindexing only Encounter leaves those reference params
-    # unindexed on fresh containers, causing IP=0 for every patient.
-    params = {"resourceType": "Parameters"}
+    params = {"resourceType": "Parameters", "parameter": [{"name": "type", "valueString": "Encounter"}]}
     import warnings as _warnings
 
     r = _httpx.post(f"{base_url}/$reindex", json=params, headers=headers, timeout=30)
