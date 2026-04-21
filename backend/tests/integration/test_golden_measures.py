@@ -427,13 +427,6 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
             "2026-07-01",
             "2027-06-30",
         ),
-        (
-            "CMS1218",
-            "https://madie.cms.gov/Measure/CMS1218FHIRHHRF",
-            "02ee1832-5609-46f6-83ad-32c04620619b",
-            "2026-01-01",
-            "2026-12-31",
-        ),
     ]
     _loaded_bundle_names = {n for n, _ in _get_golden_bundles()}
     _active_gates = []
