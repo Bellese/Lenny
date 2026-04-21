@@ -2,7 +2,7 @@
 
 **HAPI version:** v8.8.0-1
 **Target:** MADiE May 2026 Connectathon (12 measures)
-**Last updated:** 2026-04-21 (PR #98 merged — golden CI green, 12/12 measures loaded)
+**Last updated:** 2026-04-21 19:45 UTC (PR #98 merged — golden CI green, 12/12 measures loaded)
 
 ---
 
