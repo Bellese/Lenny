@@ -305,6 +305,55 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
         for target in (TEST_CDR_URL, TEST_MEASURE_URL):
             _trigger_reindex_and_wait(target, probe_patient_id, probe_encounter_id)
 
+    # Evaluate-measure gate: verify CQL evaluation is actually working before tests
+    # run.  $expand?count=2 confirms ValueSet API access but HAPI's CQL engine may
+    # use DB pre-expansion (a separate code path from the $expand API).  Until DB
+    # pre-expansion completes, CQL retrieves return empty even with
+    # maximum_expansion_size=50000.  Poll $evaluate-measure on a known IP=1 patient
+    # from CMS122 until IP>=1.  This is immune to all VS expansion timing issues.
+    _eval_gate_measure_url = "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent"
+    _eval_gate_patient = "9cba6cfa-9671-4850-803d-e286c7d59ee7"
+    _eval_gate_timeout = 600
+    _eval_gate_deadline = __import__("time").monotonic() + _eval_gate_timeout
+    try:
+        _measure_id_resp = httpx.get(f"{TEST_MEASURE_URL}/Measure?url={_eval_gate_measure_url}&_count=1", timeout=15)
+        _entries = _measure_id_resp.json().get("entry", []) if _measure_id_resp.status_code == 200 else []
+        _gate_measure_hapi_id = _entries[0]["resource"]["id"] if _entries else None
+    except Exception:
+        _gate_measure_hapi_id = None
+
+    if _gate_measure_hapi_id:
+        import time as _time
+
+        _gate_eval_url = (
+            f"{TEST_MEASURE_URL}/Measure/{_gate_measure_hapi_id}/$evaluate-measure"
+            f"?subject=Patient/{_eval_gate_patient}&periodStart=2026-01-01&periodEnd=2026-12-31"
+        )
+        while _time.monotonic() < _eval_gate_deadline:
+            try:
+                _gate_resp = httpx.get(_gate_eval_url, timeout=60)
+                if _gate_resp.status_code == 200:
+                    _report = _gate_resp.json()
+                    _ip = next(
+                        (
+                            pop.get("count", 0)
+                            for grp in _report.get("group", [])
+                            for pop in grp.get("population", [])
+                            if pop.get("code", {}).get("coding", [{}])[0].get("code") == "initial-population"
+                        ),
+                        0,
+                    )
+                    if _ip >= 1:
+                        break
+            except Exception:
+                pass
+            _time.sleep(15)
+        else:
+            warnings.warn(
+                f"Evaluate-measure gate timed out after {_eval_gate_timeout}s — "
+                f"CMS122 probe patient IP=0. Tests may fail due to incomplete VS expansion."
+            )
+
 
 # ---------------------------------------------------------------------------
 # Measure ID resolution (cached per canonical URL to avoid repeated HAPI calls)
