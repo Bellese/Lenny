@@ -406,6 +406,53 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                 break
             _time.sleep(_REINDEX_POLL_INTERVAL)
 
+    # Evaluate-measure gate: poll a known IP>0 patient from the CMS816 golden bundle
+    # until the CQL evaluation stack confirms the inpatient data is fully ready.
+    # Reindex completion only proves Encounter?patient search works; HAPI may still be
+    # processing earlier reindex batches for other patients when our probe exits early.
+    # An inpatient measure gate (not CMS122 outpatient) is required because the two
+    # measure types use different encounter type ValueSets and CQL code paths.
+    _cms816_present = any(n.startswith("CMS816") for n, _ in _get_golden_bundles())
+    if _cms816_present:
+        _gate_measure_url = "https://madie.cms.gov/Measure/CMS816FHIRHHHypo"
+        _gate_patient = "1a89fbca-df20-4f17-97d0-9fa5990860b2"
+        _gate_timeout = 600
+        _r = httpx.get(f"{TEST_MEASURE_URL}/Measure?url={_gate_measure_url}&_count=1", timeout=15)
+        _gate_entries = _r.json().get("entry", []) if _r.status_code == 200 else []
+        if _gate_entries:
+            _gate_measure_id = _gate_entries[0]["resource"]["id"]
+            _gate_eval_url = (
+                f"{TEST_MEASURE_URL}/Measure/{_gate_measure_id}/$evaluate-measure"
+                f"?subject=Patient/{_gate_patient}&periodStart=2026-01-01&periodEnd=2026-12-31"
+            )
+            _gate_deadline = _time.monotonic() + _gate_timeout
+            _gate_passed = False
+            while _time.monotonic() < _gate_deadline:
+                try:
+                    _resp = httpx.get(_gate_eval_url, timeout=60)
+                    if _resp.status_code == 200:
+                        _ip = next(
+                            (
+                                pop.get("count", 0)
+                                for grp in _resp.json().get("group", [])
+                                for pop in grp.get("population", [])
+                                if pop.get("code", {}).get("coding", [{}])[0].get("code")
+                                == "initial-population"
+                            ),
+                            0,
+                        )
+                        if _ip >= 1:
+                            _gate_passed = True
+                            break
+                except Exception:
+                    pass
+                _time.sleep(_REINDEX_POLL_INTERVAL)
+            if not _gate_passed:
+                warnings.warn(
+                    f"CMS816 evaluate-measure gate timed out after {_gate_timeout}s "
+                    f"— inpatient data may not be fully indexed; golden tests may fail with IP=0"
+                )
+
 
 def _parametrize_bundles() -> list:
     bundles = _get_golden_bundles()
