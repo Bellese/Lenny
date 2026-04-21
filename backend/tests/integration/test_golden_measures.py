@@ -31,8 +31,8 @@ from tests.integration.conftest import (
     _REINDEX_TIMEOUT,
     TEST_CDR_URL,
     TEST_MEASURE_URL,
-    _fix_valueset_compose_for_hapi,
 )
+from tests.integration._helpers import fix_valueset_compose_for_hapi
 
 pytestmark = pytest.mark.integration
 
@@ -324,7 +324,7 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                 # expansion element and always re-expands via compose; when compose
                 # references missing sub-ValueSets, evaluation fails.
                 if filtered_non_measures:
-                    tx = make_put_bundle(_fix_valueset_compose_for_hapi(filtered_non_measures))
+                    tx = make_put_bundle(fix_valueset_compose_for_hapi(filtered_non_measures))
                     resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
                     if resp.status_code == 422 and "HAPI-0902" in resp.text:
                         warnings.warn(f"[{name}] measure defs already loaded (HAPI-0902 uniqueness constraint)")

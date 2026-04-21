@@ -61,7 +61,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> Pulling HAPI FHIR image (avoids compose startup timeout on cold pull)..."
-docker pull hapiproject/hapi:v8.6.0-1
+docker pull hapiproject/hapi:v8.8.0-1
 _elapsed_pull=$(( $(_ts) - _t_start ))
 _phase_done "docker pull"
 
