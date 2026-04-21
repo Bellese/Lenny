@@ -406,30 +406,62 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                 break
             _time.sleep(_REINDEX_POLL_INTERVAL)
 
-    # Evaluate-measure gate: poll a known IP>0 patient from the CMS816 golden bundle
-    # until the CQL evaluation stack confirms the inpatient data is fully ready.
+    # Evaluate-measure gate: poll known IP>0 patients from each inpatient golden bundle
+    # until the full CQL evaluation stack confirms data is indexed and evaluatable.
     # Reindex completion only proves Encounter?patient search works; HAPI may still be
-    # processing earlier reindex batches for other patients when our probe exits early.
-    # An inpatient measure gate (not CMS122 outpatient) is required because the two
-    # measure types use different encounter type ValueSets and CQL code paths.
-    _cms816_present = any(n.startswith("CMS816") for n, _ in _get_golden_bundles())
-    if _cms816_present:
-        _gate_measure_url = "https://madie.cms.gov/Measure/CMS816FHIRHHHypo"
-        _gate_patient = "1a89fbca-df20-4f17-97d0-9fa5990860b2"
-        _gate_timeout = 600
-        _r = httpx.get(f"{TEST_MEASURE_URL}/Measure?url={_gate_measure_url}&_count=1", timeout=15)
-        _gate_entries = _r.json().get("entry", []) if _r.status_code == 200 else []
-        if _gate_entries:
-            _gate_measure_id = _gate_entries[0]["resource"]["id"]
-            _gate_eval_url = (
-                f"{TEST_MEASURE_URL}/Measure/{_gate_measure_id}/$evaluate-measure"
-                f"?subject=Patient/{_gate_patient}&periodStart=2026-01-01&periodEnd=2026-12-31"
+    # processing reindex batches for other patients when the probe exits early.
+    # Each gate uses a different bundle/measure so all three inpatient bundles are covered.
+    _eval_gates = [
+        # (bundle_name_prefix, measure_url, patient_id, period_start, period_end)
+        (
+            "CMS816",
+            "https://madie.cms.gov/Measure/CMS816FHIRHHHypo",
+            "1a89fbca-df20-4f17-97d0-9fa5990860b2",
+            "2026-01-01",
+            "2026-12-31",
+        ),
+        (
+            "CMS529",
+            "https://madie.cms.gov/Measure/CMSFHIR529HybridHospitalWideReadmission",
+            "1a527f21-582b-4e84-9c27-0515195a33d5",
+            "2026-07-01",
+            "2027-06-30",
+        ),
+        (
+            "CMS1218",
+            "https://madie.cms.gov/Measure/CMS1218FHIRHHRF",
+            "02ee1832-5609-46f6-83ad-32c04620619b",
+            "2026-01-01",
+            "2026-12-31",
+        ),
+    ]
+    _loaded_bundle_names = {n for n, _ in _get_golden_bundles()}
+    _active_gates = []
+    for _prefix, _murl, _mpat, _pstart, _pend in _eval_gates:
+        if not any(n.startswith(_prefix) for n in _loaded_bundle_names):
+            continue
+        _r = httpx.get(f"{TEST_MEASURE_URL}/Measure?url={_murl}&_count=1", timeout=15)
+        _ents = _r.json().get("entry", []) if _r.status_code == 200 else []
+        if not _ents:
+            continue
+        _mid = _ents[0]["resource"]["id"]
+        _active_gates.append(
+            (
+                _prefix,
+                f"{TEST_MEASURE_URL}/Measure/{_mid}/$evaluate-measure"
+                f"?subject=Patient/{_mpat}&periodStart={_pstart}&periodEnd={_pend}",
             )
-            _gate_deadline = _time.monotonic() + _gate_timeout
-            _gate_passed = False
-            while _time.monotonic() < _gate_deadline:
+        )
+
+    if _active_gates:
+        _gate_timeout = 600
+        _gate_deadline = _time.monotonic() + _gate_timeout
+        _gate_pending = {prefix: url for prefix, url in _active_gates}
+        while _gate_pending and _time.monotonic() < _gate_deadline:
+            _newly_done: set[str] = set()
+            for _prefix, _gurl in list(_gate_pending.items()):
                 try:
-                    _resp = httpx.get(_gate_eval_url, timeout=60)
+                    _resp = httpx.get(_gurl, timeout=60)
                     if _resp.status_code == 200:
                         _ip = next(
                             (
@@ -442,16 +474,18 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                             0,
                         )
                         if _ip >= 1:
-                            _gate_passed = True
-                            break
+                            _newly_done.add(_prefix)
                 except Exception:
                     pass
+            for _p in _newly_done:
+                del _gate_pending[_p]
+            if _gate_pending:
                 _time.sleep(_REINDEX_POLL_INTERVAL)
-            if not _gate_passed:
-                warnings.warn(
-                    f"CMS816 evaluate-measure gate timed out after {_gate_timeout}s "
-                    f"— inpatient data may not be fully indexed; golden tests may fail with IP=0"
-                )
+        if _gate_pending:
+            warnings.warn(
+                f"Evaluate-measure gate timed out after {_gate_timeout}s for "
+                f"{sorted(_gate_pending)} — data may not be fully indexed; golden tests may fail with IP=0"
+            )
 
 
 def _parametrize_bundles() -> list:
