@@ -26,13 +26,20 @@ def fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict[
             result.append(r)
             continue
 
+        include = r.get("compose", {}).get("include", [])
         needs_fix = False
         if "compose" not in r:
             needs_fix = True
+        elif not include:
+            needs_fix = True  # empty or missing include list
         else:
-            has_vs_refs = any(inc.get("valueSet") for inc in r.get("compose", {}).get("include", []))
+            total_concepts = sum(len(inc.get("concept", [])) for inc in include)
+            has_vs_refs = any(inc.get("valueSet") for inc in include)
+            has_filters = any(inc.get("filter") for inc in include)
             if has_vs_refs:
                 needs_fix = True
+            elif total_concepts == 0 and not has_filters:
+                needs_fix = True  # includes exist but carry no codes
 
         if needs_fix:
             r = copy.deepcopy(r)

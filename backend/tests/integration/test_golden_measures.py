@@ -275,10 +275,12 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
 
     Runs once per module; PUT and batch requests are idempotent so re-runs are safe.
 
-    Duplicate-URL guard: before loading each bundle's ValueSets, fetch the set of
-    canonical URLs already in HAPI and skip any VS whose URL is already present.
-    Multiple copies of the same URL cause "Multiple ValueSets resolved" during CQL
-    evaluation.
+    Duplicate-URL guard: for each VS, check whether a VS with the same canonical
+    URL already exists in HAPI (e.g. from the seed fixture).  If so, remap the
+    resource ID so the batch PUT updates the existing resource in-place rather than
+    creating a duplicate (which would cause "Multiple ValueSets resolved" during CQL).
+    Unlike a simple skip, the remap lets golden bundles overwrite stale or broken
+    seed-data VS versions.
 
     Reindex completeness: collect one probe encounter per bundle (not just the first
     bundle overall) and wait for ALL of them before running tests.  Using only the
@@ -288,10 +290,11 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
 
     headers = {"Content-Type": "application/fhir+json"}
 
-    # Track existing VS URLs to prevent duplicate canonical URL conflicts.
-    # Pre-populated from what's already in HAPI (e.g. from the session-scoped
-    # _load_seed_data fixture), then updated as we load each bundle.
-    existing_vs_urls = _get_hapi_valueset_urls(TEST_MEASURE_URL)
+    # Track VS URLs we've already loaded from golden bundles so each canonical URL
+    # is loaded at most once.  We do NOT pre-populate from HAPI state here — instead
+    # we remap resource IDs on conflict so that golden bundles can overwrite stale or
+    # broken VS versions loaded earlier by the seed fixture.
+    loaded_vs_urls: set[str] = set()
 
     # Collect one (patient_id, encounter_id) probe per bundle that has encounters.
     # We wait for ALL probes before running tests so that no bundle's data is stale.
@@ -307,15 +310,29 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
 
             if non_measures:
                 # Deduplicate ValueSets by canonical URL to prevent "Multiple ValueSets
-                # resolved" during CQL evaluation.  If a VS with the same URL already
-                # exists in HAPI (e.g. loaded by an earlier bundle or the seed fixture),
-                # skip it.  Track newly added URLs so subsequent bundles also skip them.
+                # resolved" during CQL evaluation.  For each VS URL we haven't loaded yet:
+                # check whether a VS with that URL already exists in HAPI (e.g. from the
+                # seed fixture).  If it does and carries a different resource ID, remap
+                # our ID so the batch PUT updates the existing resource in-place rather
+                # than creating a second VS with the same URL.  This lets golden bundles
+                # overwrite seed-data VS versions that may be stale or missing compose codes.
                 filtered_non_measures = []
                 for r in non_measures:
                     if r.get("resourceType") == "ValueSet" and (url := r.get("url")):
-                        if url in existing_vs_urls:
-                            continue
-                        existing_vs_urls.add(url)
+                        if url in loaded_vs_urls:
+                            continue  # already loaded from an earlier golden bundle
+                        try:
+                            _rv = httpx.get(
+                                f"{TEST_MEASURE_URL}/ValueSet?url={url}&_count=1",
+                                timeout=10,
+                            )
+                            if _rv.status_code == 200 and (_ents := _rv.json().get("entry", [])):
+                                hapi_id = _ents[0]["resource"]["id"]
+                                if hapi_id != r.get("id"):
+                                    r = {**r, "id": hapi_id}
+                        except Exception:
+                            pass
+                        loaded_vs_urls.add(url)
                     filtered_non_measures.append(r)
 
                 # Patch ValueSets: convert sub-ValueSet compose refs to direct code
@@ -340,9 +357,9 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
             # These arise when connectathon bundles omit ValueSets that the CQL references
             # directly (not through compose).  Stubs expand to 0 codes; criteria checking
             # membership return false, "NOT in set" criteria return true.
-            stubs = [s for s in _get_missing_valueset_stubs(bundle) if s.get("url") not in existing_vs_urls]
+            stubs = [s for s in _get_missing_valueset_stubs(bundle) if s.get("url") not in loaded_vs_urls]
             for s in stubs:
-                existing_vs_urls.add(s.get("url", ""))
+                loaded_vs_urls.add(s.get("url", ""))
             if stubs:
                 stub_tx = make_put_bundle(stubs)
                 resp = httpx.post(TEST_MEASURE_URL, json=stub_tx, headers=headers, timeout=60)
