@@ -4,7 +4,6 @@ Prerequisites:
     docker compose -f docker-compose.test.yml up -d
 """
 
-import copy
 import json
 import pathlib
 import time
@@ -17,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.models.base import Base
+from tests.integration._helpers import fix_valueset_compose_for_hapi
 
 # ---------------------------------------------------------------------------
 # Test infrastructure URLs
@@ -43,51 +43,62 @@ SKIP_MESSAGE = (
 _REINDEX_POLL_INTERVAL = 5  # seconds between probe checks
 _REINDEX_TIMEOUT = 300  # seconds before giving up
 
+# HAPI's in-memory ValueSet expansion is capped at 1000 codes (HAPI-0831).  ValueSets
+# with >1000 codes must be pre-expanded by HAPI's background scheduler before the CQL
+# engine can use them for FHIR searches; otherwise every CQL retrieve returns empty and
+# $evaluate-measure produces IP=0 for all patients.
+#
+# Fix: after loading ValueSets, identify large ones (>900 compose concepts) and poll
+# $expand until HAPI's background task completes the pre-expansion.
+_VALUESET_EXPANSION_POLL_INTERVAL = 10  # seconds between probe checks
+_VALUESET_EXPANSION_TIMEOUT = 600  # seconds before giving up (background task can be slow)
 
-def _fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Patch ValueSets so HAPI v8.6.0 can expand them without missing sub-ValueSets.
 
-    HAPI v8.6.0 ignores the pre-computed ``expansion`` element and always re-expands
-    ValueSets via their ``compose``.  When ``compose`` references sub-ValueSets not
-    present in HAPI (a common gap in connectathon bundles), ``$expand`` and CQL
-    evaluation fail with "Unknown ValueSet".
+def _wait_for_valueset_expansion(base_url: str, large_valueset_ids: list[str]) -> None:
+    """Block until HAPI has background-pre-expanded all specified large ValueSets.
 
-    Fix: for ValueSets that have both ``expansion`` and ``compose`` with sub-ValueSet
-    references, extract the codes from ``expansion`` and inject them as direct
-    ``compose.include`` entries (grouped by code system).  HAPI can then expand the
-    ValueSet correctly without needing the missing sub-ValueSets.
+    HAPI's in-memory expansion is capped at 1000 codes.  ValueSets with >1000 codes
+    are queued for async pre-expansion by a background scheduler.  After pre-expansion
+    completes, ``$expand`` returns HTTP 200 instead of HAPI-0831 500.
 
-    Note: HAPI's Terminology service stores compose info in a separate database table
-    that persists even after a PUT update.  This fix must be applied on the FIRST
-    load — patching an already-loaded ValueSet will not clear the cached compose.
+    Args:
+        base_url: FHIR base URL (e.g. ``http://localhost:8181/fhir``).
+        large_valueset_ids: HAPI resource IDs of ValueSets that need pre-expansion.
     """
-    result = []
-    for r in resources:
-        if r.get("resourceType") == "ValueSet" and "expansion" in r and "compose" in r:
-            has_vs_refs = any(inc.get("valueSet") for inc in r.get("compose", {}).get("include", []))
-            if has_vs_refs:
-                r = copy.deepcopy(r)
-                codes_by_system: dict[str, list[dict[str, str]]] = {}
+    import warnings as _warnings
 
-                def _flatten_contains(nodes: list[dict[str, Any]]) -> None:
-                    for ce in nodes:
-                        sys = ce.get("system", "")
-                        code = ce.get("code", "")
-                        disp = ce.get("display", "")
-                        if sys and code:
-                            entry: dict[str, str] = {"code": code}
-                            if disp:
-                                entry["display"] = disp
-                            codes_by_system.setdefault(sys, []).append(entry)
-                        if ce.get("contains"):
-                            _flatten_contains(ce["contains"])
+    import httpx as _httpx
 
-                _flatten_contains(r["expansion"].get("contains", []))
-                r["compose"] = {
-                    "include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]
-                }
-        result.append(r)
-    return result
+    if not large_valueset_ids:
+        return
+
+    pending = set(large_valueset_ids)
+    deadline = time.monotonic() + _VALUESET_EXPANSION_TIMEOUT
+
+    while pending and time.monotonic() < deadline:
+        newly_done: set[str] = set()
+        for vs_id in list(pending):
+            try:
+                # count=1 short-circuits without full expansion; use count=2 so
+                # HAPI-0831 fires for any VS with >1 code until background
+                # pre-expansion completes and HAPI can serve from the DB.
+                resp = _httpx.get(f"{base_url}/ValueSet/{vs_id}/$expand?count=2", timeout=15)
+                if resp.status_code == 200:
+                    newly_done.add(vs_id)
+            except _httpx.RequestError:
+                pass
+        pending -= newly_done
+        if pending:
+            time.sleep(_VALUESET_EXPANSION_POLL_INTERVAL)
+
+    if pending:
+        import warnings as _warnings
+
+        _warnings.warn(
+            f"HAPI at {base_url} ValueSet pre-expansion did not complete within "
+            f"{_VALUESET_EXPANSION_TIMEOUT}s for {len(pending)} ValueSet(s): {sorted(pending)[:5]}. "
+            f"Tests may fail with IP=0 if large ValueSets are still unexpanded."
+        )
 
 
 def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encounter_id: str) -> None:
@@ -216,7 +227,7 @@ def _load_seed_data(_require_infrastructure):
         measures = [r for r in resources if r.get("resourceType") == "Measure"]
         non_measures = [r for r in resources if r.get("resourceType") != "Measure"]
         # Patch ValueSets with sub-ValueSet compose refs before loading
-        non_measures = _fix_valueset_compose_for_hapi(non_measures)
+        non_measures = fix_valueset_compose_for_hapi(non_measures)
         if non_measures:
             tx = _make_seed_tx_bundle(non_measures)
             resp = _httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)

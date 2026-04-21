@@ -61,7 +61,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "==> Pulling HAPI FHIR image (avoids compose startup timeout on cold pull)..."
-docker pull hapiproject/hapi:v8.6.0-1
+docker pull hapiproject/hapi:v8.8.0-1
 _elapsed_pull=$(( $(_ts) - _t_start ))
 _phase_done "docker pull"
 
@@ -130,7 +130,7 @@ _phase_done "PostgreSQL ready"
 echo "==> Running integration tests..."
 cd "$PROJECT_ROOT/backend"
 pytest_exit=0
-python -m pytest tests/integration/ -m integration -v --tb=short "$@" || pytest_exit=$?
+python3 -m pytest tests/integration/ -m integration -v --tb=short "$@" || pytest_exit=$?
 
 echo ""
 if [ "$pytest_exit" -eq 0 ]; then
