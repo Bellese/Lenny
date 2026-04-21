@@ -466,8 +466,7 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                                 pop.get("count", 0)
                                 for grp in _resp.json().get("group", [])
                                 for pop in grp.get("population", [])
-                                if pop.get("code", {}).get("coding", [{}])[0].get("code")
-                                == "initial-population"
+                                if pop.get("code", {}).get("coding", [{}])[0].get("code") == "initial-population"
                             ),
                             0,
                         )
