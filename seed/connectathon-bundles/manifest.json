@@ -28,8 +28,10 @@
         "start": "2026-01-01",
         "end": "2026-12-31"
       },
-      "strict": true,
-      "known_issues": []
+      "strict": false,
+      "known_issues": [
+        "MADiE v0.3.002 bundle missing Claim resources for 80 of 83 patients. QICore v6 hasPrincipalDiagnosisOf() resolves principal diagnosis via Claim.diagnosis (not Encounter.diagnosis); without Claims all patients evaluate to IP=0. Needs refreshed bundle from MADiE with correct per-patient Claims."
+      ]
     },
     {
       "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
@@ -93,8 +95,10 @@
         "start": "2026-01-01",
         "end": "2026-12-31"
       },
-      "strict": true,
-      "known_issues": []
+      "strict": false,
+      "known_issues": [
+        "Bundle v0.3.000 is missing all dependency Library resources (FHIRHelpers, AdultOutpatientEncounters, Hospice, etc.). Requires AdultOutpatientEncounters v4.16.000 but HAPI only has v4.19.000 (loaded by CMS125/CMS130). Library version mismatch causes HAPI DEQM to fail resolving dependencies; all patients evaluate to IP=0. Needs refreshed bundle from MADiE with updated library versions."
+      ]
     },
     {
       "id": "CMS506FHIRSafeUseofOpioids",
