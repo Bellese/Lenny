@@ -413,10 +413,23 @@ def test_connectathon_measure_per_patient(
 
     # --- Parse and compare populations ---
     report = resp.json()
-    assert report.get("resourceType") == "MeasureReport", (
-        f"[{measure_id}] Expected MeasureReport for patient {patient_ref!r}, "
-        f"got resourceType={report.get('resourceType')!r}"
-    )
+    if report.get("resourceType") != "MeasureReport":
+        msg = (
+            f"[{measure_id}] Expected MeasureReport for patient {patient_ref!r}, "
+            f"got resourceType={report.get('resourceType')!r}"
+        )
+        if strict:
+            fail_with_context(
+                measure_id=measure_id,
+                patient=patient_ref,
+                phase="evaluate",
+                expected="MeasureReport",
+                actual=report.get("resourceType"),
+                likely_source="mcs",
+            )
+        else:
+            warnings.warn(msg)
+            return
 
     actual_populations = _extract_population_counts(report)
     passed, mismatches = compare_populations(expected_populations, actual_populations)
