@@ -22,7 +22,7 @@ services:
       retries: 5
 
   hapi-fhir-cdr:
-    image: hapiproject/hapi:v8.6.0-1
+    image: hapiproject/hapi:v8.8.0-1
     user: root
     ports: ["8180:8080"]
     volumes: ["test_cdrdata:/data/hapi"]
@@ -39,11 +39,15 @@ services:
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_external_references=true
       - hapi.fhir.enforce_referential_integrity_on_write=false
+      # Raise in-memory ValueSet expansion cap above HAPI default of 1000.
+      # Connectathon bundles contain ValueSets with >1000 codes (e.g. 1797); without
+      # this, HAPI throws HAPI-0831 during CQL retrieves and $evaluate-measure returns IP=0.
+      - hapi.fhir.maximum_expansion_size=50000
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
 
   hapi-fhir-measure:
-    image: hapiproject/hapi:v8.6.0-1
+    image: hapiproject/hapi:v8.8.0-1
     user: root
     ports: ["8181:8080"]
     volumes: ["test_measuredata:/data/hapi"]
@@ -73,6 +77,7 @@ services:
       - hapi.fhir.allow_external_references=true
       - hapi.fhir.cr.enabled=true
       - hapi.fhir.enforce_referential_integrity_on_write=false
+      - hapi.fhir.maximum_expansion_size=50000
 
 volumes:
   test_pgdata:
