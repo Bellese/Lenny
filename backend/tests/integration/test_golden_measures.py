@@ -363,17 +363,22 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                 except httpx.HTTPStatusError as exc:
                     pytest.fail(f"Failed to load clinical data to {label} for '{name}': {exc}\n{resp.text[:300]}")
 
-            # Collect one probe encounter per bundle (not just the first encounter
-            # overall) so the reindex wait covers data from every bundle.
-            for r in clinical:
-                if r.get("resourceType") == "Encounter" and r.get("id") and r.get("subject", {}).get("reference"):
-                    probe_pairs.append(
-                        (
-                            r["subject"]["reference"].removeprefix("Patient/"),
-                            r["id"],
-                        )
+            # Collect first AND last probe encounter per bundle so the reindex wait
+            # covers both the start and end of each bundle's encounter batch.  Using only
+            # the first encounter caused a race where HAPI's reindex exited early before
+            # all encounters in later batches were indexed.
+            bundle_encounters = [
+                r
+                for r in clinical
+                if r.get("resourceType") == "Encounter" and r.get("id") and r.get("subject", {}).get("reference")
+            ]
+            for r in bundle_encounters[:1] + bundle_encounters[-1:]:
+                probe_pairs.append(
+                    (
+                        r["subject"]["reference"].removeprefix("Patient/"),
+                        r["id"],
                     )
-                    break
+                )
 
     # HAPI v8.6.0 with CR enabled triggers a background REINDEX when a custom
     # SearchParameter is registered (the CR module does this on first use).
