@@ -370,7 +370,8 @@ async def triage_test_bundle(
         secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
         try:
             if secondary:
-                await push_resources(_fix_valueset_compose_for_hapi(secondary))  # ValueSets/CodeSystems — HAPI-0902 is OK
+                # ValueSets/CodeSystems: patch compose before loading (HAPI-0902 is OK)
+                await push_resources(_fix_valueset_compose_for_hapi(secondary))
             if primary:
                 await push_resources(primary)  # Measure + Library always pushed
         except Exception as exc:

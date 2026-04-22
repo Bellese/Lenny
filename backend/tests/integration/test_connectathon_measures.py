@@ -289,7 +289,6 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
     for entry in _load_manifest():
         bundle_file: str = entry["bundle_file"]
         measure_id: str = entry["id"]
-        canonical_url: str = entry.get("canonical_url", "")
         bundle_path = _BUNDLE_DIR / bundle_file
 
         if not bundle_path.exists():
