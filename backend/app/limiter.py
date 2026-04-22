@@ -12,8 +12,10 @@ from slowapi import Limiter
 def _client_ip(request: Request) -> str:
     forwarded_for = request.headers.get("X-Forwarded-For")
     if forwarded_for:
-        return forwarded_for.split(",")[0].strip()
-    return str(request.client.host)
+        ip = forwarded_for.split(",")[0].strip()
+        if ip:
+            return ip
+    return request.client.host if request.client else "unknown"
 
 
 limiter = Limiter(key_func=_client_ip)
