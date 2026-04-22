@@ -109,6 +109,8 @@ services:
       - CDR_URL=http://hapi-fhir-cdr:8080/fhir
       - MEASURE_URL=http://hapi-fhir-measure:8080/fhir
       - SEED_DIR=/seed
+    volumes:
+      - ./seed/connectathon-bundles:/seed/connectathon-bundles:ro
     restart: "no"
 
 volumes:
