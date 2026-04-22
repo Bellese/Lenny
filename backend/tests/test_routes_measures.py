@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import app.routes.measures as measures_module
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -179,3 +181,51 @@ async def test_upload_measure_engine_rejects_does_not_leak_hostname(client):
     body = resp.text
     assert "hapi-fhir-measure" not in body
     assert "8080" not in body
+
+
+# ---------------------------------------------------------------------------
+# Size guard tests (upload hardening)
+# ---------------------------------------------------------------------------
+
+
+async def test_upload_measure_oversized_returns_413(client, monkeypatch):
+    """POST /measures/upload with a file exceeding MAX_UPLOAD_SIZE returns 413."""
+    monkeypatch.setattr(measures_module, "MAX_UPLOAD_SIZE", 10)
+    # 11 bytes > 10-byte limit
+    oversized = b"x" * 11
+    resp = await client.post(
+        "/measures/upload",
+        files={"file": ("big.json", oversized, "application/json")},
+    )
+    assert resp.status_code == 413
+    data = resp.json()["detail"]
+    assert data["resourceType"] == "OperationOutcome"
+    assert "size limit" in data["issue"][0]["diagnostics"]
+
+
+async def test_upload_measure_small_file_not_rejected_by_size_check(client, monkeypatch):
+    """POST /measures/upload with a small valid JSON Bundle is not rejected by the size guard.
+
+    The endpoint may return 200 (success) or 502 (engine unreachable), but must
+    not return 413 — verifying the size check does not block legitimate uploads.
+    """
+    monkeypatch.setattr(measures_module, "MAX_UPLOAD_SIZE", 10)
+    # 9 bytes is under the 10-byte monkeypatched limit — but it is not valid JSON,
+    # so we use a real tiny bundle and a large-enough limit to avoid false rejection.
+    monkeypatch.setattr(measures_module, "MAX_UPLOAD_SIZE", 10 * 1024 * 1024)
+    bundle = {"resourceType": "Bundle", "type": "transaction", "entry": []}
+    content = json.dumps(bundle).encode()
+    assert len(content) < 10 * 1024 * 1024, "Sanity: test payload must be smaller than the limit"
+
+    with patch(
+        "app.routes.measures.upload_measure_bundle",
+        new_callable=AsyncMock,
+        return_value={"resourceType": "Bundle", "type": "transaction-response"},
+    ):
+        resp = await client.post(
+            "/measures/upload",
+            files={"file": ("bundle.json", content, "application/json")},
+        )
+
+    assert resp.status_code != 413, "Small file must not be rejected by the size guard"
+    assert resp.status_code in (200, 502)

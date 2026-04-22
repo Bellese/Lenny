@@ -88,6 +88,17 @@ async def upload_bundle(
     # Save file to disk (off the event loop to avoid blocking on large uploads)
     await asyncio.to_thread(os.makedirs, UPLOAD_DIR, exist_ok=True)
     timestamp = int(time.time())
+    # Composite on-disk name: "{10-digit ts}-{32-hex uuid}-{safe_name}"
+    # Prefix overhead: 10 + 1 + 32 + 1 = 44 chars.  Keep total ≤ 255.
+    _prefix_overhead = 44
+    _max_name_len = 255 - _prefix_overhead  # 211
+    if len(safe_name) > _max_name_len:
+        dot = safe_name.rfind(".")
+        if dot > 0:
+            ext = safe_name[dot:]
+            safe_name = safe_name[:_max_name_len - len(ext)] + ext
+        else:
+            safe_name = safe_name[:_max_name_len]
     safe_filename = f"{timestamp}-{uuid.uuid4().hex}-{safe_name}"
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
 

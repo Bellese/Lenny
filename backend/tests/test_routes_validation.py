@@ -6,6 +6,7 @@ import time as time_module
 
 import pytest
 
+import app.routes.validation as validation_module
 from app.models.validation import BundleUpload, ExpectedResult, ValidationRun, ValidationStatus
 
 # ---------------------------------------------------------------------------
@@ -257,3 +258,146 @@ class TestListUploads:
         uploads = response.json()["uploads"]
         assert len(uploads) == 1
         assert uploads[0]["warning_message"] == "2 resources could not be loaded"
+
+
+# ---------------------------------------------------------------------------
+# Upload hardening tests — filename sanitization and size guard
+# ---------------------------------------------------------------------------
+
+
+class TestUploadBundleHardening:
+    """Security / hardening guards added to POST /validation/upload-bundle."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_limiter(self):
+        """Reset the rate limiter before each test to prevent 429s from test accumulation."""
+        from app.limiter import limiter
+
+        limiter.reset()
+        yield
+
+    @pytest.mark.asyncio
+    async def test_null_bytes_stripped_from_filename(self, client, test_session, tmp_path, monkeypatch):
+        """Null bytes in the submitted filename must be stripped before DB storage."""
+        monkeypatch.setattr(validation_module, "UPLOAD_DIR", str(tmp_path))
+        content = json.dumps({"resourceType": "Bundle", "type": "transaction", "entry": []}).encode()
+        response = await client.post(
+            "/validation/upload-bundle",
+            files={"file": ("evil\x00.json", io.BytesIO(content), "application/json")},
+        )
+        assert response.status_code == 200
+        upload_id = response.json()["id"]
+        upload = await test_session.get(BundleUpload, upload_id)
+        assert upload is not None
+        assert "\x00" not in upload.filename
+
+    @pytest.mark.asyncio
+    async def test_control_characters_stripped_from_filename(self, client, test_session, tmp_path, monkeypatch):
+        """Control characters (0x01–0x1f) in the filename must be stripped before DB storage."""
+        monkeypatch.setattr(validation_module, "UPLOAD_DIR", str(tmp_path))
+        content = json.dumps({"resourceType": "Bundle", "type": "transaction", "entry": []}).encode()
+        response = await client.post(
+            "/validation/upload-bundle",
+            files={"file": ("test\x01\x1f.json", io.BytesIO(content), "application/json")},
+        )
+        assert response.status_code == 200
+        upload_id = response.json()["id"]
+        upload = await test_session.get(BundleUpload, upload_id)
+        assert upload is not None
+        for char in upload.filename:
+            assert ord(char) >= 0x20 or ord(char) == 0x09, f"Control char found: {ord(char):#04x}"
+
+    @pytest.mark.asyncio
+    async def test_long_filename_truncated_with_extension_preserved(
+        self, client, test_session, tmp_path, monkeypatch
+    ):
+        """A filename longer than 255 chars must be truncated and still end with .json."""
+        monkeypatch.setattr(validation_module, "UPLOAD_DIR", str(tmp_path))
+        content = json.dumps({"resourceType": "Bundle", "type": "transaction", "entry": []}).encode()
+        long_name = "a" * 300 + ".json"
+        response = await client.post(
+            "/validation/upload-bundle",
+            files={"file": (long_name, io.BytesIO(content), "application/json")},
+        )
+        assert response.status_code == 200
+        upload_id = response.json()["id"]
+        upload = await test_session.get(BundleUpload, upload_id)
+        assert upload is not None
+        assert len(upload.filename) <= 255
+        assert upload.filename.lower().endswith(".json")
+
+    @pytest.mark.asyncio
+    async def test_empty_filename_returns_4xx(self, client):
+        """Uploading a file with an empty filename must be rejected with a 4xx response.
+
+        Starlette's multipart parser may treat filename="" as a plain form field rather than
+        a file upload, causing FastAPI to return 422 (unprocessable entity) before the route
+        guard fires.  Both 400 and 422 are acceptable — the request must be rejected.
+        """
+        content = json.dumps({"resourceType": "Bundle", "type": "transaction", "entry": []}).encode()
+        response = await client.post(
+            "/validation/upload-bundle",
+            files={"file": ("", io.BytesIO(content), "application/json")},
+        )
+        assert response.status_code in (400, 422), (
+            f"Expected 400 or 422 for empty filename, got {response.status_code}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_non_json_extension_returns_400(self, client):
+        """Uploading a file with a non-.json extension must return 400."""
+        response = await client.post(
+            "/validation/upload-bundle",
+            files={"file": ("bundle.xml", io.BytesIO(b"<Bundle/>"), "application/xml")},
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert ".json" in detail
+
+    @pytest.mark.asyncio
+    async def test_oversized_upload_returns_413(self, client, tmp_path, monkeypatch):
+        """POST /validation/upload-bundle with a file exceeding MAX_UPLOAD_SIZE returns 413."""
+        monkeypatch.setattr(validation_module, "UPLOAD_DIR", str(tmp_path))
+        monkeypatch.setattr(validation_module, "MAX_UPLOAD_SIZE", 10)
+        # 11 bytes exceeds the monkeypatched 10-byte limit
+        oversized = b"x" * 11
+        response = await client.post(
+            "/validation/upload-bundle",
+            files={"file": ("bundle.json", io.BytesIO(oversized), "application/json")},
+        )
+        assert response.status_code == 413
+        assert "size limit" in response.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for _sanitize_filename helper
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeFilename:
+    """Unit tests for the _sanitize_filename helper (no HTTP layer)."""
+
+    def test_null_bytes_stripped(self):
+        result = validation_module._sanitize_filename("evil\x00.json")
+        assert "\x00" not in result
+
+    def test_control_chars_stripped(self):
+        result = validation_module._sanitize_filename("test\x01\x1f.json")
+        for char in result:
+            assert ord(char) >= 0x20, f"Control char found: {ord(char):#04x}"
+
+    def test_long_filename_truncated_to_255_with_extension(self):
+        """_sanitize_filename truncates to ≤255 chars and preserves the extension."""
+        long_name = "a" * 300 + ".json"
+        result = validation_module._sanitize_filename(long_name)
+        assert len(result) <= 255
+        assert result.lower().endswith(".json")
+
+    def test_normal_filename_unchanged(self):
+        result = validation_module._sanitize_filename("bundle.json")
+        assert result == "bundle.json"
+
+    def test_path_traversal_stripped_by_basename(self):
+        result = validation_module._sanitize_filename("../../etc/passwd.json")
+        assert "/" not in result
+        assert result == "passwd.json"
