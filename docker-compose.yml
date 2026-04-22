@@ -58,7 +58,6 @@ services:
       - hapi.fhir.implementationguides.cql.version=1.0.0
       - hapi.fhir.server_address=http://hapi-fhir-cdr:8080/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
-      - hapi.fhir.reuse_cached_search_results_millis=0
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_external_references=true
       - hapi.fhir.enforce_referential_integrity_on_write=false
@@ -79,7 +78,6 @@ services:
       - hapi.fhir.implementationguides.cql.version=1.0.0
       - hapi.fhir.server_address=http://hapi-fhir-measure:8080/fhir
       - hapi.fhir.defer_indexing_for_codesystems_of_size=0
-      - hapi.fhir.reuse_cached_search_results_millis=0
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_multiple_delete=true
       - hapi.fhir.cr.enabled=true

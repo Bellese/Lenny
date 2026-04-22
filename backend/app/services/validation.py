@@ -485,9 +485,6 @@ async def _resolve_measure_id(measure_url: str) -> Optional[str]:
     Handles two formats:
     - Canonical URL (http/https): queries HAPI ?url= search parameter
     - Relative reference ("Measure/{id}"): fetches resource directly by ID
-
-    Includes a retry loop and Cache-Control: no-cache to mitigate HAPI search
-    indexing lag and search result caching.
     """
     async with httpx.AsyncClient(timeout=30.0) as client:
         if not measure_url.startswith("http"):
@@ -500,41 +497,13 @@ async def _resolve_measure_id(measure_url: str) -> Optional[str]:
                 resp.raise_for_status()
                 return resp.json().get("id")
             return None
-
         # Canonical URL — search by ?url= parameter
-        # Retry up to 3 times with 1s delay to handle search indexing lag
-        headers = {"Cache-Control": "no-cache", "Accept": "application/fhir+json"}
-        params = {"url": measure_url, "_count": 1}
-
-        for attempt in range(3):
-            try:
-                resp = await client.get(
-                    f"{settings.MEASURE_ENGINE_URL}/Measure",
-                    params=params,
-                    headers=headers,
-                )
-                resp.raise_for_status()
-                bundle = resp.json()
-                entries = bundle.get("entry", [])
-                if entries:
-                    return entries[0].get("resource", {}).get("id")
-
-                if attempt < 2:
-                    logger.info(
-                        "Measure search returned no results — retrying",
-                        extra={"measure_url": measure_url, "attempt": attempt + 1},
-                    )
-                    await asyncio.sleep(1.0)
-            except Exception as exc:
-                if attempt < 2:
-                    logger.warning(
-                        "Measure search failed — retrying",
-                        extra={"measure_url": measure_url, "attempt": attempt + 1, "error": str(exc)},
-                    )
-                    await asyncio.sleep(1.0)
-                else:
-                    raise
-
+        resp = await client.get(f"{settings.MEASURE_ENGINE_URL}/Measure?url={measure_url}&_count=1")
+        resp.raise_for_status()
+        bundle = resp.json()
+        entries = bundle.get("entry", [])
+        if entries:
+            return entries[0].get("resource", {}).get("id")
     return None
 
 
