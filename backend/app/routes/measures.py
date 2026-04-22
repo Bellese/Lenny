@@ -3,8 +3,10 @@
 import json
 import logging
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 
+from app.config import MAX_UPLOAD_SIZE
+from app.limiter import limiter
 from app.services.fhir_client import list_measures, upload_measure_bundle
 from app.services.validation import sanitize_error
 
@@ -52,7 +54,8 @@ async def get_measures() -> dict:
 
 
 @router.post("/upload")
-async def upload_measure(file: UploadFile = File(...)) -> dict:
+@limiter.limit("10/minute")
+async def upload_measure(request: Request, file: UploadFile = File(...)) -> dict:
     """Upload a FHIR Measure bundle (JSON) to the measure engine.
 
     Accepts a JSON file containing a FHIR Bundle with Measure and Library
@@ -74,7 +77,21 @@ async def upload_measure(file: UploadFile = File(...)) -> dict:
         )
 
     try:
-        content = await file.read()
+        content = await file.read(MAX_UPLOAD_SIZE + 1)
+        if len(content) > MAX_UPLOAD_SIZE:
+            raise HTTPException(
+                status_code=413,
+                detail={
+                    "resourceType": "OperationOutcome",
+                    "issue": [
+                        {
+                            "severity": "error",
+                            "code": "too-long",
+                            "diagnostics": "File exceeds 100MB size limit",
+                        }
+                    ],
+                },
+            )
         bundle_json = json.loads(content)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(

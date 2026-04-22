@@ -35,3 +35,5 @@ def parse_allowed_origins(raw: str) -> list[str]:
 
 
 settings = Settings()
+
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024

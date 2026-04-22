@@ -51,6 +51,12 @@
   color: var(--color-text-primary);
 }
 
+.measureId {
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
 .version {
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);

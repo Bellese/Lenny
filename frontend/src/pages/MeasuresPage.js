@@ -4,11 +4,15 @@ import { getMeasures, uploadMeasure } from '../api/client';
 import { useToast } from '../components/Toast';
 
 function getMeasureDisplayName(measure) {
-  if (measure.resource?.title) return measure.resource.title;
-  if (measure.resource?.name) return measure.resource.name;
-  if (measure.title) return measure.title;
-  if (measure.name) return measure.name;
-  return measure.id || 'Unknown Measure';
+  let name;
+  if (measure.resource?.title) name = measure.resource.title;
+  else if (measure.resource?.name) name = measure.resource.name;
+  else if (measure.title) name = measure.title;
+  else if (measure.name) name = measure.name;
+  else name = measure.id || 'Unknown Measure';
+
+  // Remove trailing " FHIR"
+  return name.replace(/\s+FHIR\s*$/, '');
 }
 
 function getMeasureVersion(measure) {
@@ -121,6 +125,7 @@ export default function MeasuresPage() {
             <thead>
               <tr>
                 <th>Measure Name</th>
+                <th>Measure ID</th>
                 <th>Version</th>
                 <th>Status</th>
                 <th>Actions</th>
@@ -130,6 +135,7 @@ export default function MeasuresPage() {
               {[1, 2, 3].map(i => (
                 <tr key={i}>
                   <td><div className={`skeleton ${styles.skeletonCell}`} style={{ width: '60%' }} /></td>
+                  <td><div className={`skeleton ${styles.skeletonCell}`} style={{ width: '50px' }} /></td>
                   <td><div className={`skeleton ${styles.skeletonCell}`} style={{ width: '40px' }} /></td>
                   <td><div className={`skeleton ${styles.skeletonCell}`} style={{ width: '60px' }} /></td>
                   <td><div className={`skeleton ${styles.skeletonCell}`} style={{ width: '80px' }} /></td>
@@ -156,6 +162,7 @@ export default function MeasuresPage() {
             <thead>
               <tr>
                 <th>Measure Name</th>
+                <th>Measure ID</th>
                 <th>Version</th>
                 <th>Status</th>
                 <th>Actions</th>
@@ -164,7 +171,7 @@ export default function MeasuresPage() {
             <tbody>
               {measures.length === 0 ? (
                 <tr>
-                  <td colSpan={4} className={styles.emptyRow}>
+                  <td colSpan={5} className={styles.emptyRow}>
                     No measures loaded. Upload a measure bundle to get started.
                   </td>
                 </tr>
@@ -172,6 +179,7 @@ export default function MeasuresPage() {
                 measures.map((measure, i) => (
                   <tr key={measure.id || i}>
                     <td className={styles.measureName}>{getMeasureDisplayName(measure)}</td>
+                    <td className={styles.measureId}>{measure.id || '--'}</td>
                     <td className={styles.version}>{getMeasureVersion(measure)}</td>
                     <td><StatusBadge status={getMeasureStatus(measure)} /></td>
                     <td>
