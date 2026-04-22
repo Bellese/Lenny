@@ -2,10 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.0.6.4] - 2026-04-22
+## [0.0.6.5] - 2026-04-22
+
+### Changed
+- **Measures page UI improvements**: measure display names no longer show the trailing "FHIR" suffix for cleaner presentation, and a new "Measure ID" column displays the measure identifier (e.g., "CMS122") for easier identification and reference.
 
 ### Security
-
 - **Upload endpoint hardening** — two unauthenticated upload endpoints now protected against abuse:
   - `POST /measures/upload`: 100 MB size cap (413 OperationOutcome); 10 req/min per-IP rate limit (429 OperationOutcome)
   - `POST /validation/upload-bundle`: same size cap and rate limit; filename sanitization strips null bytes, control characters, and path-traversal sequences; filenames truncated to 255 chars with extension preserved
