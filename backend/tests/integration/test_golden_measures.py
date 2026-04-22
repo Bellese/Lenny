@@ -25,8 +25,7 @@ from app.services.validation import (
     _extract_population_counts,
     compare_populations,
 )
-from tests.integration._helpers import make_put_bundle
-from app.services.validation import _fix_valueset_compose_for_hapi
+from tests.integration._helpers import fix_valueset_compose_for_hapi, make_put_bundle
 from tests.integration.conftest import (
     _REINDEX_POLL_INTERVAL,
     _REINDEX_TIMEOUT,
@@ -276,10 +275,12 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
 
     Runs once per module; PUT and batch requests are idempotent so re-runs are safe.
 
-    Duplicate-URL guard: before loading each bundle's ValueSets, fetch the set of
-    canonical URLs already in HAPI and skip any VS whose URL is already present.
-    Multiple copies of the same URL cause "Multiple ValueSets resolved" during CQL
-    evaluation.
+    Duplicate-URL guard: for each VS, check whether a VS with the same canonical
+    URL already exists in HAPI (e.g. from the seed fixture).  If so, remap the
+    resource ID so the batch PUT updates the existing resource in-place rather than
+    creating a duplicate (which would cause "Multiple ValueSets resolved" during CQL).
+    Unlike a simple skip, the remap lets golden bundles overwrite stale or broken
+    seed-data VS versions.
 
     Reindex completeness: collect one probe encounter per bundle (not just the first
     bundle overall) and wait for ALL of them before running tests.  Using only the
@@ -289,10 +290,11 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
 
     headers = {"Content-Type": "application/fhir+json"}
 
-    # Track existing VS URLs to prevent duplicate canonical URL conflicts.
-    # Pre-populated from what's already in HAPI (e.g. from the session-scoped
-    # _load_seed_data fixture), then updated as we load each bundle.
-    existing_vs_urls = _get_hapi_valueset_urls(TEST_MEASURE_URL)
+    # Track VS URLs we've already loaded from golden bundles so each canonical URL
+    # is loaded at most once.  We do NOT pre-populate from HAPI state here — instead
+    # we remap resource IDs on conflict so that golden bundles can overwrite stale or
+    # broken VS versions loaded earlier by the seed fixture.
+    loaded_vs_urls: set[str] = set()
 
     # Collect one (patient_id, encounter_id) probe per bundle that has encounters.
     # We wait for ALL probes before running tests so that no bundle's data is stale.
@@ -308,15 +310,29 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
 
             if non_measures:
                 # Deduplicate ValueSets by canonical URL to prevent "Multiple ValueSets
-                # resolved" during CQL evaluation.  If a VS with the same URL already
-                # exists in HAPI (e.g. loaded by an earlier bundle or the seed fixture),
-                # skip it.  Track newly added URLs so subsequent bundles also skip them.
+                # resolved" during CQL evaluation.  For each VS URL we haven't loaded yet:
+                # check whether a VS with that URL already exists in HAPI (e.g. from the
+                # seed fixture).  If it does and carries a different resource ID, remap
+                # our ID so the batch PUT updates the existing resource in-place rather
+                # than creating a second VS with the same URL.  This lets golden bundles
+                # overwrite seed-data VS versions that may be stale or missing compose codes.
                 filtered_non_measures = []
                 for r in non_measures:
                     if r.get("resourceType") == "ValueSet" and (url := r.get("url")):
-                        if url in existing_vs_urls:
-                            continue
-                        existing_vs_urls.add(url)
+                        if url in loaded_vs_urls:
+                            continue  # already loaded from an earlier golden bundle
+                        try:
+                            _rv = httpx.get(
+                                f"{TEST_MEASURE_URL}/ValueSet?url={url}&_count=1",
+                                timeout=10,
+                            )
+                            if _rv.status_code == 200 and (_ents := _rv.json().get("entry", [])):
+                                hapi_id = _ents[0]["resource"]["id"]
+                                if hapi_id != r.get("id"):
+                                    r = {**r, "id": hapi_id}
+                        except Exception:
+                            pass
+                        loaded_vs_urls.add(url)
                     filtered_non_measures.append(r)
 
                 # Patch ValueSets: convert sub-ValueSet compose refs to direct code
@@ -324,7 +340,7 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                 # expansion element and always re-expands via compose; when compose
                 # references missing sub-ValueSets, evaluation fails.
                 if filtered_non_measures:
-                    tx = make_put_bundle(_fix_valueset_compose_for_hapi(filtered_non_measures))
+                    tx = make_put_bundle(fix_valueset_compose_for_hapi(filtered_non_measures))
                     resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
                     if resp.status_code == 422 and "HAPI-0902" in resp.text:
                         warnings.warn(f"[{name}] measure defs already loaded (HAPI-0902 uniqueness constraint)")
@@ -341,9 +357,9 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
             # These arise when connectathon bundles omit ValueSets that the CQL references
             # directly (not through compose).  Stubs expand to 0 codes; criteria checking
             # membership return false, "NOT in set" criteria return true.
-            stubs = [s for s in _get_missing_valueset_stubs(bundle) if s.get("url") not in existing_vs_urls]
+            stubs = [s for s in _get_missing_valueset_stubs(bundle) if s.get("url") not in loaded_vs_urls]
             for s in stubs:
-                existing_vs_urls.add(s.get("url", ""))
+                loaded_vs_urls.add(s.get("url", ""))
             if stubs:
                 stub_tx = make_put_bundle(stubs)
                 resp = httpx.post(TEST_MEASURE_URL, json=stub_tx, headers=headers, timeout=60)
@@ -364,17 +380,22 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                 except httpx.HTTPStatusError as exc:
                     pytest.fail(f"Failed to load clinical data to {label} for '{name}': {exc}\n{resp.text[:300]}")
 
-            # Collect one probe encounter per bundle (not just the first encounter
-            # overall) so the reindex wait covers data from every bundle.
-            for r in clinical:
-                if r.get("resourceType") == "Encounter" and r.get("id") and r.get("subject", {}).get("reference"):
-                    probe_pairs.append(
-                        (
-                            r["subject"]["reference"].removeprefix("Patient/"),
-                            r["id"],
-                        )
+            # Collect first AND last probe encounter per bundle so the reindex wait
+            # covers both the start and end of each bundle's encounter batch.  Using only
+            # the first encounter caused a race where HAPI's reindex exited early before
+            # all encounters in later batches were indexed.
+            bundle_encounters = [
+                r
+                for r in clinical
+                if r.get("resourceType") == "Encounter" and r.get("id") and r.get("subject", {}).get("reference")
+            ]
+            for r in bundle_encounters[:1] + bundle_encounters[-1:]:
+                probe_pairs.append(
+                    (
+                        r["subject"]["reference"].removeprefix("Patient/"),
+                        r["id"],
                     )
-                    break
+                )
 
     # HAPI v8.6.0 with CR enabled triggers a background REINDEX when a custom
     # SearchParameter is registered (the CR module does this on first use).
@@ -407,48 +428,85 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
                 break
             _time.sleep(_REINDEX_POLL_INTERVAL)
 
+    # Evaluate-measure gate: poll known IP>0 patients from each inpatient golden bundle
+    # until the full CQL evaluation stack confirms data is indexed and evaluatable.
+    # Reindex completion only proves Encounter?patient search works; HAPI may still be
+    # processing reindex batches for other patients when the probe exits early.
+    # Each gate uses a different bundle/measure so all three inpatient bundles are covered.
+    _eval_gates = [
+        # (bundle_name_prefix, measure_url, patient_id, period_start, period_end)
+        (
+            "CMS816",
+            "https://madie.cms.gov/Measure/CMS816FHIRHHHypo",
+            "1a89fbca-df20-4f17-97d0-9fa5990860b2",
+            "2026-01-01",
+            "2026-12-31",
+        ),
+        (
+            "CMS529",
+            "https://madie.cms.gov/Measure/CMSFHIR529HybridHospitalWideReadmission",
+            "1a527f21-582b-4e84-9c27-0515195a33d5",
+            "2026-07-01",
+            "2027-06-30",
+        ),
+    ]
+    _loaded_bundle_names = {n for n, _ in _get_golden_bundles()}
+    _active_gates = []
+    for _prefix, _murl, _mpat, _pstart, _pend in _eval_gates:
+        if not any(n.startswith(_prefix) for n in _loaded_bundle_names):
+            continue
+        _r = httpx.get(f"{TEST_MEASURE_URL}/Measure?url={_murl}&_count=1", timeout=15)
+        _ents = _r.json().get("entry", []) if _r.status_code == 200 else []
+        if not _ents:
+            continue
+        _mid = _ents[0]["resource"]["id"]
+        _active_gates.append(
+            (
+                _prefix,
+                f"{TEST_MEASURE_URL}/Measure/{_mid}/$evaluate-measure"
+                f"?subject=Patient/{_mpat}&periodStart={_pstart}&periodEnd={_pend}",
+            )
+        )
 
-# CMS1218 (Hip/Knee Replacement Functional/Pain): two independent HAPI v8.6.0 issues.
-# (1) FHIRHelpers 4.0.0 bundled with HAPI does not define ToQuantity(CodeableConcept),
-#     causing exceptions for patients whose Observation values are typed as
-#     CodeableConcept rather than Quantity (~4 patients).
-# (2) The CMS1218 bundle shares ValueSet canonical URLs with the seed measure bundle
-#     (CMS122).  Without careful dedup on first load, HAPI accumulates duplicates and
-#     raises "Multiple ValueSets resolved" on evaluation (~4 patients on stale
-#     containers).  The _get_hapi_valueset_urls dedup guard prevents this on fresh
-#     containers, but stale containers hit the duplicate path.
-# Both issues are HAPI v8.6.0 regressions; mark xfail to keep CI green.
-_HAPI_PARTIAL_COMPAT = frozenset(
-    {
-        "CMS1218FHIRHHRF",
-        # CMS816 (Hospital Harm - Hypoglycemia): 12/28 patients lack Encounter resources
-        # in the connectathon bundle.  HAPI v8.6.0 requires explicit Encounter context for
-        # initial-population criteria; without it the patients evaluate to IP=0 even though
-        # the expected MeasureReports (generated against an earlier reference implementation)
-        # say IP=1.  This is a known connectathon bundle/HAPI v8.6.0 incompatibility.
-        "CMS816FHIRHHHypo",
-    }
-)
-
-_XFAIL_PARTIAL = pytest.mark.xfail(
-    strict=False,
-    reason=(
-        "Bundle has known partial incompatibilities with HAPI v8.6.0: "
-        "CMS1218 — ToQuantity(CodeableConcept) unresolved in bundled FHIRHelpers "
-        "and duplicate canonical ValueSet URLs on stale containers; "
-        "CMS816 — connectathon bundle missing Encounter resources for ~12 patients"
-    ),
-)
+    if _active_gates:
+        _gate_timeout = 600
+        _gate_deadline = _time.monotonic() + _gate_timeout
+        _gate_pending = {prefix: url for prefix, url in _active_gates}
+        while _gate_pending and _time.monotonic() < _gate_deadline:
+            _newly_done: set[str] = set()
+            for _prefix, _gurl in list(_gate_pending.items()):
+                try:
+                    _resp = httpx.get(_gurl, timeout=60)
+                    if _resp.status_code == 200:
+                        _ip = next(
+                            (
+                                pop.get("count", 0)
+                                for grp in _resp.json().get("group", [])
+                                for pop in grp.get("population", [])
+                                if pop.get("code", {}).get("coding", [{}])[0].get("code") == "initial-population"
+                            ),
+                            0,
+                        )
+                        if _ip >= 1:
+                            _newly_done.add(_prefix)
+                except Exception:
+                    pass
+            for _p in _newly_done:
+                del _gate_pending[_p]
+            if _gate_pending:
+                _time.sleep(_REINDEX_POLL_INTERVAL)
+        if _gate_pending:
+            warnings.warn(
+                f"Evaluate-measure gate timed out after {_gate_timeout}s for "
+                f"{sorted(_gate_pending)} — data may not be fully indexed; golden tests may fail with IP=0"
+            )
 
 
 def _parametrize_bundles() -> list:
     bundles = _get_golden_bundles()
     if not bundles:
         return [pytest.param("_empty", {}, marks=pytest.mark.skip(reason="No golden bundles found"))]
-    return [
-        pytest.param(name, bundle, marks=_XFAIL_PARTIAL if name in _HAPI_PARTIAL_COMPAT else ())
-        for name, bundle in bundles
-    ]
+    return [pytest.param(name, bundle) for name, bundle in bundles]
 
 
 _PARAMETRIZE_BUNDLES = _parametrize_bundles()

@@ -16,7 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.models.base import Base
-from app.services.validation import _fix_valueset_compose_for_hapi
+from tests.integration._helpers import fix_valueset_compose_for_hapi
 
 # ---------------------------------------------------------------------------
 # Test infrastructure URLs
@@ -42,6 +42,62 @@ SKIP_MESSAGE = (
 # known patient's encounters appear in search results.
 _REINDEX_POLL_INTERVAL = 5  # seconds between probe checks
 _REINDEX_TIMEOUT = 300  # seconds before giving up
+
+# HAPI's in-memory ValueSet expansion is capped at 1000 codes (HAPI-0831).  ValueSets
+# with >1000 codes must be pre-expanded by HAPI's background scheduler before the CQL
+# engine can use them for FHIR searches; otherwise every CQL retrieve returns empty and
+# $evaluate-measure produces IP=0 for all patients.
+#
+# Fix: after loading ValueSets, identify large ones (>900 compose concepts) and poll
+# $expand until HAPI's background task completes the pre-expansion.
+_VALUESET_EXPANSION_POLL_INTERVAL = 10  # seconds between probe checks
+_VALUESET_EXPANSION_TIMEOUT = 600  # seconds before giving up (background task can be slow)
+
+
+
+def _wait_for_valueset_expansion(base_url: str, large_valueset_ids: list[str]) -> None:
+    """Block until HAPI has background-pre-expanded all specified large ValueSets.
+
+    HAPI's in-memory expansion is capped at 1000 codes.  ValueSets with >1000 codes
+    are queued for async pre-expansion by a background scheduler.  After pre-expansion
+    completes, ``$expand`` returns HTTP 200 instead of HAPI-0831 500.
+
+    Args:
+        base_url: FHIR base URL (e.g. ``http://localhost:8181/fhir``).
+        large_valueset_ids: HAPI resource IDs of ValueSets that need pre-expansion.
+    """
+    import warnings as _warnings
+
+    import httpx as _httpx
+
+    if not large_valueset_ids:
+        return
+
+    pending = set(large_valueset_ids)
+    deadline = time.monotonic() + _VALUESET_EXPANSION_TIMEOUT
+
+    while pending and time.monotonic() < deadline:
+        newly_done: set[str] = set()
+        for vs_id in list(pending):
+            try:
+                # count=1 short-circuits without full expansion; use count=2 so
+                # HAPI-0831 fires for any VS with >1 code until background
+                # pre-expansion completes and HAPI can serve from the DB.
+                resp = _httpx.get(f"{base_url}/ValueSet/{vs_id}/$expand?count=2", timeout=15)
+                if resp.status_code == 200:
+                    newly_done.add(vs_id)
+            except _httpx.RequestError:
+                pass
+        pending -= newly_done
+        if pending:
+            time.sleep(_VALUESET_EXPANSION_POLL_INTERVAL)
+
+    if pending:
+        _warnings.warn(
+            f"HAPI at {base_url} ValueSet pre-expansion did not complete within "
+            f"{_VALUESET_EXPANSION_TIMEOUT}s for {len(pending)} ValueSet(s): {sorted(pending)[:5]}. "
+            f"Tests may fail with IP=0 if large ValueSets are still unexpanded."
+        )
 
 
 def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encounter_id: str) -> None:
@@ -170,7 +226,7 @@ def _load_seed_data(_require_infrastructure):
         measures = [r for r in resources if r.get("resourceType") == "Measure"]
         non_measures = [r for r in resources if r.get("resourceType") != "Measure"]
         # Patch ValueSets with sub-ValueSet compose refs before loading
-        non_measures = _fix_valueset_compose_for_hapi(non_measures)
+        non_measures = fix_valueset_compose_for_hapi(non_measures)
         if non_measures:
             tx = _make_seed_tx_bundle(non_measures)
             resp = _httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)

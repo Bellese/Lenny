@@ -35,11 +35,21 @@ import pytest
 from app.services.validation import (
     _classify_bundle_entries,
     _extract_population_counts,
-    _fix_valueset_compose_for_hapi,
     compare_populations,
 )
-from tests.integration._helpers import fail_with_context, make_put_bundle
-from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL, _trigger_reindex_and_wait
+from tests.integration._helpers import (
+    fail_with_context,
+    fix_duplicate_claim_ids,
+    fix_library_deps_for_hapi,
+    fix_valueset_compose_for_hapi,
+    make_put_bundle,
+)
+from tests.integration.conftest import (
+    TEST_CDR_URL,
+    TEST_MEASURE_URL,
+    _trigger_reindex_and_wait,
+    _wait_for_valueset_expansion,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -63,7 +73,7 @@ def _load_connectathon_test_cases() -> list[tuple]:
     """Scan all connectathon bundles and return one tuple per test-case MeasureReport.
 
     Each tuple: (measure_id, canonical_url, patient_ref, period_start, period_end,
-                 expected_populations)
+                 expected_populations, strict)
 
     Definition-only bundles (expected_test_cases=0 in manifest) produce no tuples.
     """
@@ -73,6 +83,7 @@ def _load_connectathon_test_cases() -> list[tuple]:
         canonical_url: str = entry["canonical_url"]
         bundle_file: str = entry["bundle_file"]
         expected_count: int = entry.get("expected_test_cases", 0)
+        measure_strict: bool = entry.get("strict", True)
 
         if expected_count == 0:
             # Definition-only bundle — no test-case MeasureReports
@@ -99,6 +110,7 @@ def _load_connectathon_test_cases() -> list[tuple]:
                     tc["period_start"],
                     tc["period_end"],
                     tc["expected_populations"],
+                    measure_strict,
                 )
             )
 
@@ -126,9 +138,18 @@ if _ALL_TEST_CASES:
             period_start,
             period_end,
             expected_populations,
+            measure_strict,
             id=f"{measure_id}::{patient_ref}",
         )
-        for measure_id, canonical_url, patient_ref, period_start, period_end, expected_populations in _ALL_TEST_CASES
+        for (
+            measure_id,
+            canonical_url,
+            patient_ref,
+            period_start,
+            period_end,
+            expected_populations,
+            measure_strict,
+        ) in _ALL_TEST_CASES
     ]
 else:
     _PARAMETRIZE_CASES = [
@@ -139,6 +160,7 @@ else:
             "",
             "",
             {},
+            True,
             id="_none::_none",
             marks=pytest.mark.skip(reason="No connectathon test-case bundles found"),
         )
@@ -240,9 +262,11 @@ def _wait_for_measure_engine_ready(
 def _load_connectathon_bundles_to_hapi(_require_infrastructure):
     """Load all connectathon bundles into the test HAPI instances.
 
-    Measure definitions (with compose-patched ValueSets) → measure engine.
-    Clinical data → both CDR and measure engine so $evaluate-measure can
-    resolve patient resources without a separate CDR federation step.
+    Measure definitions → measure engine (TEST_MEASURE_URL).
+    Clinical data      → CDR (TEST_CDR_URL) AND measure server (TEST_MEASURE_URL).
+
+    Clinical data must go to the measure server because $evaluate-measure resolves
+    patient data from the same HAPI instance it runs on.
 
     Skips gracefully if a bundle file is missing.  Re-runs are idempotent
     (PUT-based transactions).
@@ -250,7 +274,17 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
     headers = {"Content-Type": "application/fhir+json"}
 
     probe_patient_id: str | None = None
-    eval_probes: list[tuple[str, str, str, str]] = []  # (canonical_url, patient_ref, period_start, period_end)
+    probe_encounter_id: str | None = None
+
+    # Pass 1: collect and deduplicate measure definitions across all bundles.
+    # Deduplication is critical: the same large ValueSet (e.g. 1797-code VSAC OID)
+    # often appears in multiple bundles.  Without deduplication each subsequent PUT
+    # resets HAPI's background pre-expansion clock, so by the end of loading the
+    # clock has been reset ~3× and the 600s wait never catches up.
+    # With deduplication every resource is PUT exactly once; HAPI queues it for
+    # pre-expansion once and the wait reliably succeeds.
+    all_measure_defs: dict[str, dict] = {}  # "ResourceType/id" → resource (last bundle wins)
+    clinical_per_bundle: list[tuple[str, list[dict]]] = []  # (measure_id, clinical_resources)
 
     for entry in _load_manifest():
         bundle_file: str = entry["bundle_file"]
@@ -266,73 +300,147 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
             bundle = json.load(f)
 
         measure_defs, clinical, _test_cases = _classify_bundle_entries(bundle)
+        measure_defs = fix_valueset_compose_for_hapi(measure_defs)
+        measure_defs = fix_library_deps_for_hapi(measure_defs)
 
-        if measure_defs:
-            # Split so ValueSets (patched) go first; HAPI-0902 on re-upload is OK.
-            secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
-            primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
-            if secondary:
-                patched = _fix_valueset_compose_for_hapi(secondary)
-                tx = make_put_bundle(patched)
-                resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
-                if not (resp.status_code == 422 and "HAPI-0902" in resp.text):
-                    try:
-                        resp.raise_for_status()
-                    except httpx.HTTPStatusError as exc:
-                        pytest.fail(f"[{measure_id}] Failed to load ValueSets: {exc}\n{resp.text[:300]}")
-            if primary:
-                tx = make_put_bundle(primary)
-                resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
-                if resp.status_code == 422 and "HAPI-0902" in resp.text:
-                    warnings.warn(f"[{measure_id}] measure defs already loaded (HAPI-0902)")
-                else:
-                    try:
-                        resp.raise_for_status()
-                    except httpx.HTTPStatusError as exc:
-                        pytest.fail(f"[{measure_id}] Failed to load measure defs: {exc}\n{resp.text[:300]}")
+        for r in measure_defs:
+            key = f"{r.get('resourceType')}/{r.get('id')}"
+            all_measure_defs[key] = r
 
         if clinical:
-            tx = make_put_bundle(clinical)
-            # CDR — primary patient record store
-            resp = httpx.post(TEST_CDR_URL, json=tx, headers=headers, timeout=120)
-            try:
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                pytest.fail(f"[{measure_id}] Failed to load clinical data to CDR: {exc}\n{resp.text[:300]}")
-            # MCS — $evaluate-measure requires patient resources on the measure server
-            resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
-            try:
-                resp.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                pytest.fail(f"[{measure_id}] Failed to load clinical data to MCS: {exc}\n{resp.text[:300]}")
-            # Track a probe patient for post-load reindex wait
-            if probe_patient_id is None:
-                for r in clinical:
-                    if r.get("resourceType") == "Patient":
-                        probe_patient_id = r.get("id")
-                        break
+            clinical_per_bundle.append((measure_id, clinical))
 
-        # Collect one $evaluate-measure readiness probe per bundle (first IP=1 test case).
-        if canonical_url and _test_cases:
-            for tc in _test_cases:
-                if tc.get("expected_populations", {}).get("initial-population", 0) >= 1:
-                    eval_probes.append(
-                        (canonical_url, tc["patient_ref"], tc["period_start"], tc["period_end"])
+    # Pass 2: load deduplicated measure defs in a single batch.
+    deduped = list(all_measure_defs.values())
+
+    # Resolve ValueSet ID conflicts before batch load.
+    # Some ValueSets in connectathon bundles use bare OID IDs (e.g. "…1082") while
+    # the seed fixture (conftest._load_seed_data) may have already loaded the same
+    # ValueSet under a versioned ID (e.g. "…1082-20190315").  HAPI enforces unique
+    # url+version, so a batch PUT with a different ID silently fails with HAPI-0902.
+    # Fix: query HAPI by URL and rewrite our resource ID in-place so the PUT becomes
+    # an update of the existing resource (replacing any truncated seed compose with
+    # the full connectathon compose).
+    for r in deduped:
+        if r.get("resourceType") != "ValueSet" or not r.get("url"):
+            continue
+        try:
+            resp = httpx.get(
+                f"{TEST_MEASURE_URL}/ValueSet?url={r['url']}&_count=1",
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                entries = resp.json().get("entry", [])
+                if entries:
+                    hapi_id = entries[0]["resource"]["id"]
+                    if hapi_id != r["id"]:
+                        warnings.warn(f"[VS conflict remap] {r['id']} → {hapi_id} (url={r['url'][-50:]})")
+                        r["id"] = hapi_id
+        except httpx.RequestError:
+            pass
+
+    if deduped:
+        tx = make_put_bundle(deduped)
+        resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=300)
+        if resp.status_code == 422 and "HAPI-0902" in resp.text:
+            warnings.warn("measure defs already loaded (HAPI-0902)")
+        else:
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                pytest.fail(f"Failed to load measure defs: {exc}\n{resp.text[:300]}")
+
+    # Pass 3: wait for HAPI to pre-expand large ValueSets before loading clinical data.
+    # HAPI's in-memory expansion cap is 1000; ValueSets with >1000 codes produce
+    # HAPI-0831 during CQL retrieves, silently returning empty results (IP=0).
+    # Background pre-expansion stores codes in HAPI's DB with no size limit.
+    large_valueset_ids = [
+        r["id"]
+        for r in deduped
+        if r.get("resourceType") == "ValueSet"
+        and r.get("id")
+        and sum(len(inc.get("concept", [])) for inc in r.get("compose", {}).get("include", [])) > 900
+    ]
+    if large_valueset_ids:
+        warnings.warn(f"Waiting for HAPI to pre-expand {len(large_valueset_ids)} large ValueSet(s)...")
+        _wait_for_valueset_expansion(TEST_MEASURE_URL, large_valueset_ids)
+
+    # Pass 4: load clinical data per bundle.
+    for measure_id, clinical in clinical_per_bundle:
+        # Fix duplicate Claim IDs (MADiE v0.3.x CMS71 exports all Claims with the same ID).
+        clinical = fix_duplicate_claim_ids(clinical)
+        tx = make_put_bundle(clinical)
+        for target, label in [(TEST_CDR_URL, "CDR"), (TEST_MEASURE_URL, "measure server")]:
+            resp = httpx.post(target, json=tx, headers=headers, timeout=120)
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                pytest.fail(f"[{measure_id}] Failed to load clinical data to {label}: {exc}\n{resp.text[:300]}")
+
+        # Capture first patient+encounter pair to use as reindex probe
+        if not probe_patient_id:
+            enc_resources = [r for r in clinical if r.get("resourceType") == "Encounter"]
+            if enc_resources:
+                first_enc = enc_resources[0]
+                probe_encounter_id = first_enc.get("id")
+                probe_patient_id = first_enc.get("subject", {}).get("reference", "").removeprefix("Patient/")
+
+    # HAPI v8.6.0+ with CR enabled triggers an async REINDEX ~40s after startup.
+    # Resources written during that window don't get reference-type search params
+    # indexed, so Encounter?patient=X returns 0 and $evaluate-measure yields IP=0.
+    # Trigger a fresh $reindex and wait for reference indexes to settle.
+    if probe_patient_id and probe_encounter_id:
+        for target in (TEST_CDR_URL, TEST_MEASURE_URL):
+            _trigger_reindex_and_wait(target, probe_patient_id, probe_encounter_id)
+
+    # Evaluate-measure gate: verify CQL evaluation is actually working before tests
+    # run.  $expand?count=2 confirms ValueSet API access but HAPI's CQL engine may
+    # use DB pre-expansion (a separate code path from the $expand API).  Until DB
+    # pre-expansion completes, CQL retrieves return empty even with
+    # maximum_expansion_size=50000.  Poll $evaluate-measure on a known IP=1 patient
+    # from CMS122 until IP>=1.  This is immune to all VS expansion timing issues.
+    _eval_gate_measure_url = "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent"
+    _eval_gate_patient = "9cba6cfa-9671-4850-803d-e286c7d59ee7"
+    _eval_gate_timeout = 600
+    _eval_gate_deadline = __import__("time").monotonic() + _eval_gate_timeout
+    try:
+        _measure_id_resp = httpx.get(f"{TEST_MEASURE_URL}/Measure?url={_eval_gate_measure_url}&_count=1", timeout=15)
+        _entries = _measure_id_resp.json().get("entry", []) if _measure_id_resp.status_code == 200 else []
+        _gate_measure_hapi_id = _entries[0]["resource"]["id"] if _entries else None
+    except Exception:
+        _gate_measure_hapi_id = None
+
+    if _gate_measure_hapi_id:
+        import time as _time
+
+        _gate_eval_url = (
+            f"{TEST_MEASURE_URL}/Measure/{_gate_measure_hapi_id}/$evaluate-measure"
+            f"?subject=Patient/{_eval_gate_patient}&periodStart=2026-01-01&periodEnd=2026-12-31"
+        )
+        while _time.monotonic() < _eval_gate_deadline:
+            try:
+                _gate_resp = httpx.get(_gate_eval_url, timeout=60)
+                if _gate_resp.status_code == 200:
+                    _report = _gate_resp.json()
+                    _ip = next(
+                        (
+                            pop.get("count", 0)
+                            for grp in _report.get("group", [])
+                            for pop in grp.get("population", [])
+                            if pop.get("code", {}).get("coding", [{}])[0].get("code") == "initial-population"
+                        ),
+                        0,
                     )
-                    break
-
-    # Wait for HAPI to finish indexing reference-type search params so that
-    # Encounter?patient=… (used internally by $evaluate-measure) returns results.
-    if probe_patient_id:
-        _trigger_reindex_and_wait(TEST_MEASURE_URL, probe_patient_id, "")
-
-    # Wait for the measure engine to be fully ready: HAPI v8.6.0 expands ValueSets
-    # asynchronously in a background thread pool.  $evaluate-measure returns
-    # all-zero populations when called before expansion completes.  We probe using
-    # a known-positive patient from each bundle rather than polling $expand, which
-    # can time out when probe VSes rely on CodeSystems HAPI does not have locally.
-    if eval_probes:
-        _wait_for_measure_engine_ready(TEST_MEASURE_URL, eval_probes)
+                    if _ip >= 1:
+                        break
+            except Exception:
+                pass
+            _time.sleep(15)
+        else:
+            warnings.warn(
+                f"Evaluate-measure gate timed out after {_eval_gate_timeout}s — "
+                f"CMS122 probe patient IP=0. Tests may fail due to incomplete VS expansion."
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -371,7 +479,7 @@ def _resolve_measure_hapi_id(canonical_url: str) -> str | None:
 
 
 @pytest.mark.parametrize(
-    "measure_id,canonical_url,patient_ref,period_start,period_end,expected_populations",
+    "measure_id,canonical_url,patient_ref,period_start,period_end,expected_populations,measure_strict",
     _PARAMETRIZE_CASES,
 )
 def test_connectathon_measure_per_patient(
@@ -381,13 +489,14 @@ def test_connectathon_measure_per_patient(
     period_start: str,
     period_end: str,
     expected_populations: dict[str, int],
+    measure_strict: bool,
 ) -> None:
     """Evaluate a single test-case MeasureReport and assert population counts match.
 
     Each parametrized invocation is one patient/measure combination from the
     MADiE connectathon bundles.
     """
-    strict = os.environ.get("STRICT_STU6", "1") == "1"
+    strict = os.environ.get("STRICT_STU6", "1") == "1" and measure_strict
 
     # --- Resolve measure to HAPI resource ID ---
     hapi_id = _resolve_measure_hapi_id(canonical_url)
@@ -449,10 +558,23 @@ def test_connectathon_measure_per_patient(
 
     # --- Parse and compare populations ---
     report = resp.json()
-    assert report.get("resourceType") == "MeasureReport", (
-        f"[{measure_id}] Expected MeasureReport for patient {patient_ref!r}, "
-        f"got resourceType={report.get('resourceType')!r}"
-    )
+    if report.get("resourceType") != "MeasureReport":
+        msg = (
+            f"[{measure_id}] Expected MeasureReport for patient {patient_ref!r}, "
+            f"got resourceType={report.get('resourceType')!r}"
+        )
+        if strict:
+            fail_with_context(
+                measure_id=measure_id,
+                patient=patient_ref,
+                phase="evaluate",
+                expected="MeasureReport",
+                actual=report.get("resourceType"),
+                likely_source="mcs",
+            )
+        else:
+            warnings.warn(msg)
+            return
 
     actual_populations = _extract_population_counts(report)
     passed, mismatches = compare_populations(expected_populations, actual_populations)

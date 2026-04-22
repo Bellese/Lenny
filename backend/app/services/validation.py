@@ -286,60 +286,63 @@ def _warn_unknown_bundle_types(bundle_json: dict[str, Any]) -> None:
 
 
 def _fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Patch ValueSets so HAPI v8.6.0 can expand them without missing sub-ValueSets.
+    """Patch ValueSets so HAPI can expand them.
 
-    HAPI v8.6.0 ignores the pre-computed ``expansion`` element and always re-expands
-    ValueSets via their ``compose``.  Three patterns break expansion:
+    HAPI ignores the pre-computed ``expansion`` element and always re-expands
+    ValueSets via their ``compose``.  MADiE/connectathon bundles often contain
+    ValueSets with only ``expansion`` (no ``compose``), or with a ``compose``
+    that references sub-ValueSets not loaded into HAPI.  In both cases HAPI
+    produces empty expansions and CQL evaluation returns all-zero populations.
 
-    - Case 1: ``compose`` references sub-ValueSets not present in HAPI.
-    - Case 2: ``compose`` references an entire CodeSystem with no explicit concepts/filters;
-      HAPI tries to enumerate the full CodeSystem (e.g. nahdo.org/sopt) and fails if it
-      isn't loaded.
-    - Case 3: ``compose.include`` is empty — MADiE connectathon bundles ship ValueSets with
-      ``expansion.contains`` pre-populated but ``compose.include = []``.  HAPI re-expands
-      from compose (empty) and gets 0 codes, so all CQL retrieves that depend on these
-      ValueSets silently evaluate to empty.
-
-    Fix: for any ValueSet with a non-empty ``expansion.contains``, extract those
-    codes and inject them as direct ``compose.include`` entries grouped by code system.
+    Fix: for any ValueSet that has ``expansion`` and either lacks ``compose``
+    or has a ``compose`` whose include entries carry no explicit codes, synthesise
+    a ``compose`` from the expansion codes grouped by code system.
 
     Must be applied on first load — HAPI's Terminology service caches compose in a
     separate DB table that is not overwritten by a later PUT.
     """
     result = []
     for r in resources:
-        if r.get("resourceType") == "ValueSet" and "expansion" in r and "compose" in r:
-            includes = r.get("compose", {}).get("include", [])
-            # Case 1: compose references sub-ValueSets not present in HAPI
-            has_vs_refs = any(inc.get("valueSet") for inc in includes)
-            # Case 2: compose references an entire CodeSystem with no explicit concepts/filters
-            has_bare_system_refs = any(
-                inc.get("system") and not inc.get("concept") and not inc.get("filter")
-                for inc in includes
-            )
-            # Case 3: compose.include is empty — connectathon bundles use pre-computed expansion only
-            has_empty_compose = not includes
-            if (has_vs_refs or has_bare_system_refs or has_empty_compose) and r.get("expansion", {}).get("contains"):
-                r = copy.deepcopy(r)
-                codes_by_system: dict[str, list[dict[str, str]]] = {}
+        if r.get("resourceType") != "ValueSet" or "expansion" not in r:
+            result.append(r)
+            continue
 
-                def _flatten_contains(nodes: list[dict[str, Any]]) -> None:
-                    for ce in nodes:
-                        sys = ce.get("system", "")
-                        code = ce.get("code", "")
-                        disp = ce.get("display", "")
-                        if sys and code:
-                            entry: dict[str, str] = {"code": code}
-                            if disp:
-                                entry["display"] = disp
-                            codes_by_system.setdefault(sys, []).append(entry)
-                        if ce.get("contains"):
-                            _flatten_contains(ce["contains"])
+        include = r.get("compose", {}).get("include", [])
+        needs_fix = False
+        if "compose" not in r:
+            needs_fix = True
+        elif not include:
+            needs_fix = True
+        else:
+            total_concepts = sum(len(inc.get("concept", [])) for inc in include)
+            has_vs_refs = any(inc.get("valueSet") for inc in include)
+            has_filters = any(inc.get("filter") for inc in include)
+            if has_vs_refs:
+                needs_fix = True
+            elif total_concepts == 0 and not has_filters:
+                needs_fix = True  # bare CodeSystem refs with no explicit codes
 
-                _flatten_contains(r["expansion"].get("contains", []))
-                r["compose"] = {
-                    "include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]
-                }
+        if needs_fix and r.get("expansion", {}).get("contains"):
+            r = copy.deepcopy(r)
+            codes_by_system: dict[str, list[dict[str, str]]] = {}
+
+            def _flatten_contains(nodes: list[dict[str, Any]]) -> None:
+                for ce in nodes:
+                    sys = ce.get("system", "")
+                    code = ce.get("code", "")
+                    disp = ce.get("display", "")
+                    if sys and code:
+                        entry: dict[str, str] = {"code": code}
+                        if disp:
+                            entry["display"] = disp
+                        codes_by_system.setdefault(sys, []).append(entry)
+                    if ce.get("contains"):
+                        _flatten_contains(ce["contains"])
+
+            _flatten_contains(r["expansion"].get("contains", []))
+            r["compose"] = {
+                "include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]
+            }
         result.append(r)
     return result
 
@@ -365,10 +368,17 @@ async def triage_test_bundle(
     if measure_defs:
         primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
         secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
-        if secondary:
-            await push_resources(_fix_valueset_compose_for_hapi(secondary))  # ValueSets/CodeSystems — HAPI-0902 is OK
-        if primary:
-            await push_resources(primary)  # Measure + Library always pushed
+        try:
+            if secondary:
+                await push_resources(_fix_valueset_compose_for_hapi(secondary))  # ValueSets/CodeSystems — HAPI-0902 is OK
+            if primary:
+                await push_resources(primary)  # Measure + Library always pushed
+        except Exception as exc:
+            raise ValueError(
+                f"Failed to upload measures to HAPI measure engine. "
+                f"Ensure the measure engine is running and accessible. "
+                f"Details: {str(exc)}"
+            ) from exc
 
     # Upsert expected results atomically (avoids TOCTOU on concurrent uploads)
     for tc in test_cases:
@@ -483,6 +493,57 @@ async def _resolve_measure_id(measure_url: str) -> Optional[str]:
     return None
 
 
+async def _reload_measures_from_seed_bundles() -> dict[str, int]:
+    """Reload all Measure/Library resources from seed bundles into HAPI.
+
+    Called when validation detects missing measures. Returns counts of loaded resources.
+    Safe to re-run (uses upsert logic in triage_test_bundle).
+    """
+    scan_dir = Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles"
+    if not scan_dir.exists():
+        logger.warning("Seed bundles directory not found", extra={"directory": str(scan_dir)})
+        return {"measures_loaded": 0, "libraries_loaded": 0, "failed": 0}
+
+    bundle_files = sorted(scan_dir.glob("*.json"))
+    total_measures = 0
+    total_libraries = 0
+    failed = 0
+
+    for bundle_path in bundle_files:
+        if bundle_path.name == "manifest.json":
+            continue
+        try:
+            bundle_json = json.loads(bundle_path.read_bytes())
+            measure_defs, _, _ = _classify_bundle_entries(bundle_json)
+
+            if measure_defs:
+                primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
+                secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
+                if secondary:
+                    await push_resources(secondary)
+                if primary:
+                    await push_resources(primary)
+                    for r in primary:
+                        if r.get("resourceType") == "Measure":
+                            total_measures += 1
+                        elif r.get("resourceType") == "Library":
+                            total_libraries += 1
+            measure_count = sum(1 for r in measure_defs if r.get("resourceType") == "Measure")
+            logger.info(
+                "Reloaded measures from seed bundle",
+                extra={"file": bundle_path.name, "measures": measure_count},
+            )
+        except Exception as exc:
+            failed += 1
+            logger.warning(
+                "Failed to reload measures from seed bundle: %s",
+                bundle_path.name,
+                extra={"file": bundle_path.name, "error": str(exc)},
+            )
+
+    return {"measures_loaded": total_measures, "libraries_loaded": total_libraries, "failed": failed}
+
+
 async def run_validation(validation_run_id: int) -> None:
     """Worker dispatch target: execute a validation run."""
     async with async_session() as session:
@@ -523,15 +584,60 @@ async def run_validation(validation_run_id: int) -> None:
 
         # Resolve measure IDs and get periods
         measure_info: dict[str, dict[str, str]] = {}
+        missing_measures: list[str] = []
+
         for measure_url, ers in measures.items():
             hapi_id = await _resolve_measure_id(measure_url)
             if not hapi_id:
-                raise ValueError(f"Measure not found on engine: {measure_url}")
-            measure_info[measure_url] = {
-                "hapi_id": hapi_id,
-                "period_start": ers[0].period_start,
-                "period_end": ers[0].period_end,
-            }
+                missing_measures.append(measure_url)
+            else:
+                measure_info[measure_url] = {
+                    "hapi_id": hapi_id,
+                    "period_start": ers[0].period_start,
+                    "period_end": ers[0].period_end,
+                }
+
+        # If measures are missing, try to reload from seed bundles (lazy loading)
+        if missing_measures:
+            logger.warning(
+                "Measures not found on engine — attempting to reload from seed bundles",
+                extra={"missing_count": len(missing_measures), "total": len(measures)},
+            )
+            try:
+                reload_result = await _reload_measures_from_seed_bundles()
+                logger.info("Seed bundle reload complete", extra=reload_result)
+
+                # Retry resolving measures after reload
+                still_missing: list[str] = []
+                for measure_url in missing_measures:
+                    hapi_id = await _resolve_measure_id(measure_url)
+                    if hapi_id:
+                        ers = measures[measure_url]
+                        measure_info[measure_url] = {
+                            "hapi_id": hapi_id,
+                            "period_start": ers[0].period_start,
+                            "period_end": ers[0].period_end,
+                        }
+                    else:
+                        still_missing.append(measure_url)
+
+                if still_missing:
+                    error_msg = (
+                        f"Measures not found on engine after reload attempt. "
+                        f"This may indicate the HAPI measure engine is unavailable or the seed bundles are missing. "
+                        f"Please ensure the backend is properly connected to the measure engine, "
+                        f"or manually upload test bundles using the Validation page. "
+                        f"Missing measures: {', '.join(still_missing[:3])}{'...' if len(still_missing) > 3 else ''}"
+                    )
+                    raise ValueError(error_msg)
+            except ValueError:
+                raise
+            except Exception as exc:
+                error_msg = (
+                    f"Failed to reload measures from seed bundles: {str(exc)}. "
+                    f"Please manually upload test bundles using the Validation page."
+                )
+                raise ValueError(error_msg) from exc
 
         # Resolve CDR connection
         async with async_session() as session:

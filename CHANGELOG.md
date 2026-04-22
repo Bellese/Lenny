@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.6.3] - 2026-04-21
+
+### Added
+- Automatic lazy measure loading: validation runs now detect missing measures on the HAPI engine and attempt to reload them from seed bundles automatically before failing. If manual recovery is needed, a recovery script is available: `./scripts/reload-validation-bundles.sh`.
+- Comprehensive validation failure recovery guide (`docs/validation-fixes.md`) documenting three complementary recovery strategies for when expected results exist but measure resources are lost.
+
+### Fixed
+- **Validation error messages** now provide clear, actionable guidance instead of raw HAPI errors. When the measure engine is unavailable or measures are missing, users see a user-friendly message directing them to the Validation page or manual recovery steps.
+- **Bundle upload error handling** — when measures fail to push to HAPI during bundle upload, the system returns a descriptive error instead of a generic failure, helping users diagnose connection issues or measure engine availability problems.
+
+## [0.0.6.2] - 2026-04-21
+
+### Changed
+- `docs/architecture.md` and `docs/testing.md` refreshed to match the current repo: HAPI FHIR bumped to v8.8.0-1, `backend/app/dependencies.py` and `ConnectionModal.js` added to the structure maps, integration test file list expanded, PR gate corrected to reflect that `test_connectathon_measures.py` and `test_full_workflow.py` run nightly (not on PRs), and `STRICT_STU6=0` noted as the current CI default during rollout.
+
+### Removed
+- `docs/validation-findings-2026-03-27.md` — superseded by `docs/connectathon-measures-status.md`.
+- `docs/workflow-proposal.md` — early draft, superseded by `docs/workflow.md`.
+
+## [0.0.6.1] - 2026-04-21
+
+### Added
+- `docs/connectathon-measures-status.md` — full status reference for all 12 MADiE connectathon measures, including per-measure pass/fail/skip counts, golden test exclusion rationale for CMS1017/CMS1218, infrastructure bugs fixed in sessions 11–13, remaining failure classes, and next steps.
+
 ## [0.0.6.0] - 2026-04-20
 
 ### Fixed

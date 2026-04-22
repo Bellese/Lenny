@@ -45,7 +45,7 @@ services:
       retries: 5
 
   hapi-fhir-cdr:
-    image: hapiproject/hapi:v8.6.0-1
+    image: hapiproject/hapi:v8.8.0-1
     user: root
     volumes: ["cdrdata:/data/hapi"]
     environment:
@@ -65,7 +65,7 @@ services:
       - spring.datasource.driverClassName=org.h2.Driver
 
   hapi-fhir-measure:
-    image: hapiproject/hapi:v8.6.0-1
+    image: hapiproject/hapi:v8.8.0-1
     user: root
     volumes: ["measuredata:/data/hapi"]
     environment:

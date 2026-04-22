@@ -7,8 +7,8 @@
 | frontend | local build | React web UI | 3001 |
 | backend | local build | FastAPI orchestrator | 8000 |
 | db | postgres:16-alpine | Job tracking, results, config | internal (5432) |
-| hapi-fhir-cdr | hapiproject/hapi:v8.6.0-1 | Default clinical data repository | internal (8080) |
-| hapi-fhir-measure | hapiproject/hapi:v8.6.0-1 | Measure calculation engine | internal (8080) |
+| hapi-fhir-cdr | hapiproject/hapi:v8.8.0-1 | Default clinical data repository | internal (8080) |
+| hapi-fhir-measure | hapiproject/hapi:v8.8.0-1 | Measure calculation engine | internal (8080) |
 | seed | local build | One-time data loader (exits after run) | none |
 
 The CDR and Measure Engine are intentionally separate. The CDR is replaceable — users connect their own FHIR server in Settings. The Measure Engine is permanent and is the only service with `hapi.fhir.cr.enabled=true`.
@@ -20,6 +20,7 @@ backend/app/
   main.py           FastAPI app entry point, router registration
   config.py         pydantic-settings configuration (see Environment Variables below)
   db.py             async SQLAlchemy engine + session factory
+  dependencies.py   FastAPI dependency providers (DB session, config lookups)
 
   models/
     job.py          Job, MeasureReport
@@ -64,10 +65,11 @@ frontend/src/
     SettingsPage.js   CDR connection configuration
     ValidationPage.js Upload test bundles, view pass/fail results
   components/
-    ComparisonView.js Per-patient actual vs. expected population comparison panel
-    PatientDetail.js  Per-patient result expansion panel
-    ProgressBar.js    Job progress indicator
-    Toast.js          Notification component
+    ComparisonView.js  Per-patient actual vs. expected population comparison panel
+    ConnectionModal.js CDR connection test / credentials modal used by SettingsPage
+    PatientDetail.js   Per-patient result expansion panel
+    ProgressBar.js     Job progress indicator
+    Toast.js           Notification component
   api/
     client.js         Axios-based backend API client
 ```
