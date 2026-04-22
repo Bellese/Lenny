@@ -308,9 +308,7 @@ class TestUploadBundleHardening:
             assert ord(char) >= 0x20, f"Control char found: {ord(char):#04x}"
 
     @pytest.mark.asyncio
-    async def test_long_filename_truncated_with_extension_preserved(
-        self, client, test_session, tmp_path, monkeypatch
-    ):
+    async def test_long_filename_truncated_with_extension_preserved(self, client, test_session, tmp_path, monkeypatch):
         """A filename longer than 255 chars must be truncated and still end with .json."""
         monkeypatch.setattr(validation_module, "UPLOAD_DIR", str(tmp_path))
         content = json.dumps({"resourceType": "Bundle", "type": "transaction", "entry": []}).encode()
@@ -339,9 +337,7 @@ class TestUploadBundleHardening:
             "/validation/upload-bundle",
             files={"file": ("", io.BytesIO(content), "application/json")},
         )
-        assert response.status_code in (400, 422), (
-            f"Expected 400 or 422 for empty filename, got {response.status_code}"
-        )
+        assert response.status_code in (400, 422), f"Expected 400 or 422 for empty filename, got {response.status_code}"
 
     @pytest.mark.asyncio
     async def test_non_json_extension_returns_400(self, client):

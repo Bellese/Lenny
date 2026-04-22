@@ -96,7 +96,7 @@ async def upload_bundle(
         dot = safe_name.rfind(".")
         if dot > 0:
             ext = safe_name[dot:]
-            safe_name = safe_name[:_max_name_len - len(ext)] + ext
+            safe_name = safe_name[: _max_name_len - len(ext)] + ext
         else:
             safe_name = safe_name[:_max_name_len]
     safe_filename = f"{timestamp}-{uuid.uuid4().hex}-{safe_name}"
