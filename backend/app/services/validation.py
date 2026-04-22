@@ -436,9 +436,6 @@ async def _reload_measures_from_seed_bundles() -> dict[str, int]:
     Called when validation detects missing measures. Returns counts of loaded resources.
     Safe to re-run (uses upsert logic in triage_test_bundle).
     """
-    from pathlib import Path
-    import json
-
     scan_dir = Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles"
     if not scan_dir.exists():
         logger.warning("Seed bundles directory not found", extra={"directory": str(scan_dir)})
@@ -468,9 +465,10 @@ async def _reload_measures_from_seed_bundles() -> dict[str, int]:
                             total_measures += 1
                         elif r.get("resourceType") == "Library":
                             total_libraries += 1
+            measure_count = sum(1 for r in measure_defs if r.get("resourceType") == "Measure")
             logger.info(
                 "Reloaded measures from seed bundle",
-                extra={"file": bundle_path.name, "measures": sum(1 for r in measure_defs if r.get("resourceType") == "Measure")},
+                extra={"file": bundle_path.name, "measures": measure_count},
             )
         except Exception as exc:
             failed += 1
