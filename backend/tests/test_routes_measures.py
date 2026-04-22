@@ -209,9 +209,6 @@ async def test_upload_measure_small_file_not_rejected_by_size_check(client, monk
     The endpoint may return 200 (success) or 502 (engine unreachable), but must
     not return 413 — verifying the size check does not block legitimate uploads.
     """
-    monkeypatch.setattr(measures_module, "MAX_UPLOAD_SIZE", 10)
-    # 9 bytes is under the 10-byte monkeypatched limit — but it is not valid JSON,
-    # so we use a real tiny bundle and a large-enough limit to avoid false rejection.
     monkeypatch.setattr(measures_module, "MAX_UPLOAD_SIZE", 10 * 1024 * 1024)
     bundle = {"resourceType": "Bundle", "type": "transaction", "entry": []}
     content = json.dumps(bundle).encode()

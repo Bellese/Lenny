@@ -305,7 +305,7 @@ class TestUploadBundleHardening:
         upload = await test_session.get(BundleUpload, upload_id)
         assert upload is not None
         for char in upload.filename:
-            assert ord(char) >= 0x20 or ord(char) == 0x09, f"Control char found: {ord(char):#04x}"
+            assert ord(char) >= 0x20, f"Control char found: {ord(char):#04x}"
 
     @pytest.mark.asyncio
     async def test_long_filename_truncated_with_extension_preserved(
