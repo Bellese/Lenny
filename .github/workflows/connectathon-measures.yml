@@ -1,11 +1,16 @@
 name: Connectathon Measures
 
 # Non-blocking: runs nightly and on manual trigger.
-# Per-patient $evaluate-measure calls (~548 test cases across 11 bundles)
-# take ~15-20 min, too long for the PR gate.
+# The source-of-truth integration suite is too slow for the PR gate, so it runs
+# once nightly here and can be triggered manually for large changes.
 #
-# When STRICT_STU6 flips to "1" this job will hard-fail on population
-# mismatches, giving a daily signal of connectathon readiness.
+# Job split:
+#   - source-of-truth: golden isolation plus full-bundle connectathon coverage.
+#   - full-workflow: orchestration end-to-end coverage in a clean runner so it
+#     does not inherit the connectathon-loaded CDR state.
+#
+# When STRICT_STU6 flips to "1" the source-of-truth job will hard-fail on
+# population mismatches, giving a daily signal of connectathon readiness.
 
 on:
   schedule:
@@ -21,8 +26,8 @@ env:
   PYTHON_VERSION: "3.10"
 
 jobs:
-  connectathon-measures:
-    name: Connectathon Measures (per-patient evaluation)
+  source-of-truth:
+    name: Source of Truth (golden + connectathon)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
@@ -41,5 +46,28 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt -r requirements-test.txt
 
-      - name: Run connectathon measure evaluation tests
-        run: ./scripts/run-integration-tests.sh tests/integration/test_connectathon_measures.py tests/integration/test_full_workflow.py
+      - name: Run nightly source-of-truth integration suite
+        run: >-
+          ./scripts/run-integration-tests.sh
+          tests/integration/test_golden_measures.py
+          tests/integration/test_connectathon_measures.py
+
+  full-workflow:
+    name: Full Workflow (clean nightly run)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-test.txt
+
+      - name: Run full workflow integration test in isolation
+        run: ./scripts/run-integration-tests.sh tests/integration/test_full_workflow.py

@@ -64,6 +64,12 @@ docker compose -f docker-compose.test.yml up -d
 ```
 
 The script waits for HAPI health checks, runs the tests, and tears down containers automatically.
+If you pass explicit test files, directories, or node IDs, it runs only those targets; option-only invocations still default to the full integration suite.
+
+```bash
+# Run only the full workflow suite
+./scripts/run-integration-tests.sh tests/integration/test_full_workflow.py
+```
 
 Integration tests are marked `@pytest.mark.integration` and live in `backend/tests/integration/`.
 
@@ -71,11 +77,15 @@ Integration tests are marked `@pytest.mark.integration` and live in `backend/tes
 
 | File | What it covers |
 |------|----------------|
-| `test_fhir_operations.py` | Core FHIR client operations against a live HAPI instance |
-| `test_smart_load.py` | `triage_test_bundle` + bundle loader against live HAPI |
-| `test_golden_measures.py` | End-to-end `$evaluate-measure` against golden bundles |
-| `test_connectathon_measures.py` | Parametrized per-test-case run across all connectathon bundles (skipped on the PR gate — runs nightly via `connectathon-measures.yml`) |
-| `test_full_workflow.py` | Full-stack pipeline covering job orchestration → measure eval → result storage (skipped on the PR gate — runs nightly) |
+| `test_fhir_operations.py` | Core FHIR client operations against a live HAPI instance; stays in the PR-gate integration smoke suite |
+| `test_smart_load.py` | `triage_test_bundle` + bundle loader against live HAPI; stays in the PR-gate integration smoke suite |
+| `test_golden_measures.py` | End-to-end `$evaluate-measure` against golden bundles; part of the nightly source-of-truth job |
+| `test_connectathon_measures.py` | Parametrized per-test-case run across all connectathon bundles; skipped on the PR gate and included in the nightly source-of-truth job |
+| `test_full_workflow.py` | Full-stack pipeline covering job orchestration → measure eval → result storage; skipped on the PR gate and run in its own clean nightly job |
+
+The nightly `connectathon-measures.yml` workflow still runs once per night, but it now uses two clean jobs:
+- `source-of-truth` runs `test_golden_measures.py` and `test_connectathon_measures.py`.
+- `full-workflow` runs `test_full_workflow.py` by itself so it does not inherit the connectathon-loaded CDR state.
 
 ---
 
@@ -188,12 +198,16 @@ Every PR to `main` triggers `.github/workflows/pr-checks.yml` with 4 jobs:
 |-----|-------------|----------|
 | **Unit Tests + Coverage** | Runs all unit tests with `--cov-fail-under=70` | Any test fails OR coverage < 70% |
 | **Lint** | `ruff check` + `ruff format --check` | Any lint or formatting violation |
-| **Integration Tests** | Spins up Docker containers, runs integration suite **minus** `test_connectathon_measures.py` and `test_full_workflow.py` (both run nightly). `STRICT_STU6=0` during rollout. | Any remaining integration test fails |
+| **Integration Tests** | Spins up Docker containers, runs integration smoke coverage while excluding `test_golden_measures.py`, `test_connectathon_measures.py`, and `test_full_workflow.py` (all moved out of the PR gate). `STRICT_STU6=0` during rollout. | Any remaining integration test fails |
 | **Frontend Build** | `npm ci && npm run build` | Build fails |
 
 All 4 jobs must pass before a PR can merge.
 
-The nightly `connectathon-measures.yml` workflow runs the excluded tests against the full connectathon bundle set. Trigger it manually from the Actions tab (`Run workflow`) before merging any change that touches the measure evaluation pipeline, FHIR data flow, or job orchestration.
+The nightly `connectathon-measures.yml` workflow adds a once-nightly source-of-truth run with clean runner isolation:
+- `source-of-truth` runs `test_golden_measures.py` and `test_connectathon_measures.py`.
+- `full-workflow` runs `test_full_workflow.py` in a separate clean runner.
+
+Trigger it manually from the Actions tab (`Run workflow`) before merging any change that touches the measure evaluation pipeline, FHIR data flow, or job orchestration.
 
 ---
 
