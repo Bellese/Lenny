@@ -4,16 +4,19 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 import uuid
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import MAX_UPLOAD_SIZE
 from app.db import get_session
+from app.limiter import limiter
 from app.models.validation import (
     BundleUpload,
     ExpectedResult,
@@ -25,7 +28,21 @@ from app.models.validation import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/validation", tags=["validation"])
 
-MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
+
+def _sanitize_filename(name: str) -> str:
+    name = os.path.basename(name)
+    name = re.sub(r"[\x00-\x1f\x7f]", "", name)
+    if len(name) > 255:
+        dot = name.rfind(".")
+        if dot > 0:
+            ext = name[dot:]
+            stem = name[:dot][: 255 - len(ext)]
+            name = stem + ext
+        else:
+            name = name[:255]
+    if not name or name == ".":
+        name = "upload.json"
+    return name
 
 
 class ValidationRunCreate(BaseModel):
@@ -38,7 +55,9 @@ UPLOAD_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file
 
 
 @router.post("/upload-bundle")
+@limiter.limit("10/minute")
 async def upload_bundle(
+    request: Request,
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
 ) -> dict:
@@ -47,7 +66,10 @@ async def upload_bundle(
     Triages resources asynchronously: measure definitions to engine,
     clinical data to CDR, expected results to MCT2 DB.
     """
-    if not file.filename or not file.filename.lower().endswith(".json"):
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File must have a filename")
+    safe_name = _sanitize_filename(file.filename)
+    if not safe_name.lower().endswith(".json"):
         raise HTTPException(status_code=400, detail="File must be a .json file")
 
     # Read and validate content — cap read to MAX_UPLOAD_SIZE+1 to avoid OOM on huge uploads
@@ -66,8 +88,18 @@ async def upload_bundle(
     # Save file to disk (off the event loop to avoid blocking on large uploads)
     await asyncio.to_thread(os.makedirs, UPLOAD_DIR, exist_ok=True)
     timestamp = int(time.time())
-    # Sanitize filename to prevent path traversal (e.g. ../../etc/cron.d/evil.json)
-    safe_filename = f"{timestamp}-{uuid.uuid4().hex}-{os.path.basename(file.filename)}"
+    # Composite on-disk name: "{10-digit ts}-{32-hex uuid}-{safe_name}"
+    # Prefix overhead: 10 + 1 + 32 + 1 = 44 chars.  Keep total ≤ 255.
+    _prefix_overhead = 44
+    _max_name_len = 255 - _prefix_overhead  # 211
+    if len(safe_name) > _max_name_len:
+        dot = safe_name.rfind(".")
+        if dot > 0:
+            ext = safe_name[dot:]
+            safe_name = safe_name[: _max_name_len - len(ext)] + ext
+        else:
+            safe_name = safe_name[:_max_name_len]
+    safe_filename = f"{timestamp}-{uuid.uuid4().hex}-{safe_name}"
     file_path = os.path.join(UPLOAD_DIR, safe_filename)
 
     def _write_file() -> None:
@@ -78,7 +110,7 @@ async def upload_bundle(
 
     # Create queued upload record
     upload = BundleUpload(
-        filename=file.filename,
+        filename=safe_name,
         file_path=file_path,
         status=ValidationStatus.queued,
     )
