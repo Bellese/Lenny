@@ -19,5 +19,9 @@ api.{$CADDY_HOST} {
     request_body {
         max_size 100MB
     }
-    reverse_proxy backend:8000
+    reverse_proxy backend:8000 {
+        # Overwrite X-Forwarded-For with the real client IP so the rate limiter
+        # key cannot be spoofed by a client that pre-sets this header.
+        header_up X-Forwarded-For {remote_host}
+    }
 }

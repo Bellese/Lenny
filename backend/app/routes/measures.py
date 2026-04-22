@@ -86,7 +86,7 @@ async def upload_measure(request: Request, file: UploadFile = File(...)) -> dict
                     "issue": [
                         {
                             "severity": "error",
-                            "code": "too-costly",
+                            "code": "too-long",
                             "diagnostics": "File exceeds 100MB size limit",
                         }
                     ],

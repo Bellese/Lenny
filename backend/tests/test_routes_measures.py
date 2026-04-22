@@ -224,5 +224,4 @@ async def test_upload_measure_small_file_not_rejected_by_size_check(client, monk
             files={"file": ("bundle.json", content, "application/json")},
         )
 
-    assert resp.status_code != 413, "Small file must not be rejected by the size guard"
-    assert resp.status_code in (200, 502)
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
