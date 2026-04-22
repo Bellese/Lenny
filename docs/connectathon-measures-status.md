@@ -2,7 +2,7 @@
 
 **HAPI version:** v8.8.0-1
 **Target:** MADiE May 2026 Connectathon (12 measures)
-**Last updated:** 2026-04-22 (PR #112 verification — 17 Class A failures confirmed, xfail marks added, eval gate extended)
+**Last updated:** 2026-04-22 (PR #112 verification — 17 Class A failures confirmed, xfail marks added, eval gate extended; EXM bundles removed, QI-Core 6 versions pending — issue #115)
 
 ---
 
@@ -203,11 +203,38 @@ Bundle v0.3.000 requires `AdultOutpatientEncounters v4.16.000`; HAPI has `v4.19.
 
 ---
 
+## Bundle Version Status
+
+### Missing QI-Core 6 dQM v1.0.000 Bundles
+
+The following measures are currently using older FHIR4 versions as placeholders pending QI-Core 6 dQM v1.0.000 bundles from MADiE (see issue #115):
+
+| Measure | Current | Target | Status |
+|---------|---------|--------|--------|
+| CMS122 | v0.5.000 (FHIR4) | v1.0.000 (QI-Core 6) | Pending MADiE |
+| CMS124 | v0.4.000 (FHIR4) | v1.0.000 (QI-Core 6) | Pending MADiE |
+| CMS125 | v0.4.000 (FHIR4) | v1.0.000 (QI-Core 6) | Pending MADiE |
+| CMS130 | v0.4.000 (FHIR4) | v1.0.000 (QI-Core 6) | Pending MADiE |
+
+All EXM FHIR4 bundles (EXM104, EXM105, EXM108, EXM124, EXM125, EXM130, EXM165, EXM506, EXM529) have been removed from seed to eliminate duplicate measures. Once the QI-Core 6 versions are obtained, the placeholder versions will be replaced.
+
+---
+
 ## Next Steps
 
+<<<<<<< HEAD
 1. **File HAPI upstream issue** (when ready) — hapifhir/hapi-fhir for the DE criteria evaluation divergence (frailty, dementia, mastectomy date boundary). When filed, update `_HAPI_DE_XFAIL` comment in `test_connectathon_measures.py` with the issue number.
 2. **CMS165** — get refreshed bundle from MADiE with updated library versions
 3. **CMS71** — get refreshed bundle from MADiE with correct per-patient Claim resources
 4. **CMS1017** — once issue #100 (HAPI HTTP 400) is resolved, re-add to golden tests after verifying VS conflicts are gone
 5. **CMS1218** — once MADiE ships bundle with required ValueSets, re-add to golden tests
 6. **Remove xfail marks** — when HAPI ships a fix for the DE divergence, run `--runxfail` to confirm xpassed, then remove from `_HAPI_DE_XFAIL`
+=======
+1. **CMS122/124/125/130** — obtain QI-Core 6 dQM v1.0.000 bundles from MADiE (issue #115)
+2. **CMS130** — investigate the 1 remaining strict=true failure
+3. **`denominator-exclusion` pattern** — file HAPI DEQM issue for `[Encounter: "Frailty Encounter"]` evaluation difference (affects CMS122, CMS125, CMS130)
+4. **CMS165** — get refreshed bundle from MADiE with updated library versions
+5. **CMS71** — get refreshed bundle from MADiE with correct per-patient Claim resources
+6. **CMS1017** — once issue #100 (HAPI HTTP 400) is resolved, re-add to golden tests after verifying VS conflicts are gone
+7. **CMS1218** — once MADiE ships bundle with required ValueSets, re-add to golden tests
+>>>>>>> origin/main

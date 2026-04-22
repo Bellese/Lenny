@@ -855,6 +855,107 @@ class TestResolveMeasureId:
 
         assert result is None
 
+    async def test_relative_ref_found_returns_id(self):
+        """EXM-style relative references ("Measure/{id}") resolve via direct GET, not ?url= search.
+
+        Regression: before this fix _resolve_measure_id only used ?url=, which returns no results
+        for EXM bundles because their MeasureReport.measure is a relative ref while HAPI indexes
+        the measure under its canonical URL.
+        """
+        measure_resp = {"resourceType": "Measure", "id": "measure-EXM130-FHIR4-7.2.000"}
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json.return_value = measure_resp
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            result = await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000")
+
+        assert result == "measure-EXM130-FHIR4-7.2.000"
+        # Must fetch by ID path, NOT by ?url= query
+        call_url = mock_client.get.call_args[0][0]
+        assert "?url=" not in call_url
+        assert "/Measure/measure-EXM130-FHIR4-7.2.000" in call_url
+
+    async def test_relative_ref_not_found_returns_none(self):
+        """When HAPI returns 404 for a relative reference, None is returned instead of raising."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 404
+        mock_resp.raise_for_status = MagicMock()
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            result = await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000")
+
+        assert result is None
+
+    async def test_malformed_relative_ref_returns_none(self):
+        """A non-http string that isn't a valid relative reference returns None without calling HAPI."""
+        mock_client = AsyncMock()
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            result = await _resolve_measure_id("not-a-valid-ref")
+
+        assert result is None
+
+    async def test_canonical_url_http_error_raises(self):
+        """Non-2xx responses from HAPI for canonical URL lookups propagate as exceptions."""
+        import httpx
+
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock())
+        )
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            with pytest.raises(httpx.HTTPStatusError):
+                await _resolve_measure_id("http://example.com/Measure/CMS124")
+
+    async def test_relative_ref_http_error_raises(self):
+        """Non-404 errors from HAPI for relative reference lookups propagate as exceptions."""
+        import httpx
+
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock())
+        )
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            with pytest.raises(httpx.HTTPStatusError):
+                await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000")
+
 
 # ---------------------------------------------------------------------------
 # _fix_valueset_compose_for_hapi

@@ -480,10 +480,25 @@ async def process_bundle_upload(upload_id: int) -> None:
 
 
 async def _resolve_measure_id(measure_url: str) -> Optional[str]:
-    """Resolve a canonical measure URL to a HAPI FHIR resource ID."""
-    url = f"{settings.MEASURE_ENGINE_URL}/Measure?url={measure_url}&_count=1"
+    """Resolve a measure URL or relative reference to a HAPI FHIR resource ID.
+
+    Handles two formats:
+    - Canonical URL (http/https): queries HAPI ?url= search parameter
+    - Relative reference ("Measure/{id}"): fetches resource directly by ID
+    """
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url)
+        if not measure_url.startswith("http"):
+            # Relative reference like "Measure/measure-EXM130-FHIR4-7.2.000"
+            parts = measure_url.split("/", 1)
+            if len(parts) == 2 and parts[0] == "Measure":
+                resp = await client.get(f"{settings.MEASURE_ENGINE_URL}/Measure/{parts[1]}")
+                if resp.status_code == 404:
+                    return None
+                resp.raise_for_status()
+                return resp.json().get("id")
+            return None
+        # Canonical URL — search by ?url= parameter
+        resp = await client.get(f"{settings.MEASURE_ENGINE_URL}/Measure?url={measure_url}&_count=1")
         resp.raise_for_status()
         bundle = resp.json()
         entries = bundle.get("entry", [])
