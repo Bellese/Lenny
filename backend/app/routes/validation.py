@@ -66,7 +66,9 @@ async def upload_bundle(
     Triages resources asynchronously: measure definitions to engine,
     clinical data to CDR, expected results to MCT2 DB.
     """
-    safe_name = _sanitize_filename(file.filename or "")
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="File must have a filename")
+    safe_name = _sanitize_filename(file.filename)
     if not safe_name.lower().endswith(".json"):
         raise HTTPException(status_code=400, detail="File must be a .json file")
 
