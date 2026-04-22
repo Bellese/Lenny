@@ -16,5 +16,8 @@
 
 api.{$CADDY_HOST} {
     import security_headers
+    request_body {
+        max_size 100MB
+    }
     reverse_proxy backend:8000
 }
