@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import pathlib
 from typing import Any
 
@@ -19,7 +20,9 @@ from app.services.validation import triage_test_bundle
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DIR = pathlib.Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles"
+
+_DEFAULT_DIR_FALLBACK = pathlib.Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles"
+_DEFAULT_DIR = pathlib.Path(os.getenv("CONNECTATHON_BUNDLES_DIR", str(_DEFAULT_DIR_FALLBACK)))
 _HAPI_READY_RETRIES = 20
 _HAPI_RETRY_DELAY = 5.0
 
