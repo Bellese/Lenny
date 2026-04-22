@@ -3,6 +3,9 @@
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import func, select
+
+from app.models.validation import ExpectedResult, ValidationResult, ValidationRun, ValidationStatus
 
 from app.services.validation import (
     _classify_bundle_entries,
@@ -15,6 +18,7 @@ from app.services.validation import (
     _warn_unknown_bundle_types,
     compare_populations,
     process_bundle_upload,
+    run_validation,
     sanitize_error,
     triage_test_bundle,
 )
@@ -500,18 +504,6 @@ class TestTriageTestBundle:
         with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                # session.execute needs to handle the pg_insert statement —
-                # mock it to avoid PostgreSQL dialect errors with SQLite.
-                orig_execute = test_session.execute
-
-                async def _execute_interceptor(stmt, *args, **kwargs):
-                    # Intercept pg_insert statements (they have on_conflict_do_update attr)
-                    if hasattr(stmt, "excluded"):
-                        return MagicMock()
-                    return await orig_execute(stmt, *args, **kwargs)
-
-                test_session.execute = _execute_interceptor
-
                 result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         # Measure + Library = 2 measure defs → push_resources called once for defs
@@ -539,15 +531,6 @@ class TestTriageTestBundle:
         await test_session.commit()
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
-            orig_execute = test_session.execute
-
-            async def _execute_interceptor(stmt, *args, **kwargs):
-                if hasattr(stmt, "excluded"):
-                    return MagicMock()
-                return await orig_execute(stmt, *args, **kwargs)
-
-            test_session.execute = _execute_interceptor
-
             result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         # clinical data IS pushed to the external CDR
@@ -585,15 +568,6 @@ class TestTriageTestBundle:
         with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                orig_execute = test_session.execute
-
-                async def _execute_interceptor(stmt, *args, **kwargs):
-                    if hasattr(stmt, "excluded"):
-                        return MagicMock()
-                    return await orig_execute(stmt, *args, **kwargs)
-
-                test_session.execute = _execute_interceptor
-
                 result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         # clinical data pushed with auth headers
@@ -651,6 +625,76 @@ class TestTriageTestBundle:
         assert result["patients_loaded"] == 0
         # push_resources called exactly once for measure defs
         mock_push.assert_called_once()
+
+    async def test_reupload_same_source_bundle_replaces_stale_expected_results(
+        self, test_session, mock_test_bundle_with_expected
+    ):
+        """Refreshing a bundle drops stale rows previously owned by the same source_bundle."""
+        test_session.add_all(
+            [
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/old-canonical",
+                    patient_ref="legacy-patient",
+                    test_description="stale row",
+                    expected_populations={"numerator": 0},
+                    period_start="2025-01-01",
+                    period_end="2025-12-31",
+                    source_bundle="test.json",
+                ),
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/CMS124",
+                    patient_ref="extra-stale-patient",
+                    test_description="stale extra patient",
+                    expected_populations={"numerator": 0},
+                    period_start="2026-01-01",
+                    period_end="2026-12-31",
+                    source_bundle="test.json",
+                ),
+            ]
+        )
+        await test_session.commit()
+
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+            await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+
+        rows = (
+            await test_session.execute(
+                select(ExpectedResult).where(ExpectedResult.source_bundle == "test.json").order_by(ExpectedResult.patient_ref)
+            )
+        ).scalars().all()
+
+        assert len(rows) == 1
+        assert rows[0].measure_url == "https://example.com/Measure/CMS124"
+        assert rows[0].patient_ref == "test-patient-1"
+
+    async def test_reupload_same_source_bundle_updates_count_to_current_bundle(
+        self, test_session, mock_test_bundle_with_expected
+    ):
+        """Bundle refresh removes count drift when the new bundle has fewer patients."""
+        stale_rows = [
+            ExpectedResult(
+                measure_url="https://example.com/Measure/CMS124",
+                patient_ref=f"stale-{idx}",
+                test_description="stale",
+                expected_populations={"numerator": 0},
+                period_start="2026-01-01",
+                period_end="2026-12-31",
+                source_bundle="test.json",
+            )
+            for idx in range(3)
+        ]
+        test_session.add_all(stale_rows)
+        await test_session.commit()
+
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+
+        refreshed_count = await test_session.scalar(
+            select(func.count()).select_from(ExpectedResult).where(ExpectedResult.source_bundle == "test.json")
+        )
+
+        assert result["expected_results_loaded"] == 1
+        assert refreshed_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -784,6 +828,115 @@ class TestProcessBundleUpload:
             assert upload.warning_message == "Clinical test data was not loaded because the active CDR is read-only."
         finally:
             os.unlink(tmp_path)
+
+
+# ---------------------------------------------------------------------------
+# run_validation (async, mocked async_session + FHIR services)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestRunValidation:
+    def _make_session_ctx(self, session):
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=session)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return ctx
+
+    async def test_missing_measure_creates_error_results_and_resolved_measure_still_runs(self, test_session):
+        run = ValidationRun(status=ValidationStatus.queued)
+        test_session.add(run)
+        test_session.add_all(
+            [
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/resolved",
+                    patient_ref="patient-1",
+                    test_description="resolved",
+                    expected_populations={"numerator": 1},
+                    period_start="2026-01-01",
+                    period_end="2026-12-31",
+                    source_bundle="resolved.json",
+                ),
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/missing",
+                    patient_ref="patient-2",
+                    test_description="missing",
+                    expected_populations={"numerator": 0},
+                    period_start="2026-01-01",
+                    period_end="2026-12-31",
+                    source_bundle="missing.json",
+                ),
+            ]
+        )
+        await test_session.commit()
+        await test_session.refresh(run)
+
+        strategy = MagicMock()
+        strategy.gather_patient_data = AsyncMock(
+            return_value=[{"resourceType": "Patient", "id": "patient-1"}]
+        )
+
+        def make_ctx():
+            return self._make_session_ctx(test_session)
+
+        async def resolve_measure_side_effect(measure_url):
+            if measure_url.endswith("/resolved"):
+                return "measure-1"
+            return None
+
+        with patch("app.services.validation.async_session", side_effect=lambda: make_ctx()):
+            with patch("app.services.validation._resolve_measure_id", side_effect=resolve_measure_side_effect):
+                with patch(
+                    "app.services.validation._reload_measures_from_seed_bundles",
+                    new_callable=AsyncMock,
+                    return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
+                ):
+                    with patch("app.services.validation.BatchQueryStrategy", return_value=strategy):
+                        with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+                            with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_wipe:
+                                with patch(
+                                    "app.services.validation.evaluate_measure",
+                                    new_callable=AsyncMock,
+                                    return_value={
+                                        "group": [
+                                            {
+                                                "population": [
+                                                    {
+                                                        "code": {"coding": [{"code": "numerator"}]},
+                                                        "count": 1,
+                                                    }
+                                                ]
+                                            }
+                                        ],
+                                        "evaluatedResource": [],
+                                    },
+                                ) as mock_evaluate:
+                                    with patch("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0):
+                                        await run_validation(run.id)
+
+        await test_session.refresh(run)
+        rows = (
+            await test_session.execute(
+                select(ValidationResult).where(ValidationResult.validation_run_id == run.id).order_by(
+                    ValidationResult.patient_ref
+                )
+            )
+        ).scalars().all()
+
+        assert run.status == ValidationStatus.complete
+        assert run.measures_tested == 2
+        assert run.patients_tested == 2
+        assert run.patients_passed == 1
+        assert run.patients_failed == 1
+        assert len(rows) == 2
+        assert rows[0].patient_ref == "patient-1"
+        assert rows[0].status == "pass"
+        assert rows[1].patient_ref == "patient-2"
+        assert rows[1].status == "error"
+        assert "Measure not found on engine after reload attempt" in rows[1].error_message
+        mock_wipe.assert_awaited_once()
+        mock_push.assert_awaited_once()
+        mock_evaluate.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
