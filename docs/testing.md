@@ -49,7 +49,7 @@ Integration tests spin up real HAPI FHIR instances and a PostgreSQL database via
 
 ```bash
 # Pre-pull the HAPI image on a new machine (~2.5 GB — do this before your first run)
-docker pull hapiproject/hapi:v8.6.0-1
+docker pull hapiproject/hapi:v8.8.0-1
 
 # Start test infrastructure
 docker compose -f docker-compose.test.yml up -d
@@ -66,6 +66,16 @@ docker compose -f docker-compose.test.yml up -d
 The script waits for HAPI health checks, runs the tests, and tears down containers automatically.
 
 Integration tests are marked `@pytest.mark.integration` and live in `backend/tests/integration/`.
+
+**Integration test files:**
+
+| File | What it covers |
+|------|----------------|
+| `test_fhir_operations.py` | Core FHIR client operations against a live HAPI instance |
+| `test_smart_load.py` | `triage_test_bundle` + bundle loader against live HAPI |
+| `test_golden_measures.py` | End-to-end `$evaluate-measure` against golden bundles |
+| `test_connectathon_measures.py` | Parametrized per-test-case run across all connectathon bundles (skipped on the PR gate — runs nightly via `connectathon-measures.yml`) |
+| `test_full_workflow.py` | Full-stack pipeline covering job orchestration → measure eval → result storage (skipped on the PR gate — runs nightly) |
 
 ---
 
@@ -93,18 +103,18 @@ The `STRICT_STU6` environment variable controls how population-count mismatches 
 
 | Value | Behavior |
 |-------|----------|
-| `STRICT_STU6=1` (default) | Hard-fail on any population mismatch or HTTP error. CI uses this mode. |
-| `STRICT_STU6=0` | Log the mismatch as a warning and mark the test as skipped rather than failed. Use this while onboarding a new measure whose CQL is known to diverge from MADiE. |
+| `STRICT_STU6=1` | Hard-fail on any population mismatch or HTTP error. |
+| `STRICT_STU6=0` (current CI default) | Log the mismatch as a warning and mark the test as skipped rather than failed. Use this while onboarding a new measure whose CQL is known to diverge from MADiE. |
 
 ```bash
-# Strict mode (default — same as omitting the var)
+# Strict mode
 STRICT_STU6=1 ./scripts/run-integration-tests.sh
 
 # Soft mode — mismatches warn instead of fail
 STRICT_STU6=0 ./scripts/run-integration-tests.sh
 ```
 
-Rollout plan: run `STRICT_STU6=0` for the first week after adding a new QI-Core measure to catch unexpected engine differences without blocking CI. Flip to `STRICT_STU6=1` once population counts are confirmed correct.
+CI (`.github/workflows/pr-checks.yml`) currently sets `STRICT_STU6=0` during the rollout period. Flip to `STRICT_STU6=1` once all connectathon measures pass cleanly in CI. See `docs/connectathon-measures-status.md` for the current per-measure state.
 
 ---
 
@@ -178,10 +188,12 @@ Every PR to `main` triggers `.github/workflows/pr-checks.yml` with 4 jobs:
 |-----|-------------|----------|
 | **Unit Tests + Coverage** | Runs all unit tests with `--cov-fail-under=70` | Any test fails OR coverage < 70% |
 | **Lint** | `ruff check` + `ruff format --check` | Any lint or formatting violation |
-| **Integration Tests** | Spins up Docker containers, runs full integration suite | Any integration test fails |
+| **Integration Tests** | Spins up Docker containers, runs integration suite **minus** `test_connectathon_measures.py` and `test_full_workflow.py` (both run nightly). `STRICT_STU6=0` during rollout. | Any remaining integration test fails |
 | **Frontend Build** | `npm ci && npm run build` | Build fails |
 
 All 4 jobs must pass before a PR can merge.
+
+The nightly `connectathon-measures.yml` workflow runs the excluded tests against the full connectathon bundle set. Trigger it manually from the Actions tab (`Run workflow`) before merging any change that touches the measure evaluation pipeline, FHIR data flow, or job orchestration.
 
 ---
 

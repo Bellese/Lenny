@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.6.2] - 2026-04-21
+
+### Changed
+- `docs/architecture.md` and `docs/testing.md` refreshed to match the current repo: HAPI FHIR bumped to v8.8.0-1, `backend/app/dependencies.py` and `ConnectionModal.js` added to the structure maps, integration test file list expanded, PR gate corrected to reflect that `test_connectathon_measures.py` and `test_full_workflow.py` run nightly (not on PRs), and `STRICT_STU6=0` noted as the current CI default during rollout.
+
+### Removed
+- `docs/validation-findings-2026-03-27.md` — superseded by `docs/connectathon-measures-status.md`.
+- `docs/workflow-proposal.md` — early draft, superseded by `docs/workflow.md`.
+
 ## [0.0.6.1] - 2026-04-21
 
 ### Added
