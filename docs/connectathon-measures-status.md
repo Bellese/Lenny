@@ -2,7 +2,7 @@
 
 **HAPI version:** v8.8.0-1
 **Target:** MADiE May 2026 Connectathon (12 measures)
-**Last updated:** 2026-04-22 (EXM bundles removed, QI-Core 6 versions pending — issue #115)
+**Last updated:** 2026-04-22 (PR #112 verification — 17 Class A failures confirmed, xfail marks added, eval gate extended; EXM bundles removed, QI-Core 6 versions pending — issue #115)
 
 ---
 
@@ -26,10 +26,10 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 |---|---|---|---|---|---|---|---|
 | CMS2FHIRPCSDepressionScreenAndFollowUp | 36 | 36 | 0 | 0 | false | PASS (non-strict) | — |
 | CMS71FHIRSTKAnticoagAFFlutter | 83 | 9 | 74 | 0 | false | FAILING — bundle export bug | Refreshed bundle from MADiE (per-patient Claims) |
-| CMS122FHIRDiabetesAssessGreaterThan9Percent | 56 | 50 | 6 | 0 | true | MOSTLY PASSING (89%) | File HAPI DEQM issue: AIFrailLTCF exclusion differs from MADiE |
+| CMS122FHIRDiabetesAssessGreaterThan9Percent | 56 | 50 | 6 | 0 | true | MOSTLY PASSING (89%) | 6 failures xfailed (HAPI DE divergence) — file HAPI upstream issue when ready |
 | CMS124FHIRCervicalCancerScreening | 33 | 33 | 0 | 0 | true | PASS (100%) | — |
-| CMS125FHIRBreastCancerScreening | 66 | 56 | 10 | 0 | true | MOSTLY PASSING (85%) | File HAPI DEQM issue (same root cause as CMS122) |
-| CMS130FHIRColorectalCancerScreening | 64 | 63 | 1 | 0 | true | MOSTLY PASSING (98%) | Investigate 1 remaining failure |
+| CMS125FHIRBreastCancerScreening | 66 | 56 | 10 | 0 | true | MOSTLY PASSING (85%) | 10 failures xfailed (HAPI DE divergence) — file HAPI upstream issue when ready |
+| CMS130FHIRColorectalCancerScreening | 64 | 63 | 1 | 0 | true | MOSTLY PASSING (98%) | 1 failure xfailed (`f9ef1fd1` dementia) — file HAPI upstream issue when ready |
 | CMS165FHIRControllingHighBloodPressure | 10 | 0 | 10 | 0 | false | FAILING — library mismatch | Refreshed bundle from MADiE (AdultOutpatientEncounters v4.19.000) |
 | CMS506FHIRSafeUseofOpioids | 38 | 38 | 0 | 0 | true | PASS (100%) | — |
 | CMS816FHIRHHHypo | 9 | 9 | 0 | 0 | true | PASS (100%) | — |
@@ -40,9 +40,9 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 ### Notes
 
 - **CMS124, CMS506, CMS816, CMS529** — 100% pass, strict=true
-- **CMS122** — 50/56 (89%); 6 `denominator-exclusion` mismatches are genuine HAPI vs. MADiE CQL differences
-- **CMS125** — 56/66 (85%); 10 failures follow the same `denominator-exclusion` pattern as CMS122
-- **CMS130** — 63/64 (98%); 1 failure needs investigation
+- **CMS122** — 50/56 (89%); 6 `denominator-exclusion` mismatches confirmed as HAPI CQL divergence (xfailed in test suite)
+- **CMS125** — 56/66 (85%); 10 `denominator-exclusion` mismatches confirmed as HAPI CQL divergence (xfailed)
+- **CMS130** — 63/64 (98%); 1 failure (`f9ef1fd1` dementia condition) confirmed as HAPI CQL divergence (xfailed)
 - **CMS71** — strict=false; MADiE v0.3.002 exports all 83 Claims with the same ID; `fix_duplicate_claim_ids()` partially recovers (only 3/83 patients get Claims). Needs refreshed MADiE bundle.
 - **CMS165** — strict=false; v0.3.000 bundle missing library dependencies (`AdultOutpatientEncounters v4.16.000` vs. available `v4.19.000`). Needs refreshed MADiE bundle.
 - **CMS2** — strict=false; missing 10 VSAC ValueSets (depression screening/medications); IP=0 for most patients. Passes because mismatches are non-fatal warns.
@@ -173,9 +173,19 @@ Files: `backend/tests/integration/test_golden_measures.py`
 
 ### Class A: `denominator-exclusion` mismatch (CMS122 ×6, CMS125 ×10, CMS130 ×1)
 
-Patients land in `numerator` when MADiE expects `denominator-exclusion`. Root cause: HAPI DEQM evaluates `[Encounter: "Frailty Encounter"]` differently from MADiE when the encounter has a CPT code (e.g. 99509) that IS in the Frailty Encounter VS.
+Patients land in `numerator` when MADiE expects `denominator-exclusion`. The failures span multiple exclusion sub-criteria that HAPI evaluates differently from the MADiE CQL reference engine:
 
-Status: Genuine HAPI vs. MADiE CQL evaluation differences — not fixable locally. Staying `strict=true`. Needs a HAPI DEQM issue filed.
+- **Frailty encounter** overlaps MP — HAPI misses the encounter-based frailty signal
+- **Frailty diagnosis** overlaps MP — HAPI misses the condition-based frailty signal
+- **Frailty symptom** overlaps MP
+- **Frailty device** used / device request (doNotPerform=false or no modifier)
+- **Frailty observation** (medication device used)
+- **Dementia medications** during MP (CMS125 `0ced1e0c`, CMS130 `f9ef1fd1`)
+- **Mastectomy date boundary** — bilateral mastectomy or two unilateral mastectomies with period.end on 12/31 of MP (CMS125 `4cf81a94`, `857fec09`); HAPI appears to treat period.end as exclusive
+
+Status: Genuine HAPI vs. MADiE CQL evaluation differences — not fixable locally. All 17 marked `xfail` in `test_connectathon_measures.py::_HAPI_DE_XFAIL`. Needs HAPI upstream issue filed at hapifhir/hapi-fhir (update `_HAPI_DE_XFAIL` comment with issue number when filed).
+
+**Issue #112 verification (2026-04-22):** Fresh-container run with extended eval gate confirmed exactly 17 failures — the 69 extra failures from an earlier run were timing artifacts (IP=0 from VS expansion not complete). Root cause: the eval gate only probed CMS122 patient `9cba6cfa`; CMS125/CMS130 VSes take longer to expand on slower machines. Fix: added eval gate probes for CMS122 numerator path + CMS125 + CMS130 in `_load_connectathon_bundles_to_hapi`.
 
 ### Class B: CMS71 — MADiE bundle export bug (strict=false)
 
@@ -212,10 +222,10 @@ All EXM FHIR4 bundles (EXM104, EXM105, EXM108, EXM124, EXM125, EXM130, EXM165, E
 
 ## Next Steps
 
-1. **CMS122/124/125/130** — obtain QI-Core 6 dQM v1.0.000 bundles from MADiE (issue #115)
-2. **CMS130** — investigate the 1 remaining strict=true failure
-3. **`denominator-exclusion` pattern** — file HAPI DEQM issue for `[Encounter: "Frailty Encounter"]` evaluation difference (affects CMS122, CMS125, CMS130)
-4. **CMS165** — get refreshed bundle from MADiE with updated library versions
-5. **CMS71** — get refreshed bundle from MADiE with correct per-patient Claim resources
-6. **CMS1017** — once issue #100 (HAPI HTTP 400) is resolved, re-add to golden tests after verifying VS conflicts are gone
-7. **CMS1218** — once MADiE ships bundle with required ValueSets, re-add to golden tests
+1. **File HAPI upstream issue** (when ready) — hapifhir/hapi-fhir for the DE criteria evaluation divergence (frailty, dementia, mastectomy date boundary). When filed, update `_HAPI_DE_XFAIL` comment in `test_connectathon_measures.py` with the issue number.
+2. **CMS122/124/125/130** — obtain QI-Core 6 dQM v1.0.000 bundles from MADiE (issue #115)
+3. **CMS165** — get refreshed bundle from MADiE with updated library versions
+4. **CMS71** — get refreshed bundle from MADiE with correct per-patient Claim resources
+5. **CMS1017** — once issue #100 (HAPI HTTP 400) is resolved, re-add to golden tests after verifying VS conflicts are gone
+6. **CMS1218** — once MADiE ships bundle with required ValueSets, re-add to golden tests
+7. **Remove xfail marks** — when HAPI ships a fix for the DE divergence, run `--runxfail` to confirm xpassed, then remove from `_HAPI_DE_XFAIL`
