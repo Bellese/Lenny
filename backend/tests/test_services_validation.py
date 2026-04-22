@@ -6,7 +6,6 @@ import pytest
 from sqlalchemy import func, select
 
 from app.models.validation import ExpectedResult, ValidationResult, ValidationRun, ValidationStatus
-
 from app.services.validation import (
     _classify_bundle_entries,
     _extract_patient_name,
@@ -659,7 +658,9 @@ class TestTriageTestBundle:
 
         rows = (
             await test_session.execute(
-                select(ExpectedResult).where(ExpectedResult.source_bundle == "test.json").order_by(ExpectedResult.patient_ref)
+                select(ExpectedResult)
+                .where(ExpectedResult.source_bundle == "test.json")
+                .order_by(ExpectedResult.patient_ref)
             )
         ).scalars().all()
 
@@ -893,7 +894,10 @@ class TestRunValidation:
                 ):
                     with patch("app.services.validation.BatchQueryStrategy", return_value=strategy):
                         with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
-                            with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_wipe:
+                            with patch(
+                                "app.services.validation.wipe_patient_data",
+                                new_callable=AsyncMock,
+                            ) as mock_wipe:
                                 with patch(
                                     "app.services.validation.evaluate_measure",
                                     new_callable=AsyncMock,
