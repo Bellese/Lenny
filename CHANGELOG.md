@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.6.4] - 2026-04-21
+
+### Fixed
+- **ValueSet compose patch now applies on production bundle upload** (`triage_test_bundle`), not only in test fixtures. MADiE bundles with ValueSets that have sub-ValueSet compose references or bare CodeSystem includes (no explicit codes) are now rewritten to use direct code lists from `expansion.contains` before being POSTed to the HAPI measure engine — preventing all-zero CQL evaluation results. (#99)
+
 ## [0.0.6.3] - 2026-04-21
 
 ### Added
