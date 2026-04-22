@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.6.7] - 2026-04-22
+
+### Fixed
+- **Validation runs no longer fail for EXM FHIR4 measures** — `_resolve_measure_id` now handles relative FHIR references (`Measure/{id}`) in addition to canonical URLs. EXM test bundles store `MeasureReport.measure` as a relative reference, which previously couldn't be resolved because HAPI was queried via `?url=` (which only matches canonical URLs). Fixes #108.
+
 ## [0.0.6.6] - 2026-04-22
 
 ### Fixed
