@@ -85,6 +85,63 @@ async def _run_schema_migrations(conn) -> None:
         ]:
             await conn.execute(text(stmt))
 
+        # Normalize legacy CDR rows before adding unique indexes. Production may
+        # already contain duplicate names or multiple active/default rows created
+        # before these constraints existed.
+        await conn.execute(
+            text("""
+            WITH ranked AS (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        ORDER BY is_active DESC, is_default DESC, id ASC
+                    ) AS rn
+                FROM cdr_configs
+                WHERE cdr_url = 'http://hapi-fhir-cdr:8080/fhir'
+                  AND (name IS NULL OR btrim(name) = '')
+            )
+            UPDATE cdr_configs AS c
+            SET
+                name = CASE
+                    WHEN ranked.rn = 1 THEN 'Local CDR'
+                    ELSE 'Local CDR (migrated ' || c.id::text || ')'
+                END,
+                is_default = CASE
+                    WHEN ranked.rn = 1 THEN TRUE
+                    ELSE FALSE
+                END
+            FROM ranked
+            WHERE c.id = ranked.id
+            """)
+        )
+        await conn.execute(
+            text("""
+            UPDATE cdr_configs
+            SET name = 'CDR Connection ' || id::text
+            WHERE name IS NULL OR btrim(name) = ''
+            """)
+        )
+        await conn.execute(
+            text("""
+            WITH ranked AS (
+                SELECT
+                    id,
+                    name,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY name
+                        ORDER BY is_default DESC, is_active DESC, id ASC
+                    ) AS rn
+                FROM cdr_configs
+                WHERE name IS NOT NULL
+            )
+            UPDATE cdr_configs AS c
+            SET name = left(c.name, 480) || ' (' || c.id::text || ')'
+            FROM ranked
+            WHERE c.id = ranked.id
+              AND ranked.rn > 1
+            """)
+        )
+
         # Unique constraint on name (required for ON CONFLICT (name) seed upsert)
         await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_cdr_configs_name ON cdr_configs (name)"))
 
@@ -107,6 +164,26 @@ async def _run_schema_migrations(conn) -> None:
                 END IF;
             END
             $$;
+            """)
+        )
+
+        # Keep only one active row before enforcing the partial unique index.
+        await conn.execute(
+            text("""
+            WITH ranked AS (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        ORDER BY is_default DESC, id ASC
+                    ) AS rn
+                FROM cdr_configs
+                WHERE is_active = TRUE
+            )
+            UPDATE cdr_configs AS c
+            SET is_active = FALSE
+            FROM ranked
+            WHERE c.id = ranked.id
+              AND ranked.rn > 1
             """)
         )
 
