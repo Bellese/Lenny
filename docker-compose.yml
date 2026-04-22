@@ -50,7 +50,7 @@ services:
     user: root
     ports: ["8081:8080"]
     volumes: ["cdrdata:/data/hapi"]
-    mem_limit: 1500m
+    mem_limit: 2g
     environment:
       # QI-Core STU6 IG packages
       - hapi.fhir.implementationguides.qicore.name=hl7.fhir.us.qicore
@@ -74,7 +74,7 @@ services:
     user: root
     ports: ["8080:8080"]
     volumes: ["measuredata:/data/hapi"]
-    mem_limit: 2g
+    mem_limit: 3g
     environment:
       # QI-Core STU6 IG packages
       - hapi.fhir.implementationguides.qicore.name=hl7.fhir.us.qicore
