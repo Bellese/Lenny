@@ -9,14 +9,18 @@ class ApiError extends Error {
   }
 }
 
-async function request(path, options = {}) {
+async function request(path, { _timeout = 20000, ...options } = {}) {
   const url = `${BASE_URL}${path}`;
+  const controller = new AbortController();
+  const timerId = setTimeout(() => controller.abort(), _timeout);
+
   const config = {
     headers: {
       'Content-Type': 'application/json',
       ...options.headers,
     },
     ...options,
+    signal: controller.signal,
   };
 
   // Don't set Content-Type for FormData (let browser set multipart boundary)
@@ -24,7 +28,17 @@ async function request(path, options = {}) {
     delete config.headers['Content-Type'];
   }
 
-  const response = await fetch(url, config);
+  let response;
+  try {
+    response = await fetch(url, config);
+  } catch (err) {
+    clearTimeout(timerId);
+    if (err.name === 'AbortError') {
+      throw new ApiError(`Request timed out after ${_timeout}ms`, 0, null);
+    }
+    throw err;
+  }
+  clearTimeout(timerId);
 
   if (!response.ok) {
     let body = null;
@@ -61,7 +75,7 @@ async function request(path, options = {}) {
 
 // Health
 export function getHealth() {
-  return request('/health');
+  return request('/health', { _timeout: 5000 });
 }
 
 // Measures

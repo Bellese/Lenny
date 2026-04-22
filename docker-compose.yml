@@ -50,6 +50,7 @@ services:
     user: root
     ports: ["8081:8080"]
     volumes: ["cdrdata:/data/hapi"]
+    mem_limit: 1500m
     environment:
       # QI-Core STU6 IG packages
       - hapi.fhir.implementationguides.qicore.name=hl7.fhir.us.qicore
@@ -66,12 +67,14 @@ services:
       - hapi.fhir.enforce_referential_integrity_on_write=false
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
+      - JAVA_TOOL_OPTIONS=-Xmx1g -Xms256m
 
   hapi-fhir-measure:
     image: hapiproject/hapi:v8.8.0-1
     user: root
     ports: ["8080:8080"]
     volumes: ["measuredata:/data/hapi"]
+    mem_limit: 2g
     environment:
       # QI-Core STU6 IG packages
       - hapi.fhir.implementationguides.qicore.name=hl7.fhir.us.qicore
@@ -93,6 +96,7 @@ services:
       - spring.jpa.properties.hibernate.search.backend.analysis.configurer=ca.uhn.fhir.jpa.search.HapiHSearchAnalysisConfigurers$$HapiLuceneAnalysisConfigurer
       - spring.jpa.properties.hibernate.search.backend.directory.root=/data/hapi/lucene
       - spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
+      - JAVA_TOOL_OPTIONS=-Xmx1500m -Xms256m
 
   seed:
     build: ./seed
