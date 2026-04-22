@@ -2,10 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.0.7.0] - 2026-04-22
+## [0.0.6.5] - 2026-04-22
 
 ### Changed
 - **Measures page UI improvements**: measure display names no longer show the trailing "FHIR" suffix for cleaner presentation, and a new "Measure ID" column displays the measure identifier (e.g., "CMS122") for easier identification and reference.
+
+### Security
+- **Upload endpoint hardening** — two unauthenticated upload endpoints now protected against abuse:
+  - `POST /measures/upload`: 100 MB size cap (413 OperationOutcome); 10 req/min per-IP rate limit (429 OperationOutcome)
+  - `POST /validation/upload-bundle`: same size cap and rate limit; filename sanitization strips null bytes, control characters, and path-traversal sequences; filenames truncated to 255 chars with extension preserved
+  - `Caddyfile`: `request_body { max_size 100MB }` on the API vhost for belt-and-suspenders OOM prevention; `header_up X-Forwarded-For {remote_host}` prevents clients from spoofing the rate-limit key
+  - `backend/app/limiter.py`: shared slowapi `Limiter` with `X-Forwarded-For`-aware key function (Caddy proxy architecture)
+  - `backend/app/config.py`: `MAX_UPLOAD_SIZE` constant shared across both endpoints
 
 ## [0.0.6.3] - 2026-04-21
 
