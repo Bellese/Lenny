@@ -340,9 +340,7 @@ def _fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict
                         _flatten_contains(ce["contains"])
 
             _flatten_contains(r["expansion"].get("contains", []))
-            r["compose"] = {
-                "include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]
-            }
+            r["compose"] = {"include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]}
         result.append(r)
     return result
 

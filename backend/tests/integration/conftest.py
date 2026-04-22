@@ -54,7 +54,6 @@ _VALUESET_EXPANSION_POLL_INTERVAL = 10  # seconds between probe checks
 _VALUESET_EXPANSION_TIMEOUT = 600  # seconds before giving up (background task can be slow)
 
 
-
 def _wait_for_valueset_expansion(base_url: str, large_valueset_ids: list[str]) -> None:
     """Block until HAPI has background-pre-expanded all specified large ValueSets.
 
