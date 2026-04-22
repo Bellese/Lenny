@@ -39,7 +39,7 @@ async def health_check(
 
     # Measure engine check
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.get(f"{settings.MEASURE_ENGINE_URL}/metadata")
             if resp.status_code == 200:
                 status["measure_engine"] = {"status": "connected"}
@@ -55,7 +55,7 @@ async def health_check(
 
     # CDR check
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.get(f"{cdr.cdr_url}/metadata")
             if resp.status_code == 200:
                 status["cdr"] = {"status": "connected", "name": cdr.name, "is_read_only": cdr.is_read_only}

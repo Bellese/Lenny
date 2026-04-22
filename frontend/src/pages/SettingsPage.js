@@ -64,7 +64,8 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    Promise.all([loadConnections(), loadHealth()]).finally(() => setLoading(false));
+    loadConnections().finally(() => setLoading(false));
+    loadHealth();
   }, [loadConnections, loadHealth]);
 
   const handleOpenAdd = () => {

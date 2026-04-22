@@ -464,6 +464,9 @@ async def wipe_patient_data() -> None:
     Called at the START of a new job to clean up data from the prior run.
     This allows the previous job's evaluated resources to remain available
     for inspection until a new job begins.
+
+    Fails fast if the measure engine is unreachable: after 3 consecutive
+    timeouts we raise immediately rather than grinding for 20+ minutes.
     """
     resource_types = [
         "MeasureReport",
@@ -491,7 +494,9 @@ async def wipe_patient_data() -> None:
         "Practitioner",
         "Organization",
     ]
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    _MAX_CONSECUTIVE_FAILURES = 3
+    consecutive_failures = 0
+    async with httpx.AsyncClient(timeout=10.0) as client:
         for rt in resource_types:
             try:
                 # Use conditional delete: DELETE ResourceType?_lastUpdated=gt1900-01-01
@@ -502,11 +507,18 @@ async def wipe_patient_data() -> None:
                 else:
                     # Fall back to individual delete via search-and-delete
                     await _delete_all_of_type(client, rt)
+                consecutive_failures = 0
             except httpx.HTTPError:
+                consecutive_failures += 1
                 logger.warning(
                     "Failed to wipe resource type (may not exist)",
                     extra={"resourceType": rt},
                 )
+                if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    raise RuntimeError(
+                        f"Measure engine unreachable: {consecutive_failures} consecutive "
+                        "timeouts during wipe. Job aborted."
+                    )
 
 
 async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str) -> None:
