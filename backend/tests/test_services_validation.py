@@ -9,6 +9,7 @@ from app.services.validation import (
     _extract_patient_name,
     _extract_population_counts,
     _extract_test_case_info,
+    _fix_valueset_compose_for_hapi,
     _is_test_case_measure_report,
     _resolve_measure_id,
     _warn_unknown_bundle_types,
@@ -853,3 +854,113 @@ class TestResolveMeasureId:
             result = await _resolve_measure_id("http://example.com/Measure/CMS124")
 
         assert result is None
+
+
+# ---------------------------------------------------------------------------
+# _fix_valueset_compose_for_hapi
+# ---------------------------------------------------------------------------
+
+_EXPANSION_CONTAINS = [
+    {"system": "http://snomed.info/sct", "code": "123456", "display": "Frailty"},
+    {"system": "http://snomed.info/sct", "code": "789012"},
+    {"system": "http://loinc.org", "code": "LA99-0", "display": "Mild frailty"},
+]
+
+
+class TestFixValueSetComposeForHapi:
+    def _vs(self, **kwargs):
+        base = {"resourceType": "ValueSet", "id": "test-vs", "url": "http://example.com/vs"}
+        base.update(kwargs)
+        return base
+
+    def test_non_valueset_passed_through(self):
+        patient = {"resourceType": "Patient", "id": "p1"}
+        result = _fix_valueset_compose_for_hapi([patient])
+        assert result == [patient]
+
+    def test_valueset_without_expansion_passed_through(self):
+        vs = self._vs(compose={"include": [{"system": "http://snomed.info/sct", "concept": [{"code": "1"}]}]})
+        result = _fix_valueset_compose_for_hapi([vs])
+        assert result == [vs]
+
+    def test_no_compose_synthesised_from_expansion(self):
+        vs = self._vs(expansion={"contains": _EXPANSION_CONTAINS})
+        result = _fix_valueset_compose_for_hapi([vs])
+        assert len(result) == 1
+        include = result[0]["compose"]["include"]
+        systems = {inc["system"] for inc in include}
+        assert "http://snomed.info/sct" in systems
+        assert "http://loinc.org" in systems
+        snomed = next(i for i in include if i["system"] == "http://snomed.info/sct")
+        assert len(snomed["concept"]) == 2
+        assert {"code": "123456", "display": "Frailty"} in snomed["concept"]
+        assert {"code": "789012"} in snomed["concept"]
+
+    def test_compose_with_valueset_refs_synthesised(self):
+        vs = self._vs(
+            compose={"include": [{"valueSet": ["http://other.com/vs"]}]},
+            expansion={"contains": _EXPANSION_CONTAINS},
+        )
+        result = _fix_valueset_compose_for_hapi([vs])
+        assert "include" in result[0]["compose"]
+        for inc in result[0]["compose"]["include"]:
+            assert "valueSet" not in inc
+
+    def test_bare_codesystem_includes_synthesised(self):
+        vs = self._vs(
+            compose={"include": [{"system": "http://snomed.info/sct"}]},
+            expansion={"contains": [{"system": "http://snomed.info/sct", "code": "42"}]},
+        )
+        result = _fix_valueset_compose_for_hapi([vs])
+        include = result[0]["compose"]["include"]
+        assert include[0]["concept"] == [{"code": "42"}]
+
+    def test_compose_with_real_concepts_not_touched(self):
+        vs = self._vs(
+            compose={"include": [{"system": "http://snomed.info/sct", "concept": [{"code": "1"}, {"code": "2"}]}]},
+            expansion={"contains": _EXPANSION_CONTAINS},
+        )
+        result = _fix_valueset_compose_for_hapi([vs])
+        assert result[0]["compose"]["include"][0]["concept"] == [{"code": "1"}, {"code": "2"}]
+
+    def test_compose_with_filter_not_touched(self):
+        vs = self._vs(
+            compose={
+                "include": [
+                    {
+                        "system": "http://snomed.info/sct",
+                        "filter": [{"property": "concept", "op": "is-a", "value": "404684003"}],
+                    }
+                ]
+            },
+            expansion={"contains": _EXPANSION_CONTAINS},
+        )
+        result = _fix_valueset_compose_for_hapi([vs])
+        assert "filter" in result[0]["compose"]["include"][0]
+
+    def test_nested_expansion_contains_flattened(self):
+        nested = [
+            {
+                "system": "http://snomed.info/sct",
+                "code": "1",
+                "contains": [{"system": "http://snomed.info/sct", "code": "2"}],
+            }
+        ]
+        vs = self._vs(expansion={"contains": nested})
+        result = _fix_valueset_compose_for_hapi([vs])
+        concepts = result[0]["compose"]["include"][0]["concept"]
+        codes = [c["code"] for c in concepts]
+        assert "1" in codes
+        assert "2" in codes
+
+    def test_empty_expansion_contains_not_synthesised(self):
+        vs = self._vs(expansion={"contains": []})
+        result = _fix_valueset_compose_for_hapi([vs])
+        assert "compose" not in result[0]
+
+    def test_original_not_mutated(self):
+        vs = self._vs(expansion={"contains": _EXPANSION_CONTAINS})
+        original_id = id(vs)
+        result = _fix_valueset_compose_for_hapi([vs])
+        assert id(result[0]) != original_id
+        assert "compose" not in vs
