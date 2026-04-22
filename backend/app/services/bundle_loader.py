@@ -19,7 +19,9 @@ from app.services.validation import triage_test_bundle
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_DIR = pathlib.Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles"
+import os
+
+_DEFAULT_DIR = pathlib.Path(os.getenv("CONNECTATHON_BUNDLES_DIR", str(pathlib.Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles")))
 _HAPI_READY_RETRIES = 20
 _HAPI_RETRY_DELAY = 5.0
 

@@ -24,6 +24,7 @@ services:
       - DATABASE_URL=postgresql+asyncpg://mct2:mct2@db:5432/mct2
       - MEASURE_ENGINE_URL=http://hapi-fhir-measure:8080/fhir
       - DEFAULT_CDR_URL=http://hapi-fhir-cdr:8080/fhir
+      - CONNECTATHON_BUNDLES_DIR=/seed/connectathon-bundles
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
       interval: 10s
@@ -47,6 +48,7 @@ services:
   hapi-fhir-cdr:
     image: hapiproject/hapi:v8.8.0-1
     user: root
+    ports: ["8081:8080"]
     volumes: ["cdrdata:/data/hapi"]
     environment:
       # QI-Core STU6 IG packages
@@ -68,6 +70,7 @@ services:
   hapi-fhir-measure:
     image: hapiproject/hapi:v8.8.0-1
     user: root
+    ports: ["8080:8080"]
     volumes: ["measuredata:/data/hapi"]
     environment:
       # QI-Core STU6 IG packages

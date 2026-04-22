@@ -97,8 +97,18 @@ async def _run_schema_migrations(conn) -> None:
         ]:
             await conn.execute(text(stmt))
 
-        # Add warning_message to bundle_uploads
-        await conn.execute(text("ALTER TABLE bundle_uploads ADD COLUMN IF NOT EXISTS warning_message TEXT"))
+        # Add warning_message to bundle_uploads if the table exists
+        await conn.execute(
+            text("""
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'bundle_uploads') THEN
+                    ALTER TABLE bundle_uploads ADD COLUMN IF NOT EXISTS warning_message TEXT;
+                END IF;
+            END
+            $$;
+            """)
+        )
 
         # Enforce at most one active CDR row (partial unique index — Postgres only)
         await conn.execute(
