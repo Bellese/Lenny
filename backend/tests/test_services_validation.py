@@ -657,12 +657,16 @@ class TestTriageTestBundle:
             await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         rows = (
-            await test_session.execute(
-                select(ExpectedResult)
-                .where(ExpectedResult.source_bundle == "test.json")
-                .order_by(ExpectedResult.patient_ref)
+            (
+                await test_session.execute(
+                    select(ExpectedResult)
+                    .where(ExpectedResult.source_bundle == "test.json")
+                    .order_by(ExpectedResult.patient_ref)
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         assert len(rows) == 1
         assert rows[0].measure_url == "https://example.com/Measure/CMS124"
@@ -873,9 +877,7 @@ class TestRunValidation:
         await test_session.refresh(run)
 
         strategy = MagicMock()
-        strategy.gather_patient_data = AsyncMock(
-            return_value=[{"resourceType": "Patient", "id": "patient-1"}]
-        )
+        strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "patient-1"}])
 
         def make_ctx():
             return self._make_session_ctx(test_session)
@@ -920,12 +922,16 @@ class TestRunValidation:
 
         await test_session.refresh(run)
         rows = (
-            await test_session.execute(
-                select(ValidationResult).where(ValidationResult.validation_run_id == run.id).order_by(
-                    ValidationResult.patient_ref
+            (
+                await test_session.execute(
+                    select(ValidationResult)
+                    .where(ValidationResult.validation_run_id == run.id)
+                    .order_by(ValidationResult.patient_ref)
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         assert run.status == ValidationStatus.complete
         assert run.measures_tested == 2

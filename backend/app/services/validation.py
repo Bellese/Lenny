@@ -389,10 +389,7 @@ async def triage_test_bundle(
         existing_result = await session.execute(
             select(ExpectedResult).where(tuple_(ExpectedResult.measure_url, ExpectedResult.patient_ref).in_(key_tuples))
         )
-        existing_by_key = {
-            (er.measure_url, er.patient_ref): er
-            for er in existing_result.scalars().all()
-        }
+        existing_by_key = {(er.measure_url, er.patient_ref): er for er in existing_result.scalars().all()}
 
     for tc in test_cases:
         key = (tc["measure_url"], tc["patient_ref"])
