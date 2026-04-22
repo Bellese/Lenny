@@ -2,9 +2,13 @@
 
 ## Problem
 
-Validation runs fail immediately with "Measure not found on engine" when the HAPI measure engine loses its data (e.g., due to container restart or data loss), while expected results persist in PostgreSQL.
+Validation runs can fail for two distinct reasons:
 
-**Root cause:** Expected results exist in the database, but the corresponding Measure resources have been lost from HAPI.
+1. **Measure not found on engine** — the HAPI measure engine loses its data (e.g., container restart), while expected results persist in PostgreSQL. Root cause: Measure resources have been lost from HAPI.
+
+2. **EXM FHIR4 validation runs always fail** — EXM test bundles store `MeasureReport.measure` as a relative reference (`Measure/{id}`) rather than a canonical URL. The resolver previously only searched HAPI via `?url=`, which only matches canonical URLs, so EXM measures could never be resolved. Fix: `_resolve_measure_id()` now detects relative references and fetches them by direct `GET /Measure/{id}` instead. (v0.0.6.7, #108)
+
+The three recovery strategies below address the first problem. The second problem is fixed in code and requires no manual action.
 
 ## Solution: Three-Pronged Fix
 
