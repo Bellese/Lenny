@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import time
 import warnings
 from typing import Any
 
@@ -164,6 +165,92 @@ else:
             marks=pytest.mark.skip(reason="No connectathon test-case bundles found"),
         )
     ]
+
+
+# ---------------------------------------------------------------------------
+# Measure engine readiness wait — poll $evaluate-measure until populations
+# are non-zero for a known-positive patient in each target bundle
+# ---------------------------------------------------------------------------
+
+_EVAL_PROBE_POLL_INTERVAL = 5  # seconds
+_EVAL_PROBE_TIMEOUT = 600  # seconds before giving up
+
+
+def _wait_for_measure_engine_ready(
+    base_url: str,
+    probes: list[tuple[str, str, str, str]],
+) -> None:
+    """Block until $evaluate-measure returns non-zero populations for all probes.
+
+    Uses one known IP=1 patient per measure bundle as a readiness signal for
+    the full evaluation pipeline (ValueSet expansion + CQL evaluation).
+
+    Polling $expand on a probe ValueSet is unreliable: probe VSes from non-target
+    bundles often rely on CodeSystems (TJC, CDC OIDs) that HAPI cannot expand
+    locally, causing the wait to time out even when target measures are ready.
+    Polling $evaluate-measure directly tests what the tests actually require.
+
+    ``probes`` is a list of ``(canonical_url, patient_ref, period_start, period_end)``
+    tuples — one per bundle with test cases.
+
+    Warns (does not fail) on timeout so tests can run and surface real errors.
+    """
+    if not probes:
+        return
+
+    # Resolve canonical URLs → HAPI measure resource IDs
+    resolved: list[tuple[str, str, str, str]] = []  # (hapi_id, patient_ref, period_start, period_end)
+    for canonical_url, patient_ref, period_start, period_end in probes:
+        try:
+            search = httpx.get(
+                f"{base_url}/Measure",
+                params={"url": canonical_url, "_count": "1"},
+                timeout=15,
+            )
+            entries = search.json().get("entry", []) if search.status_code == 200 else []
+            hapi_id = entries[0].get("resource", {}).get("id") if entries else None
+        except Exception:
+            hapi_id = None
+        if hapi_id:
+            resolved.append((hapi_id, patient_ref, period_start, period_end))
+
+    if not resolved:
+        warnings.warn(f"$evaluate-measure readiness probe: no canonical URLs resolved on {base_url}")
+        return
+
+    pending = list(resolved)
+    deadline = time.monotonic() + _EVAL_PROBE_TIMEOUT
+
+    while pending and time.monotonic() < deadline:
+        still_pending = []
+        for hapi_id, patient_ref, period_start, period_end in pending:
+            try:
+                resp = httpx.get(
+                    f"{base_url}/Measure/{hapi_id}/$evaluate-measure",
+                    params={
+                        "subject": f"Patient/{patient_ref}",
+                        "periodStart": period_start,
+                        "periodEnd": period_end,
+                    },
+                    timeout=60,
+                )
+                if resp.status_code == 200:
+                    report = resp.json()
+                    if report.get("resourceType") == "MeasureReport":
+                        if sum(_extract_population_counts(report).values()) > 0:
+                            continue  # probe ready
+            except Exception:
+                pass
+            still_pending.append((hapi_id, patient_ref, period_start, period_end))
+        pending = still_pending
+        if pending:
+            time.sleep(_EVAL_PROBE_POLL_INTERVAL)
+
+    if pending:
+        warnings.warn(
+            f"$evaluate-measure readiness probe timed out after {_EVAL_PROBE_TIMEOUT}s "
+            f"for {len(pending)} measure(s) on {base_url}"
+        )
 
 
 # ---------------------------------------------------------------------------

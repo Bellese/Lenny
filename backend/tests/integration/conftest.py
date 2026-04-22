@@ -92,8 +92,6 @@ def _wait_for_valueset_expansion(base_url: str, large_valueset_ids: list[str]) -
             time.sleep(_VALUESET_EXPANSION_POLL_INTERVAL)
 
     if pending:
-        import warnings as _warnings
-
         _warnings.warn(
             f"HAPI at {base_url} ValueSet pre-expansion did not complete within "
             f"{_VALUESET_EXPANSION_TIMEOUT}s for {len(pending)} ValueSet(s): {sorted(pending)[:5]}. "

@@ -5,6 +5,7 @@ running validation against expected results, and comparing population counts.
 """
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -284,6 +285,66 @@ def _warn_unknown_bundle_types(bundle_json: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Patch ValueSets so HAPI can expand them.
+
+    HAPI ignores the pre-computed ``expansion`` element and always re-expands
+    ValueSets via their ``compose``.  MADiE/connectathon bundles often contain
+    ValueSets with only ``expansion`` (no ``compose``), or with a ``compose``
+    that references sub-ValueSets not loaded into HAPI.  In both cases HAPI
+    produces empty expansions and CQL evaluation returns all-zero populations.
+
+    Fix: for any ValueSet that has ``expansion`` and either lacks ``compose``
+    or has a ``compose`` whose include entries carry no explicit codes, synthesise
+    a ``compose`` from the expansion codes grouped by code system.
+
+    Must be applied on first load — HAPI's Terminology service caches compose in a
+    separate DB table that is not overwritten by a later PUT.
+    """
+    result = []
+    for r in resources:
+        if r.get("resourceType") != "ValueSet" or "expansion" not in r:
+            result.append(r)
+            continue
+
+        include = r.get("compose", {}).get("include", [])
+        needs_fix = False
+        if "compose" not in r:
+            needs_fix = True
+        elif not include:
+            needs_fix = True
+        else:
+            total_concepts = sum(len(inc.get("concept", [])) for inc in include)
+            has_vs_refs = any(inc.get("valueSet") for inc in include)
+            has_filters = any(inc.get("filter") for inc in include)
+            if has_vs_refs:
+                needs_fix = True
+            elif total_concepts == 0 and not has_filters:
+                needs_fix = True  # bare CodeSystem refs with no explicit codes
+
+        if needs_fix and r.get("expansion", {}).get("contains"):
+            r = copy.deepcopy(r)
+            codes_by_system: dict[str, list[dict[str, str]]] = {}
+
+            def _flatten_contains(nodes: list[dict[str, Any]]) -> None:
+                for ce in nodes:
+                    sys = ce.get("system", "")
+                    code = ce.get("code", "")
+                    disp = ce.get("display", "")
+                    if sys and code:
+                        entry: dict[str, str] = {"code": code}
+                        if disp:
+                            entry["display"] = disp
+                        codes_by_system.setdefault(sys, []).append(entry)
+                    if ce.get("contains"):
+                        _flatten_contains(ce["contains"])
+
+            _flatten_contains(r["expansion"].get("contains", []))
+            r["compose"] = {"include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]}
+        result.append(r)
+    return result
+
+
 async def triage_test_bundle(
     bundle_json: dict[str, Any],
     filename: str,
@@ -307,7 +368,8 @@ async def triage_test_bundle(
         secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
         try:
             if secondary:
-                await push_resources(secondary)  # ValueSets/CodeSystems — HAPI-0902 is OK
+                # ValueSets/CodeSystems: patch compose before loading (HAPI-0902 is OK)
+                await push_resources(_fix_valueset_compose_for_hapi(secondary))
             if primary:
                 await push_resources(primary)  # Measure + Library always pushed
         except Exception as exc:
