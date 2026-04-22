@@ -71,7 +71,12 @@ jobs:
         run: pip install -r requirements.txt -r requirements-test.txt
 
       - name: Run integration tests
-        run: ./scripts/run-integration-tests.sh --ignore=tests/integration/test_connectathon_measures.py --ignore=tests/integration/test_full_workflow.py --durations=25
+        run: >-
+          ./scripts/run-integration-tests.sh
+          --ignore=tests/integration/test_golden_measures.py
+          --ignore=tests/integration/test_connectathon_measures.py
+          --ignore=tests/integration/test_full_workflow.py
+          --durations=25
 
   frontend-build:
     name: Frontend Build

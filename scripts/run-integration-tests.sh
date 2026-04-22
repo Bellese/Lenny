@@ -4,6 +4,7 @@
 #
 # Usage:
 #   ./scripts/run-integration-tests.sh
+#   ./scripts/run-integration-tests.sh tests/integration/test_full_workflow.py
 #
 # This script:
 #   1. Starts docker-compose.test.yml in background
@@ -11,6 +12,12 @@
 #   3. Runs pytest -m integration
 #   4. Stops and removes test containers
 #   5. Exits with pytest's exit code
+#
+# Invocation modes:
+#   - No explicit test targets: run the default integration suite.
+#   - Explicit file/dir/nodeid targets: run only those targets.
+# This keeps option-only CI invocations (for example --ignore=...) on the
+# default suite while allowing nightly jobs to target isolated test files.
 
 set -euo pipefail
 
@@ -59,6 +66,18 @@ cleanup() {
 }
 
 trap cleanup EXIT
+
+has_explicit_pytest_target() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            *::*|*.py|tests/*|./tests/*|backend/tests/*)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
 
 echo "==> Pulling HAPI FHIR image (avoids compose startup timeout on cold pull)..."
 docker pull hapiproject/hapi:v8.8.0-1
@@ -130,7 +149,13 @@ _phase_done "PostgreSQL ready"
 echo "==> Running integration tests..."
 cd "$PROJECT_ROOT/backend"
 pytest_exit=0
-python3 -m pytest tests/integration/ -m integration -v --tb=short "$@" || pytest_exit=$?
+pytest_args=(-m integration -v --tb=short)
+if has_explicit_pytest_target "$@"; then
+    pytest_args+=("$@")
+else
+    pytest_args+=(tests/integration/ "$@")
+fi
+python3 -m pytest "${pytest_args[@]}" || pytest_exit=$?
 
 echo ""
 if [ "$pytest_exit" -eq 0 ]; then
