@@ -958,8 +958,6 @@ class TestResolveMeasureId:
 
     async def test_resolve_measure_id_retries_on_empty_bundle(self):
         """Verify that _resolve_measure_id retries when HAPI returns an empty bundle (lag/cache)."""
-        import asyncio
-
         # First two calls return empty bundle
         empty_bundle = {"resourceType": "Bundle", "entry": []}
         # Third call returns the measure
@@ -998,8 +996,6 @@ class TestResolveMeasureId:
 
     async def test_resolve_measure_id_retries_on_exception(self):
         """Verify that _resolve_measure_id retries when HAPI request fails."""
-        import asyncio
-
         mock_resp_success = MagicMock()
         mock_resp_success.raise_for_status = MagicMock()
         mock_resp_success.json.return_value = {
