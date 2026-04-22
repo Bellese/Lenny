@@ -26,12 +26,12 @@ from app.services.validation import (
     compare_populations,
 )
 from tests.integration._helpers import make_put_bundle
+from app.services.validation import _fix_valueset_compose_for_hapi
 from tests.integration.conftest import (
     _REINDEX_POLL_INTERVAL,
     _REINDEX_TIMEOUT,
     TEST_CDR_URL,
     TEST_MEASURE_URL,
-    _fix_valueset_compose_for_hapi,
 )
 
 pytestmark = pytest.mark.integration

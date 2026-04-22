@@ -5,6 +5,7 @@ running validation against expected results, and comparing population counts.
 """
 
 import asyncio
+import copy
 import json
 import logging
 import re
@@ -284,6 +285,65 @@ def _warn_unknown_bundle_types(bundle_json: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Patch ValueSets so HAPI v8.6.0 can expand them without missing sub-ValueSets.
+
+    HAPI v8.6.0 ignores the pre-computed ``expansion`` element and always re-expands
+    ValueSets via their ``compose``.  Three patterns break expansion:
+
+    - Case 1: ``compose`` references sub-ValueSets not present in HAPI.
+    - Case 2: ``compose`` references an entire CodeSystem with no explicit concepts/filters;
+      HAPI tries to enumerate the full CodeSystem (e.g. nahdo.org/sopt) and fails if it
+      isn't loaded.
+    - Case 3: ``compose.include`` is empty — MADiE connectathon bundles ship ValueSets with
+      ``expansion.contains`` pre-populated but ``compose.include = []``.  HAPI re-expands
+      from compose (empty) and gets 0 codes, so all CQL retrieves that depend on these
+      ValueSets silently evaluate to empty.
+
+    Fix: for any ValueSet with a non-empty ``expansion.contains``, extract those
+    codes and inject them as direct ``compose.include`` entries grouped by code system.
+
+    Must be applied on first load — HAPI's Terminology service caches compose in a
+    separate DB table that is not overwritten by a later PUT.
+    """
+    result = []
+    for r in resources:
+        if r.get("resourceType") == "ValueSet" and "expansion" in r and "compose" in r:
+            includes = r.get("compose", {}).get("include", [])
+            # Case 1: compose references sub-ValueSets not present in HAPI
+            has_vs_refs = any(inc.get("valueSet") for inc in includes)
+            # Case 2: compose references an entire CodeSystem with no explicit concepts/filters
+            has_bare_system_refs = any(
+                inc.get("system") and not inc.get("concept") and not inc.get("filter")
+                for inc in includes
+            )
+            # Case 3: compose.include is empty — connectathon bundles use pre-computed expansion only
+            has_empty_compose = not includes
+            if (has_vs_refs or has_bare_system_refs or has_empty_compose) and r.get("expansion", {}).get("contains"):
+                r = copy.deepcopy(r)
+                codes_by_system: dict[str, list[dict[str, str]]] = {}
+
+                def _flatten_contains(nodes: list[dict[str, Any]]) -> None:
+                    for ce in nodes:
+                        sys = ce.get("system", "")
+                        code = ce.get("code", "")
+                        disp = ce.get("display", "")
+                        if sys and code:
+                            entry: dict[str, str] = {"code": code}
+                            if disp:
+                                entry["display"] = disp
+                            codes_by_system.setdefault(sys, []).append(entry)
+                        if ce.get("contains"):
+                            _flatten_contains(ce["contains"])
+
+                _flatten_contains(r["expansion"].get("contains", []))
+                r["compose"] = {
+                    "include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]
+                }
+        result.append(r)
+    return result
+
+
 async def triage_test_bundle(
     bundle_json: dict[str, Any],
     filename: str,
@@ -306,7 +366,7 @@ async def triage_test_bundle(
         primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
         secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
         if secondary:
-            await push_resources(secondary)  # ValueSets/CodeSystems — HAPI-0902 is OK
+            await push_resources(_fix_valueset_compose_for_hapi(secondary))  # ValueSets/CodeSystems — HAPI-0902 is OK
         if primary:
             await push_resources(primary)  # Measure + Library always pushed
 

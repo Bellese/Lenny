@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import time
 import warnings
 from typing import Any
 
@@ -34,10 +35,11 @@ import pytest
 from app.services.validation import (
     _classify_bundle_entries,
     _extract_population_counts,
+    _fix_valueset_compose_for_hapi,
     compare_populations,
 )
 from tests.integration._helpers import fail_with_context, make_put_bundle
-from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL
+from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL, _trigger_reindex_and_wait
 
 pytestmark = pytest.mark.integration
 
@@ -144,6 +146,92 @@ else:
 
 
 # ---------------------------------------------------------------------------
+# Measure engine readiness wait — poll $evaluate-measure until populations
+# are non-zero for a known-positive patient in each target bundle
+# ---------------------------------------------------------------------------
+
+_EVAL_PROBE_POLL_INTERVAL = 5  # seconds
+_EVAL_PROBE_TIMEOUT = 600  # seconds before giving up
+
+
+def _wait_for_measure_engine_ready(
+    base_url: str,
+    probes: list[tuple[str, str, str, str]],
+) -> None:
+    """Block until $evaluate-measure returns non-zero populations for all probes.
+
+    Uses one known IP=1 patient per measure bundle as a readiness signal for
+    the full evaluation pipeline (ValueSet expansion + CQL evaluation).
+
+    Polling $expand on a probe ValueSet is unreliable: probe VSes from non-target
+    bundles often rely on CodeSystems (TJC, CDC OIDs) that HAPI cannot expand
+    locally, causing the wait to time out even when target measures are ready.
+    Polling $evaluate-measure directly tests what the tests actually require.
+
+    ``probes`` is a list of ``(canonical_url, patient_ref, period_start, period_end)``
+    tuples — one per bundle with test cases.
+
+    Warns (does not fail) on timeout so tests can run and surface real errors.
+    """
+    if not probes:
+        return
+
+    # Resolve canonical URLs → HAPI measure resource IDs
+    resolved: list[tuple[str, str, str, str]] = []  # (hapi_id, patient_ref, period_start, period_end)
+    for canonical_url, patient_ref, period_start, period_end in probes:
+        try:
+            search = httpx.get(
+                f"{base_url}/Measure",
+                params={"url": canonical_url, "_count": "1"},
+                timeout=15,
+            )
+            entries = search.json().get("entry", []) if search.status_code == 200 else []
+            hapi_id = entries[0].get("resource", {}).get("id") if entries else None
+        except Exception:
+            hapi_id = None
+        if hapi_id:
+            resolved.append((hapi_id, patient_ref, period_start, period_end))
+
+    if not resolved:
+        warnings.warn(f"$evaluate-measure readiness probe: no canonical URLs resolved on {base_url}")
+        return
+
+    pending = list(resolved)
+    deadline = time.monotonic() + _EVAL_PROBE_TIMEOUT
+
+    while pending and time.monotonic() < deadline:
+        still_pending = []
+        for hapi_id, patient_ref, period_start, period_end in pending:
+            try:
+                resp = httpx.get(
+                    f"{base_url}/Measure/{hapi_id}/$evaluate-measure",
+                    params={
+                        "subject": f"Patient/{patient_ref}",
+                        "periodStart": period_start,
+                        "periodEnd": period_end,
+                    },
+                    timeout=60,
+                )
+                if resp.status_code == 200:
+                    report = resp.json()
+                    if report.get("resourceType") == "MeasureReport":
+                        if sum(_extract_population_counts(report).values()) > 0:
+                            continue  # probe ready
+            except Exception:
+                pass
+            still_pending.append((hapi_id, patient_ref, period_start, period_end))
+        pending = still_pending
+        if pending:
+            time.sleep(_EVAL_PROBE_POLL_INTERVAL)
+
+    if pending:
+        warnings.warn(
+            f"$evaluate-measure readiness probe timed out after {_EVAL_PROBE_TIMEOUT}s "
+            f"for {len(pending)} measure(s) on {base_url}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Module-scope fixture: load bundles into HAPI once per test session
 # ---------------------------------------------------------------------------
 
@@ -152,17 +240,22 @@ else:
 def _load_connectathon_bundles_to_hapi(_require_infrastructure):
     """Load all connectathon bundles into the test HAPI instances.
 
-    Measure definitions → measure engine (TEST_MEASURE_URL).
-    Clinical data      → CDR (TEST_CDR_URL).
+    Measure definitions (with compose-patched ValueSets) → measure engine.
+    Clinical data → both CDR and measure engine so $evaluate-measure can
+    resolve patient resources without a separate CDR federation step.
 
     Skips gracefully if a bundle file is missing.  Re-runs are idempotent
     (PUT-based transactions).
     """
     headers = {"Content-Type": "application/fhir+json"}
 
+    probe_patient_id: str | None = None
+    eval_probes: list[tuple[str, str, str, str]] = []  # (canonical_url, patient_ref, period_start, period_end)
+
     for entry in _load_manifest():
         bundle_file: str = entry["bundle_file"]
         measure_id: str = entry["id"]
+        canonical_url: str = entry.get("canonical_url", "")
         bundle_path = _BUNDLE_DIR / bundle_file
 
         if not bundle_path.exists():
@@ -175,23 +268,71 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
         measure_defs, clinical, _test_cases = _classify_bundle_entries(bundle)
 
         if measure_defs:
-            tx = make_put_bundle(measure_defs)
-            resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
-            if resp.status_code == 422 and "HAPI-0902" in resp.text:
-                warnings.warn(f"[{measure_id}] measure defs already loaded (HAPI-0902)")
-            else:
-                try:
-                    resp.raise_for_status()
-                except httpx.HTTPStatusError as exc:
-                    pytest.fail(f"[{measure_id}] Failed to load measure defs: {exc}\n{resp.text[:300]}")
+            # Split so ValueSets (patched) go first; HAPI-0902 on re-upload is OK.
+            secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
+            primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
+            if secondary:
+                patched = _fix_valueset_compose_for_hapi(secondary)
+                tx = make_put_bundle(patched)
+                resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
+                if not (resp.status_code == 422 and "HAPI-0902" in resp.text):
+                    try:
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        pytest.fail(f"[{measure_id}] Failed to load ValueSets: {exc}\n{resp.text[:300]}")
+            if primary:
+                tx = make_put_bundle(primary)
+                resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
+                if resp.status_code == 422 and "HAPI-0902" in resp.text:
+                    warnings.warn(f"[{measure_id}] measure defs already loaded (HAPI-0902)")
+                else:
+                    try:
+                        resp.raise_for_status()
+                    except httpx.HTTPStatusError as exc:
+                        pytest.fail(f"[{measure_id}] Failed to load measure defs: {exc}\n{resp.text[:300]}")
 
         if clinical:
             tx = make_put_bundle(clinical)
+            # CDR — primary patient record store
             resp = httpx.post(TEST_CDR_URL, json=tx, headers=headers, timeout=120)
             try:
                 resp.raise_for_status()
             except httpx.HTTPStatusError as exc:
-                pytest.fail(f"[{measure_id}] Failed to load clinical data: {exc}\n{resp.text[:300]}")
+                pytest.fail(f"[{measure_id}] Failed to load clinical data to CDR: {exc}\n{resp.text[:300]}")
+            # MCS — $evaluate-measure requires patient resources on the measure server
+            resp = httpx.post(TEST_MEASURE_URL, json=tx, headers=headers, timeout=120)
+            try:
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                pytest.fail(f"[{measure_id}] Failed to load clinical data to MCS: {exc}\n{resp.text[:300]}")
+            # Track a probe patient for post-load reindex wait
+            if probe_patient_id is None:
+                for r in clinical:
+                    if r.get("resourceType") == "Patient":
+                        probe_patient_id = r.get("id")
+                        break
+
+        # Collect one $evaluate-measure readiness probe per bundle (first IP=1 test case).
+        if canonical_url and _test_cases:
+            for tc in _test_cases:
+                if tc.get("expected_populations", {}).get("initial-population", 0) >= 1:
+                    eval_probes.append(
+                        (canonical_url, tc["patient_ref"], tc["period_start"], tc["period_end"])
+                    )
+                    break
+
+    # Wait for HAPI to finish indexing reference-type search params so that
+    # Encounter?patient=… (used internally by $evaluate-measure) returns results.
+    if probe_patient_id:
+        _trigger_reindex_and_wait(TEST_MEASURE_URL, probe_patient_id, "")
+
+    # Wait for the measure engine to be fully ready: HAPI v8.6.0 expands ValueSets
+    # asynchronously in a background thread pool.  $evaluate-measure returns
+    # all-zero populations when called before expansion completes.  We probe using
+    # a known-positive patient from each bundle rather than polling $expand, which
+    # can time out when probe VSes rely on CodeSystems HAPI does not have locally.
+    if eval_probes:
+        _wait_for_measure_engine_ready(TEST_MEASURE_URL, eval_probes)
 
 
 # ---------------------------------------------------------------------------
