@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.6.7] - 2026-04-22
+
+### Removed
+- **Obsolete EXM FHIR4 measure bundles** — removed 9 old bundles (EXM104, EXM105, EXM108, EXM124, EXM125, EXM130, EXM165, EXM506, EXM529) that were being auto-loaded on backend startup, causing duplicate measures in production. Kept older CMS placeholder versions (v0.3-v0.5) pending QI-Core 6 dQM v1.0.000 bundles from MADiE (issue #115).
+
 ## [0.0.6.6] - 2026-04-22
 
 ### Fixed
