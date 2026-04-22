@@ -441,6 +441,35 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
                 f"CMS122 probe patient IP=0. Tests may fail due to incomplete VS expansion."
             )
 
+    # Extend the eval gate to CMS122 (numerator path), CMS125, and CMS130.
+    # HAPI's DB pre-expansion runs per-VS independently — the single-patient CMS122
+    # gate above only proves the denominator-exclusion VS path is ready.  A numerator
+    # patient (5433549b) exercises different ValueSets; CMS125/CMS130 need yet more.
+    # Without these probes, slower machines see IP=0 across 40–80 tests.
+    _wait_for_measure_engine_ready(
+        TEST_MEASURE_URL,
+        [
+            (
+                "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "5433549b-9ad5-4a8f-acc4-ce0f1b411712",
+                "2026-01-01",
+                "2026-12-31",
+            ),
+            (
+                "https://madie.cms.gov/Measure/CMS125FHIRBreastCancerScreening",
+                "4fa225f9-836c-4304-95a2-5b9d6d4ff9c7",
+                "2026-01-01",
+                "2026-12-31",
+            ),
+            (
+                "https://madie.cms.gov/Measure/CMS130FHIRColorectalCancerScreening",
+                "e9d86ff6-da48-43c9-9e16-dd95d8bc49c3",
+                "2026-01-01",
+                "2026-12-31",
+            ),
+        ],
+    )
+
 
 # ---------------------------------------------------------------------------
 # Measure ID resolution (cached per canonical URL to avoid repeated HAPI calls)
@@ -473,6 +502,42 @@ def _resolve_measure_hapi_id(canonical_url: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Known HAPI CQL divergences — expected failures until HAPI fixes upstream
+#
+# These patients land in numerator when MADiE expects denominator-exclusion.
+# Root cause: HAPI v8.8.0 evaluates AIFrailLTCF exclusion criteria (frailty
+# encounter/diagnosis/symptom/device/observation, dementia, mastectomy timing)
+# differently from the MADiE CQL reference engine.
+# Tracking issue: hapifhir/hapi-fhir (file and update with issue number)
+# ---------------------------------------------------------------------------
+
+_HAPI_DE_XFAIL: frozenset[tuple[str, str]] = frozenset(
+    {
+        # CMS122 — AIFrailLTCF frailty criteria divergence (×6)
+        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "9cba6cfa-9671-4850-803d-e286c7d59ee7"),  # Frailty encounter
+        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "ede0ee7a-18ab-4ba7-934c-23618f1270ea"),  # Frailty device req
+        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "3b62b0a8-44f2-4365-bcb9-7cadef5bab2e"),  # Frailty symptom
+        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "e61be907-af68-493f-a6bc-3d93ef8b6c6e"),  # Frailty diagnosis
+        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "cade5021-b1bf-43e9-a0a4-659c05b386d0"),  # Frailty device used
+        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "f5771b74-a7de-439a-a51f-49a3863e086b"),  # Frailty diagnosis
+        # CMS125 — AIFrailLTCF + mastectomy period-end boundary (×10)
+        ("CMS125FHIRBreastCancerScreening", "4cf81a94-81fb-4be2-b075-7d8f9ff02a6e"),  # Bilateral mastectomy 12/31
+        ("CMS125FHIRBreastCancerScreening", "d4540640-2561-4ebd-b7c6-15878a4dc582"),  # Frailty device req
+        ("CMS125FHIRBreastCancerScreening", "857fec09-9c8c-4e4b-a123-85f473b8fc2a"),  # 2× unilateral mastectomy 12/31
+        ("CMS125FHIRBreastCancerScreening", "14b87edd-7f1e-4f6a-9910-f905966ec904"),  # Frailty diagnosis
+        ("CMS125FHIRBreastCancerScreening", "5e3f01ad-1eda-4cb7-8d37-1146beae59e9"),  # Frailty diagnosis
+        ("CMS125FHIRBreastCancerScreening", "8278ae07-69ec-469c-ae01-e933d051f764"),  # Frailty observation
+        ("CMS125FHIRBreastCancerScreening", "f38ce16a-658f-4aa0-b4a6-fac61d2e58a8"),  # Frailty symptom
+        ("CMS125FHIRBreastCancerScreening", "da85601e-ce6f-4351-b639-1e58c725bf2f"),  # Frailty encounter
+        ("CMS125FHIRBreastCancerScreening", "0ced1e0c-9c92-4582-a4b1-e44f130e436f"),  # Dementia medications
+        ("CMS125FHIRBreastCancerScreening", "24557438-17c9-405c-88dc-0c0bfda17d27"),  # Frailty device req
+        # CMS130 — dementia condition divergence (×1)
+        ("CMS130FHIRColorectalCancerScreening", "f9ef1fd1-cced-47ad-a47b-d9c20254511c"),  # Dementia during MP
+    }
+)
+
+
+# ---------------------------------------------------------------------------
 # Per-test-case evaluation
 # ---------------------------------------------------------------------------
 
@@ -495,6 +560,12 @@ def test_connectathon_measure_per_patient(
     Each parametrized invocation is one patient/measure combination from the
     MADiE connectathon bundles.
     """
+    if (measure_id, patient_ref) in _HAPI_DE_XFAIL:
+        pytest.xfail(
+            "HAPI v8.8.0 denominator-exclusion divergence from MADiE CQL reference — "
+            "see docs/connectathon-measures-status.md Class A for full breakdown"
+        )
+
     strict = os.environ.get("STRICT_STU6", "1") == "1" and measure_strict
 
     # --- Resolve measure to HAPI resource ID ---
