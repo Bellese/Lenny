@@ -920,7 +920,9 @@ class TestResolveMeasureId:
         import httpx
 
         mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock()))
+        mock_resp.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock())
+        )
 
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=mock_resp)
@@ -939,7 +941,9 @@ class TestResolveMeasureId:
 
         mock_resp = MagicMock()
         mock_resp.status_code = 500
-        mock_resp.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock()))
+        mock_resp.raise_for_status = MagicMock(
+            side_effect=httpx.HTTPStatusError("500", request=MagicMock(), response=MagicMock())
+        )
 
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=mock_resp)
