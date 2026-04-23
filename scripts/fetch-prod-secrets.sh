@@ -107,8 +107,8 @@ if [[ -n "${LEONARD_SSM_VERSION:-}" ]]; then
         --name "${SSM_PATH_PREFIX}POSTGRES_PASSWORD" \
         --version "$LEONARD_SSM_VERSION" \
         --with-decryption \
-        --output json 2>/dev/null) \
-        || die 1 "SSM get-parameter failed for POSTGRES_PASSWORD at version ${LEONARD_SSM_VERSION}."
+        --output json 2>&1) \
+        || die 1 "SSM get-parameter failed for POSTGRES_PASSWORD at version ${LEONARD_SSM_VERSION}: $response"
 
     value=$(printf '%s' "$response" | jq -r '.Parameter.Value // empty')
     if [[ -z "$value" ]]; then
@@ -122,26 +122,17 @@ else
     fetched=0
 
     while true; do
-        if [[ -n "$next_token" ]]; then
-            response=$(aws ssm get-parameters-by-path \
-                --region "$SSM_REGION" \
-                --path "$SSM_PATH_PREFIX" \
-                --with-decryption \
-                --recursive \
-                --max-results 10 \
-                --starting-token "$next_token" \
-                --output json 2>/dev/null) \
-                || die 1 "SSM get-parameters-by-path failed (paginating)."
-        else
-            response=$(aws ssm get-parameters-by-path \
-                --region "$SSM_REGION" \
-                --path "$SSM_PATH_PREFIX" \
-                --with-decryption \
-                --recursive \
-                --max-results 10 \
-                --output json 2>/dev/null) \
-                || die 1 "SSM get-parameters-by-path failed."
-        fi
+        aws_args=(
+            ssm get-parameters-by-path
+            --region "$SSM_REGION"
+            --path "$SSM_PATH_PREFIX"
+            --with-decryption
+            --recursive
+            --max-results 10
+            --output json
+        )
+        [[ -n "$next_token" ]] && aws_args+=(--next-token "$next_token")
+        response=$(aws "${aws_args[@]}" 2>&1) || die 1 "SSM get-parameters-by-path failed: $response"
 
         # Parse each parameter into the associative array.
         while IFS=$'\t' read -r full_name value; do
