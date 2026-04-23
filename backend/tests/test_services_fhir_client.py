@@ -348,6 +348,31 @@ async def test_wipe_patient_data_includes_qi_core_types():
         assert expected_type in wiped_types, f"{expected_type} missing from wipe list"
 
 
+async def test_wipe_patient_data_strict_raises_after_consecutive_failures():
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(side_effect=httpx.TimeoutException("slow delete"))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(RuntimeError, match="Measure engine unreachable"):
+            await wipe_patient_data()
+
+    assert mock_ctx.delete.call_count == 3
+
+
+async def test_wipe_patient_data_non_strict_stops_after_consecutive_failures():
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(side_effect=httpx.TimeoutException("slow delete"))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await wipe_patient_data(strict=False)
+
+    assert mock_ctx.delete.call_count == 3
+
+
 # ---------------------------------------------------------------------------
 # test_connection
 # ---------------------------------------------------------------------------
