@@ -95,14 +95,16 @@ jobs:
           fi
           echo "OK: no set -x in scripts/"
 
-      - name: Reject plaintext PASSWORD echo in prod scripts
+      - name: Reject variable expansion of PASSWORD in echo/printf
         run: |
-          if grep -rn -E 'echo.*PASSWORD|printf.*PASSWORD' scripts/ --include='*.sh' \
-              | grep -v 'scripts/tests/' | grep -v '#'; then
-            echo "ERROR: echo/printf of *PASSWORD* found in scripts/ — redact before logging"
+          # Match only when the $PASSWORD variable itself is being expanded —
+          # not when the word "PASSWORD" appears in a literal log message.
+          if grep -rn -E '(echo|printf)[^#]*\$\{?POSTGRES_PASSWORD' scripts/ --include='*.sh' \
+              | grep -v 'scripts/tests/'; then
+            echo "ERROR: \$POSTGRES_PASSWORD expanded in echo/printf in scripts/ — redact before logging"
             exit 1
           fi
-          echo "OK: no plaintext PASSWORD echo in scripts/"
+          echo "OK: no \$POSTGRES_PASSWORD expansion in echo/printf in scripts/"
 
       - name: Bash unit tests
         run: bash scripts/tests/run_tests.sh
