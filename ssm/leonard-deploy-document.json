@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "2.2",
+  "description": "Leonard prod deploy — runs /opt/leonard/scripts/deploy-prod.sh",
+  "mainSteps": [
+    {
+      "action": "aws:runShellScript",
+      "name": "deploy",
+      "inputs": {
+        "runCommand": [
+          "cd /opt/leonard",
+          "git fetch origin",
+          "git reset --hard origin/main",
+          "scripts/deploy-prod.sh"
+        ],
+        "timeoutSeconds": "900"
+      }
+    }
+  ]
+}
