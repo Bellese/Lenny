@@ -77,6 +77,12 @@ fi
 if [[ ! -x "$FETCH_SCRIPT" ]]; then
     die 1 "fetch-prod-secrets.sh is not executable at '${FETCH_SCRIPT}'"
 fi
+if [[ ! -f "$RECONCILE_SCRIPT" ]]; then
+    die 1 "reconcile-db-password.sh not found at '${RECONCILE_SCRIPT}'"
+fi
+if [[ ! -x "$RECONCILE_SCRIPT" ]]; then
+    die 1 "reconcile-db-password.sh is not executable at '${RECONCILE_SCRIPT}'"
+fi
 
 # ── step 2: fetch secrets ─────────────────────────────────────────────────────
 # env -i ensures any POSTGRES_PASSWORD in the caller's environment cannot
@@ -134,6 +140,9 @@ for i in $(seq 1 12); do
         if [[ "$health" == "healthy" ]]; then
             printf '[+] db is healthy\n'
             break
+        fi
+        if [[ "$health" == "unhealthy" ]]; then
+            die 1 "db container became unhealthy — check: docker compose logs db"
         fi
     fi
     if [[ "$i" -eq 12 ]]; then
