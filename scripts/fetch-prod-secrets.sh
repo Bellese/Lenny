@@ -22,31 +22,29 @@
 # ──────────────────────────────────────────────────────────────────────────────
 # SMOKE TEST (local, no real AWS):
 #
-#   # 1. Create a fake `aws` shim that returns mock SSM JSON
-#   aws() {
-#     cat <<'JSON'
-#   {
-#     "Parameters": [
-#       {
-#         "Name": "/leonard/prod/POSTGRES_PASSWORD",
-#         "Value": "ChangeMe1234567890abcdef1234567"
-#       }
-#     ],
-#     "NextToken": null
-#   }
+#   # 1. Create a fake `aws` shim on PATH (sudo strips exported bash functions,
+#   #    so a PATH shim is the only reliable approach under sudo).
+#   mkdir -p /tmp/leonard-bin
+#   cat > /tmp/leonard-bin/aws <<'SHIM'
+#   #!/usr/bin/env bash
+#   cat <<'JSON'
+#   {"Parameters":[{"Name":"/leonard/prod/POSTGRES_PASSWORD","Value":"ChangeMe1234567890abcdef12345"}],"NextToken":null}
 #   JSON
-#   }
-#   export -f aws
+#   SHIM
+#   chmod +x /tmp/leonard-bin/aws
 #
-#   # 2. Run against a writable temp dir as a non-root user
-#   LEONARD_ENV_DIR=/tmp/leonard-test sudo -E \
+#   # 2. Run against a writable temp dir, overriding PATH to pick up the shim.
+#   sudo env PATH="/tmp/leonard-bin:$PATH" LEONARD_ENV_DIR=/tmp/leonard-test \
 #     bash ./scripts/fetch-prod-secrets.sh
 #
-#   cat /tmp/leonard-test/env   # should show POSTGRES_PASSWORD=ChangeMe...
-#   rm -rf /tmp/leonard-test
+#   sudo cat /tmp/leonard-test/env   # should show POSTGRES_PASSWORD=ChangeMe...
+#   sudo rm -rf /tmp/leonard-test /tmp/leonard-bin
 # ──────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
+
+# ── dependencies ───────────────────────────────────────────────────────────────
+command -v jq >/dev/null 2>&1 || { printf '[!] jq is required but not installed.\n' >&2; exit 1; }
 
 # ── constants ──────────────────────────────────────────────────────────────────
 readonly SSM_REGION="us-east-1"
