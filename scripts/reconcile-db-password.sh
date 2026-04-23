@@ -60,20 +60,20 @@ if [[ -z "$PW" ]]; then
     die 1 "POSTGRES_PASSWORD is empty in '${ENV_FILE}'."
 fi
 
-# ── run ALTER ROLE via parameterized psql ─────────────────────────────────────
-# :'newpw' uses psql's variable interpolation with proper literal quoting —
-# immune to SQL injection regardless of what $PW contains.
+# ── run ALTER ROLE via psql stdin ─────────────────────────────────────────────
+# Pipe the SQL via stdin to avoid psql variable-interpolation issues with
+# `docker compose exec -c`. The password is safe for direct SQL string
+# substitution: fetch-prod-secrets.sh validates it against
+# ^[A-Za-z0-9+/=_.-]{16,128}$ so it can never contain single quotes.
 # PGPASSWORD is scoped to the subprocess only (via `exec -e`).
-if ! out=$(docker compose \
+if ! out=$(printf "ALTER ROLE mct2 PASSWORD '%s';" "$PW" | docker compose \
     -f "$COMPOSE_BASE" \
     -f "$COMPOSE_PROD" \
     exec -T \
     -e PGPASSWORD="$PW" \
     db \
     psql -U mct2 -d mct2 \
-    -v ON_ERROR_STOP=1 \
-    -v newpw="$PW" \
-    -c "ALTER ROLE mct2 PASSWORD :'newpw'" 2>&1); then
+    -v ON_ERROR_STOP=1 2>&1); then
     # Redact the password from any captured output before printing.
     safe_out="${out//$PW/***REDACTED***}"
     printf '[!] reconcile-db-password: ALTER ROLE via psql failed\n' >&2
