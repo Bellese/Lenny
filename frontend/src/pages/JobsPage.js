@@ -182,10 +182,13 @@ export default function JobsPage() {
     return job.measure_id || '--';
   };
 
+  const getProcessedPatients = (job) => job.processed_patients ?? job.patients_processed ?? 0;
+
   const getProgress = (job) => {
     if (job.progress !== undefined && job.progress !== null) return job.progress;
-    if (job.patients_processed && job.total_patients) {
-      return Math.round((job.patients_processed / job.total_patients) * 100);
+    const processedPatients = getProcessedPatients(job);
+    if (processedPatients && job.total_patients) {
+      return Math.round((processedPatients / job.total_patients) * 100);
     }
     return 0;
   };
@@ -261,6 +264,7 @@ export default function JobsPage() {
                 jobs.map((job) => {
                   const running = isRunning(job.status);
                   const progress = getProgress(job);
+                  const processedPatients = getProcessedPatients(job);
                   const completed = (job.status || '').toLowerCase() === 'completed' || (job.status || '').toLowerCase() === 'complete';
                   const deleting = job.delete_requested || deletingJobIds.includes(job.id);
 
@@ -282,8 +286,8 @@ export default function JobsPage() {
                           <div className={styles.progressInfo}>
                             <ProgressBar value={progress} max={100} size="sm" />
                             <div className={styles.progressMeta}>
-                              {job.patients_processed !== undefined && job.total_patients !== undefined && (
-                                <span>{job.patients_processed.toLocaleString()} / {job.total_patients.toLocaleString()} patients</span>
+                              {job.total_patients != null && (
+                                <span>{processedPatients.toLocaleString()} / {job.total_patients.toLocaleString()} patients</span>
                               )}
                               {job.batches_completed !== undefined && job.total_batches !== undefined && (
                                 <span>{job.batches_completed}/{job.total_batches} batches</span>
