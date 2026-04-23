@@ -6,6 +6,21 @@ from typing import Any
 
 import pytest
 
+from app.services.validation import (
+    _fix_duplicate_claim_ids as fix_duplicate_claim_ids,
+)
+from app.services.validation import (
+    _fix_library_deps_for_hapi as fix_library_deps_for_hapi,
+)
+
+__all__ = [
+    "fail_with_context",
+    "fix_duplicate_claim_ids",
+    "fix_library_deps_for_hapi",
+    "fix_valueset_compose_for_hapi",
+    "make_put_bundle",
+]
+
 
 def fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Patch ValueSets so HAPI can expand them.
@@ -60,100 +75,6 @@ def fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict[
 
             _flatten_contains(r["expansion"].get("contains", []))
             r["compose"] = {"include": [{"system": sys, "concept": codes} for sys, codes in codes_by_system.items()]}
-        result.append(r)
-    return result
-
-
-def fix_library_deps_for_hapi(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Patch Library relatedArtifact dependency URLs to match actual Library URLs.
-
-    MADiE bundles (≥ v0.4.x) ship Libraries whose canonical ``url`` is
-    ``https://madie.cms.gov/Library/{name}`` but whose ``relatedArtifact.depends-on``
-    entries reference ``http://ecqi.healthit.gov/ecqms/Library/{name}|{version}``.
-
-    HAPI resolves Library dependencies by canonical URL lookup, so this mismatch
-    causes every sub-library (FHIRHelpers, QICoreCommon, etc.) to be silently
-    unresolvable — the CQL evaluation proceeds but with a broken library chain,
-    returning IP=0 for every patient.
-
-    Fix: rewrite any ``relatedArtifact.resource`` that starts with the ecqi
-    prefix to use the ``madie.cms.gov`` prefix, which matches the Library ``url``
-    field that was actually loaded into HAPI.
-    """
-    _ECQI_PREFIX = "http://ecqi.healthit.gov/ecqms/Library/"
-    _MADIE_PREFIX = "https://madie.cms.gov/Library/"
-
-    result = []
-    for r in resources:
-        if r.get("resourceType") != "Library":
-            result.append(r)
-            continue
-
-        needs_fix = any(
-            ra.get("type") == "depends-on" and ra.get("resource", "").startswith(_ECQI_PREFIX)
-            for ra in r.get("relatedArtifact", [])
-        )
-        if not needs_fix:
-            result.append(r)
-            continue
-
-        r = copy.deepcopy(r)
-        for ra in r.get("relatedArtifact", []):
-            dep_url = ra.get("resource", "")
-            if ra.get("type") == "depends-on" and dep_url.startswith(_ECQI_PREFIX):
-                tail = dep_url[len(_ECQI_PREFIX) :]  # e.g. "FHIRHelpers|4.4.000"
-                ra["resource"] = _MADIE_PREFIX + tail
-        result.append(r)
-    return result
-
-
-def fix_duplicate_claim_ids(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Assign unique IDs to Claim resources that share a duplicate ID.
-
-    MADiE v0.3.x CMS71 bundles export all Claim resources with the same ID.
-    When loaded via PUT batch, only the last write survives — every other patient
-    loses their Claim, so ``hasPrincipalDiagnosisOf()`` (QICore v6 fluent function
-    that looks up principal diagnosis via Claim.diagnosis) returns null for 82 of
-    83 patients and every patient evaluates to IP=0.
-
-    Fix: detect Claims with a duplicate ID and replace the ID with a deterministic
-    slug derived from the first encounter reference in the Claim's items.  Falls
-    back to a sequential counter if no encounter reference is present.
-    """
-    from collections import Counter
-
-    id_counts = Counter(r.get("id", "") for r in resources if r.get("resourceType") == "Claim")
-    duplicates = {id_ for id_, n in id_counts.items() if n > 1}
-    if not duplicates:
-        return resources
-
-    result = []
-    seen: dict[str, int] = {}
-    for r in resources:
-        if r.get("resourceType") != "Claim" or r.get("id") not in duplicates:
-            result.append(r)
-            continue
-
-        r = copy.deepcopy(r)
-        original_id = r["id"]
-        # Derive a unique ID from the first item → encounter reference
-        enc_ref = ""
-        for item in r.get("item", []):
-            for enc in item.get("encounter", []):
-                ref = enc.get("reference", "")
-                if ref:
-                    enc_ref = ref.split("/")[-1][:16]
-                    break
-            if enc_ref:
-                break
-
-        if enc_ref:
-            new_id = f"claim-{enc_ref}"
-        else:
-            seen[original_id] = seen.get(original_id, 0) + 1
-            new_id = f"{original_id}-{seen[original_id]}"
-
-        r["id"] = new_id
         result.append(r)
     return result
 

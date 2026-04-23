@@ -7,6 +7,7 @@ running validation against expected results, and comparing population counts.
 import asyncio
 import base64
 import copy
+import hashlib
 import json
 import logging
 import re
@@ -33,6 +34,8 @@ from app.services.fhir_client import (
     _build_auth_headers,
     evaluate_measure,
     push_resources,
+    trigger_reindex_and_wait,
+    wait_for_valueset_expansion,
     wipe_patient_data,
 )
 
@@ -358,6 +361,70 @@ def _fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict
     return result
 
 
+def _fix_library_deps_for_hapi(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Patch MADiE Library dependency URLs so HAPI can resolve sub-libraries."""
+    ecqi_prefix = "http://ecqi.healthit.gov/ecqms/Library/"
+    madie_prefix = "https://madie.cms.gov/Library/"
+
+    result = []
+    for resource in resources:
+        if resource.get("resourceType") != "Library":
+            result.append(resource)
+            continue
+
+        needs_fix = any(
+            artifact.get("type") == "depends-on" and artifact.get("resource", "").startswith(ecqi_prefix)
+            for artifact in resource.get("relatedArtifact", [])
+        )
+        if not needs_fix:
+            result.append(resource)
+            continue
+
+        resource = copy.deepcopy(resource)
+        for artifact in resource.get("relatedArtifact", []):
+            dep_url = artifact.get("resource", "")
+            if artifact.get("type") == "depends-on" and dep_url.startswith(ecqi_prefix):
+                artifact["resource"] = madie_prefix + dep_url[len(ecqi_prefix) :]
+        result.append(resource)
+    return result
+
+
+def _fix_duplicate_claim_ids(resources: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assign unique IDs to duplicate Claim resources from affected MADiE bundles."""
+    id_counts: dict[str, int] = {}
+    for resource in resources:
+        if resource.get("resourceType") == "Claim" and resource.get("id"):
+            id_counts[resource["id"]] = id_counts.get(resource["id"], 0) + 1
+    duplicates = {id_ for id_, count in id_counts.items() if count > 1}
+    if not duplicates:
+        return resources
+
+    result = []
+    seen: dict[str, int] = {}
+    for resource in resources:
+        if resource.get("resourceType") != "Claim" or resource.get("id") not in duplicates:
+            result.append(resource)
+            continue
+
+        resource = copy.deepcopy(resource)
+        original_id = resource["id"]
+        enc_ref = ""
+        for item in resource.get("item", []):
+            for encounter in item.get("encounter", []):
+                ref = encounter.get("reference", "")
+                if ref:
+                    enc_ref = ref.split("/")[-1][:16]
+                    break
+            if enc_ref:
+                break
+
+        seen[original_id] = seen.get(original_id, 0) + 1
+        suffix = enc_ref or str(seen[original_id])
+        resource["id"] = f"{original_id}-{suffix}"
+        result.append(resource)
+    return result
+
+
 def _get_missing_valueset_stubs(bundle_json: dict[str, Any]) -> list[dict[str, Any]]:
     """Return empty ValueSet stubs for ELM-declared ValueSets omitted by the bundle.
 
@@ -410,6 +477,76 @@ def _get_missing_valueset_stubs(bundle_json: dict[str, Any]) -> list[dict[str, A
     return stubs
 
 
+def _get_codesystem_stubs_from_valuesets(
+    resources: list[dict[str, Any]], bundle_json: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Create CodeSystem fragments for explicit ValueSet concepts when MADiE omits them."""
+    existing_codesystems = {
+        (resource.get("url"), resource.get("version"))
+        for resource in resources
+        if resource.get("resourceType") == "CodeSystem" and resource.get("url")
+    }
+    concepts_by_system: dict[str, dict[str, str]] = {}
+    versions_by_system: dict[str, set[str | None]] = {}
+
+    def add_concept(system: str | None, code: str | None, display: str | None = None) -> None:
+        if not system or not code:
+            return
+        concepts_by_system.setdefault(system, {})
+        concepts_by_system[system].setdefault(code, display or "")
+
+    def scan_contains(nodes: list[dict[str, Any]]) -> None:
+        for node in nodes:
+            add_concept(node.get("system"), node.get("code"), node.get("display"))
+            if node.get("contains"):
+                scan_contains(node["contains"])
+
+    def scan_versions(value: Any) -> None:
+        if isinstance(value, dict):
+            system = value.get("system")
+            if system:
+                versions_by_system.setdefault(system, set()).add(value.get("version"))
+            for child in value.values():
+                scan_versions(child)
+        elif isinstance(value, list):
+            for child in value:
+                scan_versions(child)
+
+    scan_versions(bundle_json)
+
+    for resource in resources:
+        if resource.get("resourceType") != "ValueSet":
+            continue
+        for include in resource.get("compose", {}).get("include", []):
+            system = include.get("system")
+            for concept in include.get("concept", []):
+                add_concept(system, concept.get("code"), concept.get("display"))
+        scan_contains(resource.get("expansion", {}).get("contains", []))
+
+    stubs = []
+    for system, concepts in sorted(concepts_by_system.items()):
+        versions = versions_by_system.get(system) or {None}
+        for version in sorted(versions, key=lambda value: value or ""):
+            if (system, version) in existing_codesystems:
+                continue
+            digest = hashlib.sha1(f"{system}|{version or ''}".encode("utf-8")).hexdigest()[:16]
+            stub = {
+                "resourceType": "CodeSystem",
+                "id": f"generated-codesystem-{digest}",
+                "url": system,
+                "status": "active",
+                "content": "complete",
+                "concept": [
+                    {"code": code, **({"display": display} if display else {})}
+                    for code, display in sorted(concepts.items())
+                ],
+            }
+            if version:
+                stub["version"] = version
+            stubs.append(stub)
+    return stubs
+
+
 async def _find_existing_valueset_id(
     url: str,
     client: httpx.AsyncClient,
@@ -429,18 +566,53 @@ async def _find_existing_valueset_id(
     return entries[0].get("resource", {}).get("id")
 
 
+async def _find_existing_codesystem_id(
+    url: str,
+    version: str | None,
+    client: httpx.AsyncClient,
+) -> str | None:
+    """Return the existing HAPI CodeSystem resource ID for a canonical URL/version."""
+    params: dict[str, str | int] = {"url": url, "_count": 50, "_elements": "id,url,version"}
+    if version:
+        params["version"] = version
+    resp = await client.get(
+        f"{settings.MEASURE_ENGINE_URL}/CodeSystem",
+        params=params,
+        headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json"},
+    )
+    resp.raise_for_status()
+    entries = resp.json().get("entry", [])
+    for entry in entries:
+        resource = entry.get("resource", {})
+        resource_version = resource.get("version")
+        if (version and resource_version == version) or (not version and not resource_version):
+            return resource.get("id")
+    return None
+
+
+async def _delete_existing_valueset(existing_id: str, client: httpx.AsyncClient) -> None:
+    """Delete a stale ValueSet so HAPI rebuilds terminology tables from patched compose."""
+    resp = await client.delete(f"{settings.MEASURE_ENGINE_URL}/ValueSet/{existing_id}")
+    if resp.status_code not in {200, 204, 404}:
+        resp.raise_for_status()
+
+
 async def _prepare_measure_support_resources(
     resources: list[dict[str, Any]],
     bundle_json: dict[str, Any],
 ) -> list[dict[str, Any]]:
     """Prepare ValueSets/CodeSystems for HAPI upload.
 
-    Adds missing ELM ValueSet stubs only when HAPI does not already have that
-    URL, and remaps ValueSet IDs to existing HAPI resources to avoid HAPI-0902
-    URL+version uniqueness conflicts silently dropping updates inside a batch.
+    Adds missing ELM ValueSet stubs only when HAPI does not already have that URL.
+    Existing ValueSets are handled according to VALUESET_RELOAD_MODE: delete stale
+    resources before re-upload, or remap to the existing HAPI resource ID.
     """
     prepared = _fix_valueset_compose_for_hapi(resources)
     stubs = _get_missing_valueset_stubs(bundle_json)
+    codesystem_stubs = _get_codesystem_stubs_from_valuesets(prepared, bundle_json)
+    if codesystem_stubs:
+        prepared = [*codesystem_stubs, *prepared]
+        logger.info("Prepared generated CodeSystem stubs", extra={"count": len(codesystem_stubs)})
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         if stubs:
@@ -457,17 +629,56 @@ async def _prepare_measure_support_resources(
                 logger.info("Prepared missing ValueSet stubs", extra={"count": len(filtered_stubs)})
 
         aligned = []
+        deleted_valueset_urls: set[str] = set()
         for resource in prepared:
+            if resource.get("resourceType") == "CodeSystem" and resource.get("id", "").startswith(
+                "generated-codesystem-"
+            ):
+                existing_id = await _find_existing_codesystem_id(
+                    resource["url"],
+                    resource.get("version"),
+                    client,
+                )
+                if existing_id and existing_id != resource.get("id"):
+                    continue
+                aligned.append(resource)
+                continue
+
             if resource.get("resourceType") != "ValueSet" or not resource.get("url"):
                 aligned.append(resource)
                 continue
             existing_id = await _find_existing_valueset_id(resource["url"], client)
-            if existing_id and existing_id != resource.get("id"):
-                resource = copy.deepcopy(resource)
-                resource["id"] = existing_id
+            if existing_id:
+                logger.info(
+                    "ValueSet reload",
+                    extra={
+                        "mode": settings.VALUESET_RELOAD_MODE,
+                        "valueset_id": existing_id,
+                        "valueset_url": resource["url"],
+                    },
+                )
+                if settings.VALUESET_RELOAD_MODE == "delete":
+                    if resource["url"] not in deleted_valueset_urls:
+                        await _delete_existing_valueset(existing_id, client)
+                        deleted_valueset_urls.add(resource["url"])
+                elif existing_id != resource.get("id"):
+                    resource = copy.deepcopy(resource)
+                    resource["id"] = existing_id
+            else:
+                logger.info(
+                    "ValueSet reload",
+                    extra={"mode": settings.VALUESET_RELOAD_MODE, "valueset_id": None, "valueset_url": resource["url"]},
+                )
             aligned.append(resource)
 
     return aligned
+
+
+def _valueset_urls(resources: list[dict[str, Any]]) -> list[str]:
+    """Return canonical ValueSet URLs from a resource list."""
+    return [
+        resource["url"] for resource in resources if resource.get("resourceType") == "ValueSet" and resource.get("url")
+    ]
 
 
 async def triage_test_bundle(
@@ -485,6 +696,9 @@ async def triage_test_bundle(
     """
     _warn_unknown_bundle_types(bundle_json)
     measure_defs, clinical, test_cases = _classify_bundle_entries(bundle_json)
+    measure_defs = _fix_library_deps_for_hapi(measure_defs)
+    clinical = _fix_duplicate_claim_ids(clinical)
+    support_resources: list[dict[str, Any]] = []
 
     # Push measure definitions to measure engine in two phases so shared ValueSets
     # (which trigger HAPI-0902 on re-upload) never block the Measure/Library load.
@@ -554,6 +768,24 @@ async def triage_test_bundle(
             "Clinical resources loaded to CDR",
             extra={"count": len(clinical), "cdr_url": cdr_url},
         )
+
+    if settings.HAPI_SYNC_AFTER_UPLOAD:
+        sync_started = datetime.now(timezone.utc)
+        await asyncio.to_thread(trigger_reindex_and_wait, settings.MEASURE_ENGINE_URL)
+        valueset_urls = _valueset_urls([*measure_defs, *clinical])
+        valueset_urls.extend(_valueset_urls(support_resources))
+        expanded = await asyncio.to_thread(wait_for_valueset_expansion, settings.MEASURE_ENGINE_URL, valueset_urls)
+        unique_valueset_count = len({url for url in valueset_urls if url})
+        logger.info(
+            "HAPI sync complete",
+            extra={
+                "reindex_duration_s": round((datetime.now(timezone.utc) - sync_started).total_seconds(), 3),
+                "vs_count_expanded": len(expanded),
+                "vs_count_timeout": max(unique_valueset_count - len(expanded), 0),
+            },
+        )
+    else:
+        logger.info("HAPI sync skipped (HAPI_SYNC_AFTER_UPLOAD=False)")
 
     return {
         "measures_loaded": sum(1 for r in measure_defs if r.get("resourceType") == "Measure"),

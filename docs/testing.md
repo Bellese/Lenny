@@ -89,6 +89,12 @@ The nightly `connectathon-measures.yml` workflow still runs once per night, but 
 
 ---
 
+## Troubleshooting measure IP undercount
+
+If `/jobs` reports lower initial population counts than the direct-HAPI integration harness, check `HAPI_SYNC_AFTER_UPLOAD`, `PATIENT_DATA_STRATEGY`, and `VALUESET_RELOAD_MODE` first. HAPI indexes Encounter patient references and expands large ValueSets asynchronously after bundle upload, so MCT2 waits for reindex and `$expand` readiness before jobs can run against freshly uploaded Connectathon bundles. To isolate a regression, temporarily set `HAPI_SYNC_AFTER_UPLOAD=False`, `PATIENT_DATA_STRATEGY=data_requirements`, or `VALUESET_RELOAD_MODE=remap` and restart the backend.
+
+---
+
 ## Connectathon Measure Tests (manifest-driven)
 
 `backend/tests/integration/test_connectathon_measures.py` runs one parametrized pytest case per test-case `MeasureReport` found in the connectathon bundles. The set of measures under test — and which ones trigger strict assertions — is controlled entirely by `seed/connectathon-bundles/manifest.json`.

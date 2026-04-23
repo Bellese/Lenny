@@ -1,5 +1,6 @@
 """Application configuration loaded from environment variables."""
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -16,10 +17,29 @@ class Settings(BaseSettings):
     MAX_WORKERS: int = 4
     MAX_RETRIES: int = 3
     HAPI_INDEX_WAIT_SECONDS: int = 5  # Wait after pushing patients before evaluating measures
+    PATIENT_DATA_STRATEGY: str = "batch"
+    VALUESET_RELOAD_MODE: str = "delete"
+    HAPI_SYNC_AFTER_UPLOAD: bool = True
     LOG_LEVEL: str = "INFO"
     ALLOWED_ORIGINS: str = "*"  # Comma-separated origins, or "*" for all (local dev default)
 
     model_config = {"env_prefix": "", "case_sensitive": True}
+
+    @field_validator("PATIENT_DATA_STRATEGY")
+    @classmethod
+    def validate_patient_data_strategy(cls, value: str) -> str:
+        allowed = {"batch", "data_requirements"}
+        if value not in allowed:
+            raise ValueError(f"PATIENT_DATA_STRATEGY must be one of: {', '.join(sorted(allowed))}")
+        return value
+
+    @field_validator("VALUESET_RELOAD_MODE")
+    @classmethod
+    def validate_valueset_reload_mode(cls, value: str) -> str:
+        allowed = {"delete", "remap"}
+        if value not in allowed:
+            raise ValueError(f"VALUESET_RELOAD_MODE must be one of: {', '.join(sorted(allowed))}")
+        return value
 
 
 def parse_allowed_origins(raw: str) -> list[str]:

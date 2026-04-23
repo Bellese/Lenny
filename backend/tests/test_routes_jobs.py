@@ -468,7 +468,7 @@ async def test_get_comparison_httpx_exception_returns_no_expected(client, test_s
 
 
 async def test_get_comparison_patient_not_in_expected_skipped(client, test_session):
-    """Actual patients with no matching ExpectedResult are excluded from comparison output."""
+    """Actual patients with no matching ExpectedResult are counted but excluded from comparison rows."""
     from unittest.mock import AsyncMock, patch
 
     import httpx as _httpx
@@ -534,7 +534,64 @@ async def test_get_comparison_patient_not_in_expected_skipped(client, test_sessi
     assert data["has_expected"] is True
     # Only p1 appears — p2 had no expected result and was skipped
     assert data["total"] == 1
+    assert data["actual_total"] == 2
+    assert data["unexpected_results"] == 1
     assert data["patients"][0]["subject_reference"] == "Patient/p1"
+
+
+async def test_get_comparison_reports_missing_expected_patient_results(client, test_session):
+    """Expected patients without MeasureResult rows fail comparison instead of being hidden."""
+    from unittest.mock import AsyncMock, patch
+
+    import httpx as _httpx
+
+    from app.models.job import Job, JobStatus
+    from app.models.validation import ExpectedResult
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2019-01-01",
+        period_end="2019-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    test_session.add(
+        ExpectedResult(
+            measure_url="https://example.com/Measure/CMS124",
+            patient_ref="p1",
+            expected_populations={"initial-population": 0, "denominator": 0, "numerator": 0},
+            period_start="2019-01-01",
+            period_end="2019-12-31",
+            source_bundle="test",
+        )
+    )
+    await test_session.commit()
+
+    measure_json = {"resourceType": "Measure", "id": "CMS124", "url": "https://example.com/Measure/CMS124"}
+    mock_resp = _httpx.Response(200, json=measure_json, request=_httpx.Request("GET", "http://test"))
+
+    with patch("app.routes.jobs.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_resp)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get(f"/jobs/{job.id}/comparison")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["has_expected"] is True
+    assert data["matched"] == 0
+    assert data["total"] == 1
+    assert data["expected_total"] == 1
+    assert data["actual_total"] == 0
+    assert data["missing_results"] == 1
+    assert data["patients"][0]["match"] is False
+    assert data["patients"][0]["mismatches"] == ["missing-result"]
 
 
 async def test_get_comparison_with_mismatch(client, test_session):
