@@ -60,8 +60,13 @@ sudo cp deploy/leonard-bootstrap.service /etc/systemd/system/
 sudo mkdir -p /etc/systemd/system/docker.service.d/
 sudo cp deploy/docker-override-leonard.conf /etc/systemd/system/docker.service.d/leonard.conf
 sudo systemctl daemon-reload
+# On a live host (Docker already running): restart Docker so the new dependency takes effect.
+# WARNING: this restarts all running containers.
+sudo systemctl restart docker
 sudo systemctl enable --now leonard-bootstrap
 ```
+
+The `Requires=leonard-bootstrap.service` drop-in only takes effect after Docker (re)starts — either via the explicit restart above on a live host, or automatically on the next host reboot.
 
 ## Reference Docs
 
