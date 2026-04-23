@@ -21,6 +21,7 @@ from app.services.fhir_client import (
     push_resources,
     wipe_patient_data,
 )
+from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,21 @@ def _extract_patient_name(patient_resource: dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _error_measure_report(patient_id: str, exc: Exception) -> dict[str, Any]:
+    """Build a persisted per-patient error result for failed evaluations."""
+    return {
+        "resourceType": "OperationOutcome",
+        "issue": [
+            {
+                "severity": "error",
+                "code": "processing",
+                "diagnostics": sanitize_error(exc),
+            }
+        ],
+        "subject": {"reference": f"Patient/{patient_id}"},
+    }
+
+
 async def _stop_or_delete_job(job_id: int) -> bool:
     """Return True when work should stop because the job was cancelled or deleted."""
     async with async_session() as session:
@@ -102,7 +118,7 @@ async def run_job(job_id: int) -> None:
     try:
         # Step 1: Wipe patient data from measure engine (cleanup from prior job)
         logger.info("Wiping prior patient data from measure engine", extra={"job_id": job_id})
-        await wipe_patient_data()
+        await wipe_patient_data(strict=False)
         if await _stop_or_delete_job(job_id):
             return
 
@@ -192,11 +208,15 @@ async def run_job(job_id: int) -> None:
                 return
             if job.status == JobStatus.cancelled:
                 return
-            job.status = JobStatus.complete
+            if job.total_patients and job.processed_patients == 0 and job.failed_patients > 0:
+                job.status = JobStatus.failed
+                job.error_message = f"All {job.failed_patients} patient evaluations failed"
+            else:
+                job.status = JobStatus.complete
             job.completed_at = datetime.now(timezone.utc)
             await session.commit()
 
-        logger.info("Job complete", extra={"job_id": job_id})
+        logger.info("Job finalized", extra={"job_id": job_id})
 
     except Exception as exc:
         logger.exception("Job failed", extra={"job_id": job_id})
@@ -344,13 +364,37 @@ async def _process_single_batch(
                     processed += 1
 
                 except Exception as patient_exc:
+                    patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
+                    sanitized_error = sanitize_error(patient_exc)
+                    error_report = _error_measure_report(patient_id, patient_exc)
+                    if await _stop_or_delete_job(job_id):
+                        return
+                    async with async_session() as session:
+                        result = MeasureResult(
+                            job_id=job_id,
+                            patient_id=patient_id,
+                            patient_name=patient_name,
+                            measure_report=error_report,
+                            populations={
+                                "initial_population": False,
+                                "denominator": False,
+                                "numerator": False,
+                                "denominator_exclusion": False,
+                                "numerator_exclusion": False,
+                                "error": True,
+                                "error_message": sanitized_error,
+                            },
+                        )
+                        session.add(result)
+                        await session.commit()
+
                     logger.warning(
                         "Failed to evaluate patient",
                         extra={
                             "job_id": job_id,
                             "batch_id": batch_id,
                             "patient_id": patient_id,
-                            "error": str(patient_exc),
+                            "error": sanitized_error,
                         },
                     )
                     failed += 1

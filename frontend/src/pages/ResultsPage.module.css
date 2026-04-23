@@ -53,6 +53,13 @@
   color: var(--color-text-secondary);
 }
 
+.errorSummary {
+  font-size: var(--font-size-body);
+  color: var(--color-error);
+  font-weight: var(--font-weight-semibold);
+  margin-top: var(--space-1);
+}
+
 /* Population cards */
 .cardsRow {
   display: flex;
@@ -153,6 +160,34 @@
 
 .cross {
   color: var(--color-text-tertiary);
+}
+
+.successBadge,
+.errorBadge {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  border-radius: 100px;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.successBadge {
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.errorBadge {
+  background: var(--color-error-light);
+  color: var(--color-error);
+}
+
+.errorMessage {
+  max-width: 280px;
+  color: var(--color-text-secondary);
+  font-size: var(--font-size-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .detailBtn {

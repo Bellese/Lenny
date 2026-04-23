@@ -137,6 +137,7 @@ export default function PatientDetail({ result, onClose }) {
   ];
 
   const patientName = result.patient_name || result.patient_id || 'Unknown Patient';
+  const evaluationError = result.error_message || result.populations?.error_message;
 
   return (
     <div className={styles.overlay} onClick={onClose} role="dialog" aria-label={`Patient details for ${patientName}`}>
@@ -152,9 +153,14 @@ export default function PatientDetail({ result, onClose }) {
         {/* Population membership */}
         <section className={styles.section}>
           <h3 className={styles.sectionTitle}>Population Membership</h3>
+          {evaluationError && (
+            <div className={styles.error}>
+              <p>Evaluation failed: {evaluationError}</p>
+            </div>
+          )}
           <ul className={styles.populationList}>
             {populations.map(pop => {
-              const inPop = result[pop.key];
+              const inPop = result[pop.key] ?? result.populations?.[pop.key];
               if (inPop === undefined) return null;
               return (
                 <li key={pop.key} className={styles.populationItem}>

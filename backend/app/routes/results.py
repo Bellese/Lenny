@@ -31,6 +31,7 @@ async def get_results(
         return {
             "job_id": job_id,
             "total_patients": 0,
+            "failed_patients": 0,
             "populations": {
                 "initial_population": 0,
                 "denominator": 0,
@@ -51,18 +52,25 @@ async def get_results(
         "numerator_exclusion": 0,
     }
     patients_list = []
+    failed_patients = 0
 
     for mr in results:
         populations = mr.populations or {}
-        for key in pops:
-            if populations.get(key):
-                pops[key] += 1
+        is_error = bool(populations.get("error"))
+        if is_error:
+            failed_patients += 1
+        else:
+            for key in pops:
+                if populations.get(key):
+                    pops[key] += 1
         patients_list.append(
             {
                 "id": mr.id,
                 "patient_id": mr.patient_id,
                 "patient_name": mr.patient_name,
                 "populations": populations,
+                "status": "error" if is_error else "success",
+                "error_message": populations.get("error_message") if is_error else None,
             }
         )
 
@@ -75,6 +83,7 @@ async def get_results(
     return {
         "job_id": job_id,
         "total_patients": len(results),
+        "failed_patients": failed_patients,
         "populations": pops,
         "performance_rate": performance_rate,
         "patients": patients_list,
@@ -110,6 +119,8 @@ async def get_result(
         "patient_name": mr.patient_name,
         "measure_report": mr.measure_report,
         "populations": mr.populations,
+        "status": "error" if (mr.populations or {}).get("error") else "success",
+        "error_message": (mr.populations or {}).get("error_message"),
         "created_at": mr.created_at.isoformat() if mr.created_at else None,
     }
 

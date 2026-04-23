@@ -184,8 +184,10 @@ export default function JobsPage() {
 
   const getProgress = (job) => {
     if (job.progress !== undefined && job.progress !== null) return job.progress;
-    if (job.patients_processed && job.total_patients) {
-      return Math.round((job.patients_processed / job.total_patients) * 100);
+    const processedPatients = job.processed_patients ?? job.patients_processed ?? 0;
+    const failedPatients = job.failed_patients ?? 0;
+    if (job.total_patients) {
+      return Math.round(((processedPatients + failedPatients) / job.total_patients) * 100);
     }
     return 0;
   };
@@ -262,7 +264,10 @@ export default function JobsPage() {
                   const running = isRunning(job.status);
                   const progress = getProgress(job);
                   const completed = (job.status || '').toLowerCase() === 'completed' || (job.status || '').toLowerCase() === 'complete';
+                  const failed = (job.status || '').toLowerCase() === 'failed';
                   const deleting = job.delete_requested || deletingJobIds.includes(job.id);
+                  const processedPatients = job.processed_patients ?? job.patients_processed;
+                  const hasStoredResults = (processedPatients || 0) + (job.failed_patients || 0) > 0;
 
                   return (
                     <tr key={job.id}>
@@ -282,9 +287,10 @@ export default function JobsPage() {
                           <div className={styles.progressInfo}>
                             <ProgressBar value={progress} max={100} size="sm" />
                             <div className={styles.progressMeta}>
-                              {job.patients_processed !== undefined && job.total_patients !== undefined && (
-                                <span>{job.patients_processed.toLocaleString()} / {job.total_patients.toLocaleString()} patients</span>
+                              {processedPatients !== undefined && job.total_patients !== undefined && (
+                                <span>{processedPatients.toLocaleString()} / {job.total_patients.toLocaleString()} patients</span>
                               )}
+                              {job.failed_patients > 0 && <span>{job.failed_patients.toLocaleString()} failed</span>}
                               {job.batches_completed !== undefined && job.total_batches !== undefined && (
                                 <span>{job.batches_completed}/{job.total_batches} batches</span>
                               )}
@@ -296,6 +302,13 @@ export default function JobsPage() {
                           </div>
                         ) : completed ? (
                           <span className={styles.completedText}>100%</span>
+                        ) : failed && hasStoredResults ? (
+                          <div className={styles.progressMeta}>
+                            {processedPatients !== undefined && job.total_patients !== undefined && (
+                              <span>{processedPatients.toLocaleString()} / {job.total_patients.toLocaleString()} patients</span>
+                            )}
+                            {job.failed_patients > 0 && <span>{job.failed_patients.toLocaleString()} failed</span>}
+                          </div>
                         ) : (
                           '--'
                         )}
@@ -312,7 +325,7 @@ export default function JobsPage() {
                               Cancel
                             </button>
                           )}
-                          {completed && !deleting && (
+                          {(completed || (failed && hasStoredResults)) && !deleting && (
                             <Link to={`/results/${job.id}`} className={styles.viewLink}>
                               View Results
                             </Link>
