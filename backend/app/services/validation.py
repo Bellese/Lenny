@@ -762,8 +762,9 @@ async def run_validation(validation_run_id: int) -> None:
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
 
-            # Wipe measure engine patient data for clean evaluation
-            await wipe_patient_data()
+            # Best-effort for validation: stale resources are worse than ideal, but
+            # aborting prevents patient-level comparison entirely on slow HAPI deletes.
+            await wipe_patient_data(strict=False)
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
 

@@ -466,15 +466,17 @@ async def delete_measure(measure_id: str) -> None:
             resp.raise_for_status()
 
 
-async def wipe_patient_data() -> None:
+async def wipe_patient_data(*, strict: bool = True) -> None:
     """Delete patient-related data from the measure engine.
 
     Called at the START of a new job to clean up data from the prior run.
     This allows the previous job's evaluated resources to remain available
     for inspection until a new job begins.
 
-    Fails fast if the measure engine is unreachable: after 3 consecutive
-    timeouts we raise immediately rather than grinding for 20+ minutes.
+    In strict mode, fail fast if the measure engine is unreachable: after 3
+    consecutive timeouts we raise immediately rather than grinding for 20+ minutes.
+    Validation runs use non-strict mode so a slow conditional delete does not abort
+    patient-level comparison when the engine is otherwise up.
     """
     resource_types = [
         "MeasureReport",
@@ -523,10 +525,16 @@ async def wipe_patient_data() -> None:
                     extra={"resourceType": rt},
                 )
                 if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-                    raise RuntimeError(
-                        f"Measure engine unreachable: {consecutive_failures} consecutive "
-                        "timeouts during wipe. Job aborted."
+                    if strict:
+                        raise RuntimeError(
+                            f"Measure engine unreachable: {consecutive_failures} consecutive "
+                            "timeouts during wipe. Job aborted."
+                        )
+                    logger.warning(
+                        "Stopping best-effort wipe after consecutive failures",
+                        extra={"failures": consecutive_failures},
                     )
+                    return
 
 
 async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str) -> None:
