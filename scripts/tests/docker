@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# docker stub — Fake `docker` CLI for reconcile-db-password.sh unit tests.
+#
+# Env vars:
+#   STUB_DOCKER_SCENARIO   ok (default) | fail
+#   STUB_DOCKER_CALLS      If set, each invocation appends "$@" to this file.
+#
+# On "fail": exits 1 and emits the PGPASSWORD value on stderr so the
+# redaction test can verify the script scrubs it from output.
+
+# Record the call for assertion later.
+if [[ -n "${STUB_DOCKER_CALLS:-}" ]]; then
+    printf '%s\n' "$*" >> "$STUB_DOCKER_CALLS"
+fi
+
+SCENARIO="${STUB_DOCKER_SCENARIO:-ok}"
+
+case "$SCENARIO" in
+    ok)
+        printf 'ALTER ROLE\n'
+        exit 0
+        ;;
+    fail)
+        # Emit the plaintext password that the script should redact.
+        printf 'ERROR: password authentication failed for user "mct2": %s\n' "$PGPASSWORD" >&2
+        exit 1
+        ;;
+    *)
+        exit 0
+        ;;
+esac

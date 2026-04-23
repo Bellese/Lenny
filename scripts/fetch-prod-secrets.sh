@@ -86,15 +86,24 @@ write_env_file() {
 
     # Write atomically: use install(1) to set mode 0600 and owner root in one step.
     # This avoids a window where the file is readable before chmod.
-    if ! printf '%s\n' "$content" | install -o root -g root -m 0600 /dev/stdin "$ENV_FILE"; then
-        die 1 "Cannot write to '${ENV_FILE}'. Check permissions."
+    # SKIP_ROOT_CHECK=1 (test mode) drops -o/-g so a non-root user can write.
+    if [[ "${SKIP_ROOT_CHECK:-0}" == "1" ]]; then
+        if ! printf '%s\n' "$content" | install -m 0600 /dev/stdin "$ENV_FILE"; then
+            die 1 "Cannot write to '${ENV_FILE}'. Check permissions."
+        fi
+    else
+        if ! printf '%s\n' "$content" | install -o root -g root -m 0600 /dev/stdin "$ENV_FILE"; then
+            die 1 "Cannot write to '${ENV_FILE}'. Check permissions."
+        fi
     fi
 }
 
 # ── main ───────────────────────────────────────────────────────────────────────
 
 # Require root so file ownership can be set to root.
-if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+# SKIP_ROOT_CHECK=1 bypasses this guard for unit-test environments only.
+# Never set in production.
+if [[ "${SKIP_ROOT_CHECK:-0}" != "1" ]] && [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
     die 1 "This script must be run as root (try: sudo $0)"
 fi
 
