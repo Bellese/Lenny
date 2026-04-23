@@ -36,11 +36,22 @@ We maintain `docs/decisions.md` to record significant technical and process choi
 
 ## Deploying to prod
 
+Normal deployments happen automatically when a PR merges to `main` (see Part B for CI/CD setup). For manual deploys:
+
+```bash
+cd /opt/leonard
+git fetch origin && git reset --hard origin/main
+scripts/deploy-prod.sh
+```
+
+**Rules:**
+- **Always** use `scripts/deploy-prod.sh` — never run `docker compose up` directly in prod
+- **Never** run `docker compose restart db` without following it with `scripts/deploy-prod.sh --post-db-restart` (skipping reconcile will break backend auth)
+- SSH into the EC2 is break-glass only. Normal deploys go through `deploy-prod.sh`
+
 ### Systemd setup (one-time, on EC2)
 
-`/run/` is a tmpfs that is wiped on every reboot. The systemd units in `deploy/` ensure `/run/leonard/` exists and secrets are fetched before Docker starts.
-
-Install once after first provisioning the EC2:
+Run once after the initial Part A deploy to ensure secrets are fetched on reboot:
 
 ```bash
 sudo cp deploy/leonard-tmpfiles.conf /etc/tmpfiles.d/leonard.conf
@@ -49,8 +60,6 @@ sudo cp deploy/leonard-bootstrap.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now leonard-bootstrap
 ```
-
-`leonard-bootstrap.service` is ordered `Before=docker.service`, so on every subsequent reboot `fetch-prod-secrets.sh` runs and writes `/run/leonard/env` before Docker attempts to read it.
 
 ## Reference Docs
 
