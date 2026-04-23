@@ -71,16 +71,15 @@ scripts/deploy-prod.sh
 - **Never** run `docker compose restart db` without following it with `scripts/deploy-prod.sh --post-db-restart`
 - Authorized maintainers with SSH access: @msutton
 
-### GitHub Actions secrets — cleanup after Part B stabilizes
+### GitHub Actions secrets
 
-Once the SSM-based deploy has run cleanly 3–4 times, prune stale secrets from the repo:
-
-| Secret | Action |
+| Secret | Status |
 |--------|--------|
-| `EC2_HOST` | Delete — no longer used by the deploy workflow |
-| `EC2_USER` | Delete — no longer used by the deploy workflow |
-| `EC2_SSH_KEY` | Keep for one release cycle, then delete |
-| `POSTGRES_PASSWORD` | Already removed from `deploy.yml` |
+| `EC2_HOST` | ✅ Deleted (2026-04-23) — no longer used by the deploy workflow |
+| `EC2_USER` | ✅ Deleted (2026-04-23) — no longer used by the deploy workflow |
+| `EC2_SSH_KEY` | Keep for one more release cycle, then delete |
+| `POSTGRES_PASSWORD` | ✅ Deleted (2026-04-23) — now sourced from SSM |
+| `AWS_DEPLOY_ROLE_ARN` | Active — used by the OIDC deploy workflow |
 
 ## Reference Docs
 
