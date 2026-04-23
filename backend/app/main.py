@@ -76,6 +76,10 @@ async def _run_schema_migrations(conn) -> None:
 
         # AuthType enum: add 'smart' value if not present
         await conn.execute(text("ALTER TYPE authtype ADD VALUE IF NOT EXISTS 'smart'"))
+        result = await conn.execute(text("SELECT to_regtype('validationstatus')"))
+        validationstatus_exists = result.scalar() is not None
+        if validationstatus_exists:
+            await conn.execute(text("ALTER TYPE validationstatus ADD VALUE IF NOT EXISTS 'cancelled'"))
 
         # Add new columns to cdr_configs (idempotent)
         for stmt in [
@@ -94,6 +98,8 @@ async def _run_schema_migrations(conn) -> None:
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_read_only BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_auth_type VARCHAR(32)",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_auth_credentials JSONB",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS delete_requested BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE validation_runs ADD COLUMN IF NOT EXISTS delete_requested BOOLEAN NOT NULL DEFAULT FALSE",
         ]:
             await conn.execute(text(stmt))
 

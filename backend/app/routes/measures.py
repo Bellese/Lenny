@@ -3,11 +3,12 @@
 import json
 import logging
 
-from fastapi import APIRouter, File, HTTPException, Request, UploadFile
+import httpx
+from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
 
 from app.config import MAX_UPLOAD_SIZE
 from app.limiter import limiter
-from app.services.fhir_client import list_measures, upload_measure_bundle
+from app.services.fhir_client import delete_measure, list_measures, upload_measure_bundle
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -149,3 +150,57 @@ async def upload_measure(request: Request, file: UploadFile = File(...)) -> dict
                 ],
             },
         )
+
+
+@router.delete("/{measure_id}", status_code=204)
+async def delete_measure_route(measure_id: str) -> Response:
+    """Delete a Measure resource from the measure engine."""
+    try:
+        await delete_measure(measure_id)
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "resourceType": "OperationOutcome",
+                    "issue": [
+                        {
+                            "severity": "error",
+                            "code": "not-found",
+                            "diagnostics": f"Measure {measure_id} not found",
+                        }
+                    ],
+                },
+            ) from exc
+        logger.exception("Measure engine rejected measure delete", extra={"measure_id": measure_id})
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "diagnostics": f"Measure engine rejected delete: {sanitize_error(exc)}",
+                    }
+                ],
+            },
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to delete measure", extra={"measure_id": measure_id})
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "diagnostics": f"Cannot reach measure engine: {sanitize_error(exc)}",
+                    }
+                ],
+            },
+        ) from exc
+
+    logger.info("Measure deleted", extra={"measure_id": measure_id})
+    return Response(status_code=204)

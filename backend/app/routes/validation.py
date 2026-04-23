@@ -7,9 +7,11 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -223,6 +225,7 @@ async def list_validation_runs(session: AsyncSession = Depends(get_session)) -> 
                 "patients_tested": r.patients_tested,
                 "patients_passed": r.patients_passed,
                 "patients_failed": r.patients_failed,
+                "delete_requested": r.delete_requested,
                 "error_message": r.error_message,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
                 "completed_at": r.completed_at.isoformat() if r.completed_at else None,
@@ -295,8 +298,45 @@ async def get_validation_run(
         "patients_tested": run.patients_tested,
         "patients_passed": run.patients_passed,
         "patients_failed": run.patients_failed,
+        "delete_requested": run.delete_requested,
         "error_message": run.error_message,
         "created_at": run.created_at.isoformat() if run.created_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
         "measures": list(measures.values()),
     }
+
+
+@router.delete("/runs/{run_id}")
+async def delete_validation_run(
+    run_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete a validation run and its stored results."""
+    run = await session.get(ValidationRun, run_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Validation run not found")
+
+    if run.status == ValidationStatus.running:
+        run.delete_requested = True
+        await session.commit()
+        logger.info("Validation run delete requested", extra={"run_id": run_id})
+        return JSONResponse(
+            status_code=202,
+            content={"id": run_id, "status": "delete_requested", "delete_requested": True},
+        )
+
+    if run.status == ValidationStatus.queued:
+        run.status = ValidationStatus.cancelled
+        run.delete_requested = True
+        run.completed_at = run.completed_at or datetime.now(timezone.utc)
+        await session.commit()
+        logger.info("Queued validation run delete requested", extra={"run_id": run_id})
+        return JSONResponse(
+            status_code=202,
+            content={"id": run_id, "status": "delete_requested", "delete_requested": True},
+        )
+
+    await session.delete(run)
+    await session.commit()
+    logger.info("Validation run deleted", extra={"run_id": run_id})
+    return Response(status_code=204)

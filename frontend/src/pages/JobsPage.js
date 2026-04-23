@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import styles from './JobsPage.module.css';
-import { getJobs, getMeasures, getGroups, createJob, cancelJob } from '../api/client';
+import { getJobs, getMeasures, getGroups, createJob, cancelJob, deleteJob } from '../api/client';
 import { useToast } from '../components/Toast';
 import ProgressBar from '../components/ProgressBar';
 
@@ -61,6 +61,7 @@ export default function JobsPage() {
   const [showModal, setShowModal] = useState(false);
   const [formData, setFormData] = useState({ measure_id: '', group_id: '', period_start: '', period_end: '' });
   const [creating, setCreating] = useState(false);
+  const [deletingJobIds, setDeletingJobIds] = useState([]);
   const pollRef = useRef(null);
   const toast = useToast();
 
@@ -109,8 +110,8 @@ export default function JobsPage() {
 
   // Polling for in-progress jobs
   useEffect(() => {
-    const hasRunning = jobs.some(j => isRunning(j.status));
-    if (hasRunning) {
+    const hasActiveOrDeleting = jobs.some(j => isRunning(j.status) || j.delete_requested);
+    if (hasActiveOrDeleting) {
       pollRef.current = setInterval(loadJobs, 3000);
     } else {
       if (pollRef.current) clearInterval(pollRef.current);
@@ -152,6 +153,25 @@ export default function JobsPage() {
       loadJobs();
     } catch (err) {
       toast.error(`Failed to cancel job: ${err.message}`);
+    }
+  };
+
+  const handleDelete = async (job) => {
+    if (!window.confirm(`Delete job "${getMeasureName(job)}"? This also deletes its stored results.`)) return;
+
+    setDeletingJobIds(prev => [...prev, job.id]);
+    try {
+      const result = await deleteJob(job.id);
+      if (result?.delete_requested) {
+        toast.warning('Deletion requested. The job will disappear once background work stops.');
+      } else {
+        toast.success('Job deleted');
+      }
+      await loadJobs();
+    } catch (err) {
+      toast.error(`Failed to delete job: ${err.message}`);
+    } finally {
+      setDeletingJobIds(prev => prev.filter(id => id !== job.id));
     }
   };
 
@@ -242,6 +262,7 @@ export default function JobsPage() {
                   const running = isRunning(job.status);
                   const progress = getProgress(job);
                   const completed = (job.status || '').toLowerCase() === 'completed' || (job.status || '').toLowerCase() === 'complete';
+                  const deleting = job.delete_requested || deletingJobIds.includes(job.id);
 
                   return (
                     <tr key={job.id}>
@@ -281,19 +302,30 @@ export default function JobsPage() {
                       </td>
                       <td className={styles.dateCell}>{formatDateTime(job.started_at || job.created_at)}</td>
                       <td>
-                        {running && (
+                        <div className={styles.actionGroup}>
+                          {running && (
+                            <button
+                              className={styles.cancelBtn}
+                              onClick={() => handleCancel(job.id)}
+                              disabled={deleting}
+                            >
+                              Cancel
+                            </button>
+                          )}
+                          {completed && !deleting && (
+                            <Link to={`/results/${job.id}`} className={styles.viewLink}>
+                              View Results
+                            </Link>
+                          )}
                           <button
-                            className={styles.cancelBtn}
-                            onClick={() => handleCancel(job.id)}
+                            type="button"
+                            className={styles.deleteBtn}
+                            onClick={() => handleDelete(job)}
+                            disabled={deleting}
                           >
-                            Cancel
+                            {deleting ? 'Deleting...' : 'Delete'}
                           </button>
-                        )}
-                        {completed && (
-                          <Link to={`/results/${job.id}`} className={styles.viewLink}>
-                            View Results
-                          </Link>
-                        )}
+                        </div>
                       </td>
                     </tr>
                   );

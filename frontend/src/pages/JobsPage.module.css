@@ -135,6 +135,32 @@
   font-weight: var(--font-weight-semibold);
 }
 
+.actionGroup {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.deleteBtn {
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+}
+
+.deleteBtn:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.deleteBtn:disabled,
+.cancelBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .emptyRow {
   text-align: center;
   color: var(--color-text-tertiary);

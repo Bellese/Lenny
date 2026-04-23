@@ -6,7 +6,8 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,6 +63,7 @@ class JobResponse(BaseModel):
     total_patients: int
     processed_patients: int
     failed_patients: int
+    delete_requested: bool
     created_at: str
     completed_at: Optional[str]
     error_message: Optional[str]
@@ -106,6 +108,7 @@ def _job_to_response(job: Job) -> dict:
         "total_patients": job.total_patients,
         "processed_patients": job.processed_patients,
         "failed_patients": job.failed_patients,
+        "delete_requested": job.delete_requested,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
         "error_message": job.error_message,
@@ -269,6 +272,54 @@ async def cancel_job(
 
     logger.info("Job cancelled", extra={"job_id": job_id})
     return _job_to_response(job)
+
+
+@router.delete("/{job_id}")
+async def delete_job(
+    job_id: int,
+    session: AsyncSession = Depends(get_session),
+):
+    """Delete a job and its dependent batches/results."""
+    job = await session.get(Job, job_id)
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "not-found",
+                        "diagnostics": f"Job {job_id} not found",
+                    }
+                ],
+            },
+        )
+
+    if job.status == JobStatus.running:
+        job.delete_requested = True
+        await session.commit()
+        logger.info("Job delete requested", extra={"job_id": job_id})
+        return JSONResponse(
+            status_code=202,
+            content={"id": job_id, "status": "delete_requested", "delete_requested": True},
+        )
+
+    if job.status == JobStatus.queued:
+        job.status = JobStatus.cancelled
+        job.delete_requested = True
+        job.completed_at = datetime.now(timezone.utc)
+        await session.commit()
+        logger.info("Queued job delete requested", extra={"job_id": job_id})
+        return JSONResponse(
+            status_code=202,
+            content={"id": job_id, "status": "delete_requested", "delete_requested": True},
+        )
+
+    await session.delete(job)
+    await session.commit()
+    logger.info("Job deleted", extra={"job_id": job_id})
+    return Response(status_code=204)
 
 
 @router.get("/{job_id}/comparison")

@@ -92,6 +92,12 @@ export function uploadMeasure(file) {
   });
 }
 
+export function deleteMeasure(id) {
+  return request(`/measures/${id}`, {
+    method: 'DELETE',
+  });
+}
+
 // Groups
 export function getGroups() {
   return request('/jobs/groups');
@@ -116,6 +122,12 @@ export function createJob(data) {
 export function cancelJob(id) {
   return request(`/jobs/${id}/cancel`, {
     method: 'POST',
+  });
+}
+
+export function deleteJob(id) {
+  return request(`/jobs/${id}`, {
+    method: 'DELETE',
   });
 }
 
@@ -202,6 +214,12 @@ export function getValidationRuns() {
 
 export function getValidationRun(runId) {
   return request(`/validation/runs/${runId}`);
+}
+
+export function deleteValidationRun(runId) {
+  return request(`/validation/runs/${runId}`, {
+    method: 'DELETE',
+  });
 }
 
 // Comparison
