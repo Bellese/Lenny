@@ -100,15 +100,20 @@ fi
 
 declare -A PARAMS
 
+# Temp file for stderr from AWS CLI calls; cleaned up on exit.
+_aws_err=$(mktemp)
+trap 'rm -f "$_aws_err"' EXIT
+
 if [[ -n "${LEONARD_SSM_VERSION:-}" ]]; then
     # ── rollback path: fetch POSTGRES_PASSWORD at a specific version ───────────
-    response=$(aws ssm get-parameter \
+    if ! response=$(aws ssm get-parameter \
         --region "$SSM_REGION" \
         --name "${SSM_PATH_PREFIX}POSTGRES_PASSWORD" \
         --version "$LEONARD_SSM_VERSION" \
         --with-decryption \
-        --output json 2>&1) \
-        || die 1 "SSM get-parameter failed for POSTGRES_PASSWORD at version ${LEONARD_SSM_VERSION}: $response"
+        --output json 2>"$_aws_err"); then
+        die 1 "SSM get-parameter failed for POSTGRES_PASSWORD at version ${LEONARD_SSM_VERSION}: $(cat "$_aws_err")"
+    fi
 
     value=$(printf '%s' "$response" | jq -r '.Parameter.Value // empty')
     if [[ -z "$value" ]]; then
@@ -132,7 +137,9 @@ else
             --output json
         )
         [[ -n "$next_token" ]] && aws_args+=(--next-token "$next_token")
-        response=$(aws "${aws_args[@]}" 2>&1) || die 1 "SSM get-parameters-by-path failed: $response"
+        if ! response=$(aws "${aws_args[@]}" 2>"$_aws_err"); then
+            die 1 "SSM get-parameters-by-path failed: $(cat "$_aws_err")"
+        fi
 
         # Parse each parameter into the associative array.
         while IFS=$'\t' read -r full_name value; do
