@@ -14,7 +14,9 @@ from app.services.fhir_client import (
     list_measures,
     push_resources,
     resolve_evaluated_resource,
+    trigger_reindex_and_wait,
     upload_measure_bundle,
+    wait_for_valueset_expansion,
     wipe_patient_data,
 )
 from app.services.fhir_client import (
@@ -1199,3 +1201,112 @@ async def test_data_requirements_strategy_gather_patients_delegates_to_batch():
 
     assert len(patients) == 1
     assert patients[0]["id"] == "p1"
+
+
+class FakeSyncResponse:
+    def __init__(self, status_code: int, payload: dict | None = None, text: str = "") -> None:
+        self.status_code = status_code
+        self._payload = payload or {}
+        self.text = text
+
+    def json(self) -> dict:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise RuntimeError(f"HTTP {self.status_code}")
+
+
+class FakeSyncClient:
+    def __init__(self, *, get_responses: list[FakeSyncResponse], post_responses: list[FakeSyncResponse]) -> None:
+        self.get_responses = get_responses
+        self.post_responses = post_responses
+        self.get_calls: list[str] = []
+        self.post_calls: list[tuple[str, dict | None]] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def get(self, url: str, **kwargs):
+        self.get_calls.append(url)
+        return self.get_responses.pop(0)
+
+    def post(self, url: str, json: dict | None = None, **kwargs):
+        self.post_calls.append((url, json))
+        return self.post_responses.pop(0)
+
+
+def test_trigger_reindex_and_wait_posts_202_and_polls_success(monkeypatch, caplog):
+    client = FakeSyncClient(
+        get_responses=[
+            FakeSyncResponse(200, {"entry": [{"resource": {"id": "p1"}}]}),
+            FakeSyncResponse(200, {"entry": [{"resource": {"id": "e1"}}]}),
+        ],
+        post_responses=[FakeSyncResponse(202)],
+    )
+
+    monkeypatch.setattr("app.services.fhir_client.httpx.Client", lambda **kwargs: client)
+    monkeypatch.setattr("app.services.fhir_client.time.sleep", lambda seconds: None)
+
+    with caplog.at_level("INFO"):
+        trigger_reindex_and_wait("http://hapi/fhir")
+
+    assert client.post_calls[0][0] == "http://hapi/fhir/$reindex"
+    assert client.post_calls[0][1] == {
+        "resourceType": "Parameters",
+        "parameter": [{"name": "type", "valueString": "Encounter"}],
+    }
+    assert client.get_calls == [
+        "http://hapi/fhir/Patient?_count=1",
+        "http://hapi/fhir/Encounter?patient=p1&_count=1",
+    ]
+    assert "HAPI reindex complete" in caplog.text
+
+
+def test_trigger_reindex_and_wait_logs_timeout(monkeypatch, caplog):
+    client = FakeSyncClient(get_responses=[], post_responses=[FakeSyncResponse(202)])
+    monkeypatch.setattr("app.services.fhir_client.httpx.Client", lambda **kwargs: client)
+
+    with caplog.at_level("WARNING"):
+        trigger_reindex_and_wait("http://hapi/fhir", probe_patient_id="p1", timeout_s=0)
+
+    assert client.post_calls[0][0] == "http://hapi/fhir/$reindex"
+    assert "HAPI reindex timed out" in caplog.text
+
+
+def test_wait_for_valueset_expansion_returns_per_url_status(monkeypatch, caplog):
+    client = FakeSyncClient(
+        get_responses=[
+            FakeSyncResponse(200, {"entry": []}),
+            FakeSyncResponse(200, {"entry": [{"resource": {"id": "vs-ok"}}]}),
+        ],
+        post_responses=[
+            FakeSyncResponse(200, {"expansion": {"total": 42, "contains": [{"code": "a"}]}}),
+        ],
+    )
+    monkeypatch.setattr("app.services.fhir_client.httpx.Client", lambda **kwargs: client)
+    monkeypatch.setattr("app.services.fhir_client.time.sleep", lambda seconds: None)
+
+    with caplog.at_level("WARNING"):
+        expanded = wait_for_valueset_expansion("http://hapi/fhir", ["http://vs/ok", "http://vs/missing"], timeout_s=1)
+
+    assert expanded == {"http://vs/ok": 42}
+    assert client.post_calls == [("http://hapi/fhir/ValueSet/vs-ok/$expand?count=2", None)]
+    assert "ValueSet not found for expansion wait" in caplog.text
+
+
+def test_wait_for_valueset_expansion_logs_timeout(monkeypatch, caplog):
+    client = FakeSyncClient(
+        get_responses=[FakeSyncResponse(200, {"entry": [{"resource": {"id": "vs-timeout"}}]})],
+        post_responses=[],
+    )
+    monkeypatch.setattr("app.services.fhir_client.httpx.Client", lambda **kwargs: client)
+
+    with caplog.at_level("WARNING"):
+        expanded = wait_for_valueset_expansion("http://hapi/fhir", ["http://vs/timeout"], timeout_s=0)
+
+    assert expanded == {}
+    assert "ValueSet expansion timed out" in caplog.text

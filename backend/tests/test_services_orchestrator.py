@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.job import Job, JobStatus, MeasureResult
 from app.services.orchestrator import (
+    _error_measure_report,
     _extract_patient_name,
     _extract_populations,
     _get_cdr_auth_headers,
@@ -73,6 +74,16 @@ class TestExtractPatientName:
     def test_no_name(self):
         assert _extract_patient_name({}) is None
         assert _extract_patient_name({"name": []}) is None
+
+
+def test_error_measure_report_sanitizes_internal_urls():
+    report = _error_measure_report("p1", Exception("HTTP 400 at http://hapi-fhir-measure:8080/fhir"))
+
+    assert report["resourceType"] == "OperationOutcome"
+    assert report["subject"]["reference"] == "Patient/p1"
+    diagnostics = report["issue"][0]["diagnostics"]
+    assert "hapi-fhir-measure" not in diagnostics
+    assert "8080" not in diagnostics
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +166,7 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
         assert results[0].patient_id == "p1"
         assert results[0].patient_name == "Alice Test"
 
-    mock_wipe.assert_called_once()
+    mock_wipe.assert_awaited_once_with(strict=False)
 
 
 async def test_run_job_no_patients(test_session, session_factory):
@@ -278,11 +289,62 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
         assert job.processed_patients == 1
         assert job.failed_patients == 1
 
-        # Only one result should be stored
+        # One successful result and one per-patient error result should be stored.
         result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
         results = result.scalars().all()
-        assert len(results) == 1
-        assert results[0].patient_id == "p1"
+        assert len(results) == 2
+        by_patient = {r.patient_id: r for r in results}
+        assert by_patient["p1"].populations.get("error") is None
+        assert by_patient["p2"].populations["error"] is True
+        assert "Evaluation failed for p2" in by_patient["p2"].populations["error_message"]
+
+
+async def test_run_job_all_patient_failures_marks_job_failed(test_session, session_factory):
+    """run_job: if every patient evaluation fails, the job must not look successful."""
+    job_id = await _setup_job(test_session)
+
+    patients = [
+        {"resourceType": "Patient", "id": "p1", "name": [{"given": ["Alice"], "family": "Bad"}]},
+        {"resourceType": "Patient", "id": "p2", "name": [{"given": ["Bob"], "family": "Bad"}]},
+    ]
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patients",
+            new_callable=AsyncMock,
+            return_value=patients,
+        ),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patient_data",
+            new_callable=AsyncMock,
+            return_value=[{"resourceType": "Patient", "id": "p1"}],
+        ),
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            side_effect=Exception("HAPI returned 400"),
+        ),
+    ):
+        await run_job(job_id)
+
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        assert job.status == JobStatus.failed
+        assert job.processed_patients == 0
+        assert job.failed_patients == 2
+        assert job.error_message == "All 2 patient evaluations failed"
+
+        result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
+        results = result.scalars().all()
+        assert len(results) == 2
+        assert all(r.populations["error"] is True for r in results)
 
 
 async def test_run_job_cancelled_before_batches(test_session, session_factory):
@@ -342,12 +404,87 @@ async def test_get_cdr_auth_headers_reads_from_job_row(test_session, session_fac
     mock_auth.assert_called_once_with("bearer", {"token": "test-jwt"})
 
 
-async def test_process_batch_uses_data_requirements_strategy(test_session, session_factory):
-    """_process_single_batch uses DataRequirementsStrategy by default."""
+async def test_process_batch_uses_everything_strategy(test_session, session_factory, monkeypatch):
+    """_process_single_batch uses $everything by default for complete patient graphs."""
     from unittest.mock import MagicMock
 
     from app.models.job import Batch, BatchStatus
     from app.services.orchestrator import _process_single_batch
+
+    monkeypatch.setattr("app.services.orchestrator.settings.PATIENT_DATA_STRATEGY", "batch")
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    batch = Batch(
+        job_id=job.id,
+        batch_number=1,
+        patient_ids=["p1"],
+        status=BatchStatus.pending,
+    )
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    patient_map = {"p1": {"resourceType": "Patient", "id": "p1"}}
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.BatchQueryStrategy") as mock_strategy_cls,
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch("app.services.orchestrator.asyncio.sleep", new_callable=AsyncMock),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={
+                "resourceType": "MeasureReport",
+                "status": "complete",
+                "group": [
+                    {
+                        "population": [
+                            {"code": {"coding": [{"code": "initial-population"}]}, "count": 1},
+                            {"code": {"coding": [{"code": "denominator"}]}, "count": 1},
+                            {"code": {"coding": [{"code": "numerator"}]}, "count": 0},
+                        ]
+                    }
+                ],
+            },
+        ),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+    ):
+        mock_strategy = MagicMock()
+        mock_strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p1"}])
+        mock_strategy_cls.return_value = mock_strategy
+
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map=patient_map,
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+        )
+
+    mock_strategy_cls.assert_called_once_with()
+
+
+async def test_process_batch_uses_data_requirements_strategy_when_configured(
+    test_session, session_factory, monkeypatch
+):
+    """_process_single_batch can be rolled back to DataRequirementsStrategy by env config."""
+    from unittest.mock import MagicMock
+
+    from app.models.job import Batch, BatchStatus
+    from app.services.orchestrator import _process_single_batch
+
+    monkeypatch.setattr("app.services.orchestrator.settings.PATIENT_DATA_STRATEGY", "data_requirements")
 
     job = Job(
         measure_id="CMS999",
@@ -376,6 +513,7 @@ async def test_process_batch_uses_data_requirements_strategy(test_session, sessi
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.DataRequirementsStrategy") as mock_strategy_cls,
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch("app.services.orchestrator.asyncio.sleep", new_callable=AsyncMock),
         patch(
             "app.services.orchestrator.evaluate_measure",
             new_callable=AsyncMock,
@@ -393,7 +531,6 @@ async def test_process_batch_uses_data_requirements_strategy(test_session, sessi
                 ],
             },
         ),
-        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
     ):
         mock_strategy = MagicMock()
         mock_strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p1"}])

@@ -369,6 +369,126 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
 # Direct FHIR helper functions (measure engine interaction)
 # ---------------------------------------------------------------------------
 
+_REINDEX_POLL_INTERVAL = 5
+_VALUESET_EXPANSION_POLL_INTERVAL = 10
+
+
+def trigger_reindex_and_wait(base_url: str, probe_patient_id: str | None = None, timeout_s: int = 300) -> None:
+    """Trigger HAPI Encounter reindexing and wait until patient reference search works."""
+    headers = {"Content-Type": "application/fhir+json"}
+    params = {"resourceType": "Parameters", "parameter": [{"name": "type", "valueString": "Encounter"}]}
+    started_at = time.monotonic()
+    polls = 0
+
+    with httpx.Client(timeout=30.0) as client:
+        resp = client.post(f"{base_url}/$reindex", json=params, headers=headers)
+        if resp.status_code != 202:
+            logger.warning(
+                "HAPI reindex trigger returned unexpected status",
+                extra={"base_url": base_url, "status_code": resp.status_code, "body": resp.text[:200]},
+            )
+
+        if not probe_patient_id:
+            try:
+                probe_resp = client.get(f"{base_url}/Patient?_count=1", timeout=10.0)
+                probe_resp.raise_for_status()
+                entries = probe_resp.json().get("entry", [])
+                if entries:
+                    probe_patient_id = entries[0].get("resource", {}).get("id")
+            except Exception as exc:
+                logger.warning(
+                    "Unable to select HAPI reindex probe patient",
+                    extra={"base_url": base_url, "error": str(exc)},
+                )
+
+        if not probe_patient_id:
+            logger.warning(
+                "HAPI reindex wait skipped because no probe patient was available",
+                extra={"base_url": base_url},
+            )
+            return
+
+        deadline = started_at + timeout_s
+        while time.monotonic() < deadline:
+            polls += 1
+            try:
+                probe_resp = client.get(f"{base_url}/Encounter?patient={probe_patient_id}&_count=1", timeout=10.0)
+                if probe_resp.status_code == 200 and probe_resp.json().get("entry"):
+                    duration_s = round(time.monotonic() - started_at, 3)
+                    logger.info("HAPI reindex complete", extra={"duration_s": duration_s, "polls": polls})
+                    return
+            except Exception:
+                pass
+            time.sleep(_REINDEX_POLL_INTERVAL)
+
+    duration_s = round(time.monotonic() - started_at, 3)
+    logger.warning(
+        "HAPI reindex timed out",
+        extra={"duration_s": duration_s, "polls": polls, "probe_patient_id": probe_patient_id},
+    )
+
+
+def wait_for_valueset_expansion(base_url: str, valueset_urls: list[str], timeout_s: int = 600) -> dict[str, int]:
+    """Wait until HAPI can serve $expand for each ValueSet URL and return expansion totals."""
+    expanded: dict[str, int] = {}
+    if not valueset_urls:
+        return expanded
+
+    unique_urls = sorted({url for url in valueset_urls if url})
+    pending: dict[str, str] = {}
+    with httpx.Client(timeout=30.0) as client:
+        for valueset_url in unique_urls:
+            try:
+                lookup = client.get(
+                    f"{base_url}/ValueSet",
+                    params={"url": valueset_url, "_count": 1, "_elements": "id,url"},
+                    headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json"},
+                )
+                lookup.raise_for_status()
+                entries = lookup.json().get("entry", [])
+                if not entries:
+                    logger.warning("ValueSet not found for expansion wait", extra={"valueset_url": valueset_url})
+                    continue
+                valueset_id = entries[0].get("resource", {}).get("id")
+                if not valueset_id:
+                    logger.warning("ValueSet lookup returned no id", extra={"valueset_url": valueset_url})
+                    continue
+                pending[valueset_url] = valueset_id
+            except Exception as exc:
+                logger.warning(
+                    "ValueSet lookup failed before expansion wait",
+                    extra={"valueset_url": valueset_url, "error": str(exc)},
+                )
+
+        deadline = time.monotonic() + timeout_s
+        polls = 0
+        while pending and time.monotonic() < deadline:
+            polls += 1
+            newly_done: set[str] = set()
+            for valueset_url, valueset_id in list(pending.items()):
+                try:
+                    resp = client.post(f"{base_url}/ValueSet/{valueset_id}/$expand?count=2", timeout=15.0)
+                    if resp.status_code == 200:
+                        body = resp.json()
+                        expanded[valueset_url] = int(
+                            body.get("expansion", {}).get("total", len(body.get("expansion", {}).get("contains", [])))
+                        )
+                        newly_done.add(valueset_url)
+                except Exception:
+                    pass
+            for valueset_url in newly_done:
+                pending.pop(valueset_url, None)
+            if pending:
+                time.sleep(_VALUESET_EXPANSION_POLL_INTERVAL)
+
+        for valueset_url, valueset_id in pending.items():
+            logger.warning(
+                "ValueSet expansion timed out",
+                extra={"valueset_url": valueset_url, "valueset_id": valueset_id, "polls": polls},
+            )
+
+    return expanded
+
 
 def _normalize_measure_def(r: dict[str, Any]) -> dict[str, Any]:
     """Ensure Library resources have a url so HAPI 8.x can resolve canonical refs.

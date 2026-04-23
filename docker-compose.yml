@@ -24,7 +24,10 @@ services:
       - DATABASE_URL=postgresql+asyncpg://mct2:mct2@db:5432/mct2
       - MEASURE_ENGINE_URL=http://hapi-fhir-measure:8080/fhir
       - DEFAULT_CDR_URL=http://hapi-fhir-cdr:8080/fhir
-      - CONNECTATHON_BUNDLES_DIR=/seed/connectathon-bundles
+      - CONNECTATHON_BUNDLES_DIR=/seed/disabled-connectathon-bundles # Manual uploads exercise HAPI sync; don't gate health on startup replay.
+      - PATIENT_DATA_STRATEGY=${PATIENT_DATA_STRATEGY:-batch}
+      - VALUESET_RELOAD_MODE=${VALUESET_RELOAD_MODE:-delete}
+      - HAPI_SYNC_AFTER_UPLOAD=${HAPI_SYNC_AFTER_UPLOAD:-true}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
       interval: 10s
@@ -65,6 +68,7 @@ services:
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_external_references=true
       - hapi.fhir.enforce_referential_integrity_on_write=false
+      - hapi.fhir.maximum_expansion_size=50000 # Connectathon ValueSets exceed HAPI's default expansion limit.
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
       - JAVA_TOOL_OPTIONS=-Xmx1g -Xms256m
@@ -88,7 +92,10 @@ services:
       - hapi.fhir.reuse_cached_search_results_millis=0
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_multiple_delete=true
+      - hapi.fhir.allow_external_references=true # Match integration harness; bundles reference external canonicals.
       - hapi.fhir.cr.enabled=true
+      - hapi.fhir.enforce_referential_integrity_on_write=false # Match harness; MADiE bundles can omit referenced resources.
+      - hapi.fhir.maximum_expansion_size=50000 # Connectathon ValueSets exceed HAPI's default expansion limit.
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
       - spring.jpa.properties.hibernate.search.enabled=true
@@ -96,6 +103,7 @@ services:
       - spring.jpa.properties.hibernate.search.backend.analysis.configurer=ca.uhn.fhir.jpa.search.HapiHSearchAnalysisConfigurers$$HapiLuceneAnalysisConfigurer
       - spring.jpa.properties.hibernate.search.backend.directory.root=/data/hapi/lucene
       - spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
+      - spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100 # Reduce HAPI search-index lag after uploads.
       - JAVA_TOOL_OPTIONS=-Xmx1500m -Xms256m
 
   seed:

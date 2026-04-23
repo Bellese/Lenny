@@ -73,6 +73,54 @@ async def test_get_results_with_population_counts(client, test_session):
     # Performance rate = 1/2 * 100 = 50.0
     assert data["performance_rate"] == 50.0
     assert len(data["patients"]) == 2
+    assert data["failed_patients"] == 0
+    assert data["patients"][0]["status"] == "success"
+
+
+async def test_get_results_includes_patient_evaluation_errors(client, test_session):
+    """GET /results includes failed patient rows without counting them in populations."""
+    job = Job(
+        measure_id="measure-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://example.com/fhir",
+        status=JobStatus.failed,
+        total_patients=1,
+        failed_patients=1,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    mr = MeasureResult(
+        job_id=job.id,
+        patient_id="patient-error",
+        patient_name="Patient Error",
+        measure_report={
+            "resourceType": "OperationOutcome",
+            "issue": [{"severity": "error", "code": "processing", "diagnostics": "HAPI returned 400"}],
+        },
+        populations={
+            "initial_population": False,
+            "denominator": False,
+            "numerator": False,
+            "denominator_exclusion": False,
+            "numerator_exclusion": False,
+            "error": True,
+            "error_message": "HAPI returned 400",
+        },
+    )
+    test_session.add(mr)
+    await test_session.commit()
+
+    resp = await client.get(f"/results?job_id={job.id}")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_patients"] == 1
+    assert data["failed_patients"] == 1
+    assert data["populations"]["initial_population"] == 0
+    assert data["patients"][0]["status"] == "error"
+    assert data["patients"][0]["error_message"] == "HAPI returned 400"
 
 
 async def test_get_results_empty(client):
