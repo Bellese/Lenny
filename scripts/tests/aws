@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# stub-aws — Fake `aws` CLI for unit tests.
+#
+# Env vars:
+#   STUB_AWS_SCENARIO   happy (default) | invalid | empty | version
+#   STUB_AWS_CALLS      If set, each invocation appends "$@" to this file.
+#
+# $1 = service (ssm)
+# $2 = subcommand (get-parameters-by-path | get-parameter)
+
+# Record the call for assertion later.
+if [[ -n "${STUB_AWS_CALLS:-}" ]]; then
+    printf '%s\n' "$*" >> "$STUB_AWS_CALLS"
+fi
+
+SCENARIO="${STUB_AWS_SCENARIO:-happy}"
+
+case "$2" in
+    get-parameters-by-path)
+        case "$SCENARIO" in
+            happy)
+                printf '{"Parameters":[{"Name":"/leonard/prod/POSTGRES_PASSWORD","Value":"testpassword12345678901234567"}],"NextToken":""}\n'
+                ;;
+            invalid)
+                printf '{"Parameters":[{"Name":"/leonard/prod/POSTGRES_PASSWORD","Value":"testpassword/invalid"}],"NextToken":""}\n'
+                ;;
+            empty)
+                printf '{"Parameters":[],"NextToken":""}\n'
+                ;;
+            *)
+                printf '{"Parameters":[{"Name":"/leonard/prod/POSTGRES_PASSWORD","Value":"testpassword12345678901234567"}],"NextToken":""}\n'
+                ;;
+        esac
+        ;;
+    get-parameter)
+        # Version-pinned rollback path.
+        printf '{"Parameter":{"Name":"/leonard/prod/POSTGRES_PASSWORD:1","Value":"testpassword12345678901234567"}}\n'
+        ;;
+    *)
+        printf 'stub-aws: unknown subcommand "%s"\n' "$2" >&2
+        exit 1
+        ;;
+esac

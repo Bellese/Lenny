@@ -34,6 +34,40 @@ Each phase uses one recommended tool. The issue gets updated before moving on.
 
 We maintain `docs/decisions.md` to record significant technical and process choices with their rationale. When you make a decision that would be non-obvious to someone joining the project next month, add it to the log.
 
+## Deploying to prod
+
+Normal deployments happen automatically when a PR merges to `main` (see Part B for CI/CD setup). For manual deploys:
+
+```bash
+cd /opt/leonard
+git fetch origin && git reset --hard origin/main
+scripts/deploy-prod.sh
+```
+
+**Rules:**
+- **Always** use `scripts/deploy-prod.sh` — never run `docker compose up` directly in prod
+- **Never** run `docker compose restart db` without following it with `scripts/deploy-prod.sh --post-db-restart` (skipping reconcile will break backend auth)
+- SSH into the EC2 is break-glass only. Normal deploys go through `deploy-prod.sh`
+
+### Systemd setup (one-time, on EC2)
+
+Run once after the initial Part A deploy to ensure secrets are fetched on reboot. The drop-in override makes Docker depend on `leonard-bootstrap`, so a failed secrets fetch prevents Docker from starting entirely.
+
+```bash
+sudo cp deploy/leonard-tmpfiles.conf /etc/tmpfiles.d/leonard.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/leonard.conf
+sudo cp deploy/leonard-bootstrap.service /etc/systemd/system/
+sudo mkdir -p /etc/systemd/system/docker.service.d/
+sudo cp deploy/docker-override-leonard.conf /etc/systemd/system/docker.service.d/leonard.conf
+sudo systemctl daemon-reload
+# On a live host (Docker already running): restart Docker so the new dependency takes effect.
+# WARNING: this restarts all running containers.
+sudo systemctl restart docker
+sudo systemctl enable --now leonard-bootstrap
+```
+
+The `Requires=leonard-bootstrap.service` drop-in only takes effect after Docker (re)starts — either via the explicit restart above on a live host, or automatically on the next host reboot.
+
 ## Reference Docs
 
 | Doc | Contents |

@@ -159,6 +159,22 @@ Defined in `backend/app/config.py`. All overridable via environment variables.
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `ALLOWED_ORIGINS` | `"*"` | Comma-separated CORS allowed origins; `"*"` for wildcard (local dev default). Set to `https://${CADDY_HOST}` in production via `docker-compose.prod.yml`. |
 
+### Prod secrets
+
+Production secrets are stored in **AWS SSM Parameter Store** under `/leonard/prod/`:
+
+| SSM Path | Secret | Consumer |
+|---|---|---|
+| `/leonard/prod/POSTGRES_PASSWORD` | DB superuser password | backend, db (first-init) |
+
+**Instance profile:** `leonard-ec2-prod` (attached to EC2 `i-0f00585639d2f3ef1`) grants `ssm:GetParametersByPath` on `/leonard/prod/*` with `kms:ViaService` scoped to SSM only.
+
+**Boot flow:** On every deploy, `scripts/fetch-prod-secrets.sh` reads SSM and writes values to `/run/leonard/env` (tmpfs, mode 0600, cleared on reboot). `deploy-prod.sh` then extracts `POSTGRES_PASSWORD` from that file to `/run/leonard/POSTGRES_PASSWORD` (mode 0600). `docker-compose.prod.yml` mounts this as a Docker secret — the `backend` service reads it via `/run/secrets/postgres_password` (assembled into `DATABASE_URL` by `backend/docker-entrypoint.sh`), and the `db` service reads it via `POSTGRES_PASSWORD_FILE`. `scripts/reconcile-db-password.sh` then runs `ALTER ROLE mct2 PASSWORD :'newpw'` to synchronize the DB volume's embedded password.
+
+**Rotation:** Update the SSM param, then run `scripts/deploy-prod.sh`. The backend must be restarted for the new `DATABASE_URL` to take effect (deploy-prod.sh handles this). See `docs/runbooks/rotate-db-password.md`.
+
+**Note:** Restarting the backend without running `deploy-prod.sh` first will cause `InvalidPasswordError` if the SSM param was rotated. Always use `deploy-prod.sh`.
+
 ## Test Infrastructure
 
 **Unit tests** (`backend/tests/test_*.py`):

@@ -78,6 +78,37 @@ jobs:
           --ignore=tests/integration/test_full_workflow.py
           --durations=25
 
+  script-security-lint:
+    name: Script Security Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Reject set -x in prod scripts
+        run: |
+          # set -x traces every command to stderr; any in-scope secret variable
+          # gets written to the systemd journal and CI logs.
+          if grep -rn 'set -x' scripts/ --include='*.sh' \
+              | grep -v 'scripts/tests/' | grep -v '#.*set -x'; then
+            echo "ERROR: set -x found in scripts/ — remove it (leaks secrets to logs)"
+            exit 1
+          fi
+          echo "OK: no set -x in scripts/"
+
+      - name: Reject variable expansion of PASSWORD in echo/printf
+        run: |
+          # Match only when the $PASSWORD variable itself is being expanded —
+          # not when the word "PASSWORD" appears in a literal log message.
+          if grep -rn -E '(echo|printf)[^#]*\$\{?POSTGRES_PASSWORD' scripts/ --include='*.sh' \
+              | grep -v 'scripts/tests/'; then
+            echo "ERROR: \$POSTGRES_PASSWORD expanded in echo/printf in scripts/ — redact before logging"
+            exit 1
+          fi
+          echo "OK: no \$POSTGRES_PASSWORD expansion in echo/printf in scripts/"
+
+      - name: Bash unit tests
+        run: bash scripts/tests/run_tests.sh
+
   frontend-build:
     name: Frontend Build
     runs-on: ubuntu-latest
