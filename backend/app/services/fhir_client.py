@@ -437,13 +437,31 @@ async def evaluate_measure(
         f"&subject=Patient/{patient_id}"
     )
     async with httpx.AsyncClient(timeout=120.0) as client:
-        logger.info(
-            "Evaluating measure",
-            extra={"measure_id": measure_id, "patient_id": patient_id},
-        )
-        resp = await client.get(url)
-        resp.raise_for_status()
-        return resp.json()
+        for attempt in range(3):
+            logger.info(
+                "Evaluating measure",
+                extra={"measure_id": measure_id, "patient_id": patient_id, "attempt": attempt + 1},
+            )
+            resp = await client.get(url)
+            try:
+                resp.raise_for_status()
+                return resp.json()
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code
+                if status_code < 500 or attempt == 2:
+                    raise
+                logger.warning(
+                    "Transient measure evaluation failure — retrying",
+                    extra={
+                        "measure_id": measure_id,
+                        "patient_id": patient_id,
+                        "status_code": status_code,
+                        "attempt": attempt + 1,
+                    },
+                )
+                await asyncio.sleep(0.5 * (attempt + 1))
+
+    raise RuntimeError("Measure evaluation failed without a response")
 
 
 async def upload_measure_bundle(bundle_json: dict[str, Any]) -> dict[str, Any]:

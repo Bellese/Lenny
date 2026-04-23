@@ -1,5 +1,7 @@
 """Tests for validation service — bundle triage, population extraction, comparison."""
 
+import base64
+import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -12,7 +14,9 @@ from app.services.validation import (
     _extract_population_counts,
     _extract_test_case_info,
     _fix_valueset_compose_for_hapi,
+    _get_missing_valueset_stubs,
     _is_test_case_measure_report,
+    _prepare_measure_support_resources,
     _resolve_measure_id,
     _warn_unknown_bundle_types,
     compare_populations,
@@ -624,6 +628,31 @@ class TestTriageTestBundle:
         assert result["patients_loaded"] == 0
         # push_resources called exactly once for measure defs
         mock_push.assert_called_once()
+
+    async def test_bundle_with_no_secondary_defs_still_loads_missing_valueset_stubs(self, test_session):
+        """Bundles like CMS1218 have Measure/Library resources but no bundled ValueSets."""
+        bundle = {
+            "resourceType": "Bundle",
+            "type": "transaction",
+            "entry": [
+                {"resource": {"resourceType": "Measure", "id": "m1", "url": "http://example.com/m1"}},
+                {"resource": {"resourceType": "Library", "id": "lib1", "url": "http://example.com/lib1"}},
+            ],
+        }
+        stub = {"resourceType": "ValueSet", "id": "stub-vs", "url": "http://example.com/vs"}
+
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+            with patch(
+                "app.services.validation._prepare_measure_support_resources",
+                new_callable=AsyncMock,
+                return_value=[stub],
+            ) as mock_prepare:
+                result = await triage_test_bundle(bundle, "defs-only.json", test_session)
+
+        assert result["measures_loaded"] == 1
+        mock_prepare.assert_awaited_once_with([], bundle)
+        assert mock_push.call_count == 2
+        assert mock_push.call_args_list[0].args[0] == [stub]
 
     async def test_reupload_same_source_bundle_replaces_stale_expected_results(
         self, test_session, mock_test_bundle_with_expected
@@ -1291,3 +1320,108 @@ class TestFixValueSetComposeForHapi:
         result = _fix_valueset_compose_for_hapi([vs])
         assert id(result[0]) != original_id
         assert "compose" not in vs
+
+
+class TestMissingValueSetStubs:
+    def _bundle_with_elm(self, valueset_urls: list[str], bundled_valuesets: list[str] | None = None):
+        elm = {
+            "library": {
+                "valueSets": {"def": [{"id": url, "name": f"VS {idx}"} for idx, url in enumerate(valueset_urls)]}
+            }
+        }
+        entries = [
+            {
+                "resource": {
+                    "resourceType": "Library",
+                    "id": "lib",
+                    "content": [
+                        {
+                            "contentType": "application/elm+json",
+                            "data": base64.b64encode(json.dumps(elm).encode()).decode(),
+                        }
+                    ],
+                }
+            }
+        ]
+        for url in bundled_valuesets or []:
+            entries.append({"resource": {"resourceType": "ValueSet", "id": url.rsplit("/", 1)[-1], "url": url}})
+        return {"resourceType": "Bundle", "entry": entries}
+
+    def test_get_missing_valueset_stubs_skips_bundled_valuesets(self):
+        missing_url = "http://cts.nlm.nih.gov/fhir/ValueSet/1.2.3"
+        bundled_url = "http://cts.nlm.nih.gov/fhir/ValueSet/4.5.6"
+        bundle = self._bundle_with_elm([missing_url, bundled_url], bundled_valuesets=[bundled_url])
+
+        stubs = _get_missing_valueset_stubs(bundle)
+
+        assert [stub["url"] for stub in stubs] == [missing_url]
+        assert stubs[0]["resourceType"] == "ValueSet"
+        assert stubs[0]["status"] == "active"
+
+    async def test_prepare_measure_support_resources_adds_missing_stubs(self):
+        missing_url = "http://cts.nlm.nih.gov/fhir/ValueSet/1.2.3"
+        bundle = self._bundle_with_elm([missing_url])
+        resource = {"resourceType": "CodeSystem", "id": "cs"}
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {"resourceType": "Bundle", "entry": []}
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            prepared = await _prepare_measure_support_resources([resource], bundle)
+
+        assert resource in prepared
+        assert any(r.get("resourceType") == "ValueSet" and r.get("url") == missing_url for r in prepared)
+
+    async def test_prepare_measure_support_resources_skips_stub_when_valueset_exists(self):
+        existing_url = "http://cts.nlm.nih.gov/fhir/ValueSet/1.2.3"
+        bundle = self._bundle_with_elm([existing_url])
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "ValueSet", "id": "existing-id", "url": existing_url}}],
+        }
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            prepared = await _prepare_measure_support_resources([], bundle)
+
+        assert prepared == []
+
+    async def test_prepare_measure_support_resources_remaps_existing_valueset_id(self):
+        valueset = {
+            "resourceType": "ValueSet",
+            "id": "bundle-id",
+            "url": "http://cts.nlm.nih.gov/fhir/ValueSet/1.2.3",
+            "expansion": {"contains": [{"system": "http://loinc.org", "code": "1234-5"}]},
+        }
+        bundle = {"resourceType": "Bundle", "entry": [{"resource": valueset}]}
+
+        mock_response = MagicMock()
+        mock_response.raise_for_status = MagicMock()
+        mock_response.json.return_value = {
+            "resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "ValueSet", "id": "existing-id", "url": valueset["url"]}}],
+        }
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            prepared = await _prepare_measure_support_resources([valueset], bundle)
+
+        assert prepared[0]["id"] == "existing-id"
+        assert valueset["id"] == "bundle-id"

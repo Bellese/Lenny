@@ -5,6 +5,7 @@ running validation against expected results, and comparing population counts.
 """
 
 import asyncio
+import base64
 import copy
 import json
 import logging
@@ -357,6 +358,118 @@ def _fix_valueset_compose_for_hapi(resources: list[dict[str, Any]]) -> list[dict
     return result
 
 
+def _get_missing_valueset_stubs(bundle_json: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return empty ValueSet stubs for ELM-declared ValueSets omitted by the bundle.
+
+    HAPI's CQL engine raises ``Unknown ValueSet`` when an ELM-declared ValueSet
+    is not present at all. An empty ValueSet makes membership checks evaluate
+    false instead, which preserves patient-level comparison and matches the
+    connectathon harness behavior for incomplete MADiE bundles.
+    """
+    elm_declared_urls: set[str] = set()
+    bundled_urls: set[str] = set()
+
+    for entry in bundle_json.get("entry", []):
+        resource = entry.get("resource") or {}
+        resource_type = resource.get("resourceType")
+
+        if resource_type == "ValueSet" and resource.get("url"):
+            bundled_urls.add(resource["url"])
+            continue
+
+        if resource_type != "Library":
+            continue
+
+        for content in resource.get("content", []):
+            if content.get("contentType") != "application/elm+json" or not content.get("data"):
+                continue
+            try:
+                elm = json.loads(base64.b64decode(content["data"]))
+            except Exception:
+                logger.warning(
+                    "Unable to parse ELM JSON while scanning missing ValueSets",
+                    extra={"library_id": resource.get("id")},
+                )
+                continue
+
+            for valueset in elm.get("library", {}).get("valueSets", {}).get("def", []):
+                if url := valueset.get("id"):
+                    elm_declared_urls.add(url)
+
+    stubs = []
+    for url in sorted(elm_declared_urls - bundled_urls):
+        stub_id = "stub-" + re.sub(r"[^A-Za-z0-9.-]", "-", url.removeprefix("http://").removeprefix("https://"))
+        stubs.append(
+            {
+                "resourceType": "ValueSet",
+                "id": stub_id[:64],
+                "url": url,
+                "status": "active",
+            }
+        )
+    return stubs
+
+
+async def _find_existing_valueset_id(
+    url: str,
+    client: httpx.AsyncClient,
+    *,
+    target_url: str | None = None,
+) -> str | None:
+    """Return the existing HAPI ValueSet resource ID for a canonical URL."""
+    resp = await client.get(
+        f"{target_url or settings.MEASURE_ENGINE_URL}/ValueSet",
+        params={"url": url, "_count": 1, "_elements": "id,url"},
+        headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json"},
+    )
+    resp.raise_for_status()
+    entries = resp.json().get("entry", [])
+    if not entries:
+        return None
+    return entries[0].get("resource", {}).get("id")
+
+
+async def _prepare_measure_support_resources(
+    resources: list[dict[str, Any]],
+    bundle_json: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Prepare ValueSets/CodeSystems for HAPI upload.
+
+    Adds missing ELM ValueSet stubs only when HAPI does not already have that
+    URL, and remaps ValueSet IDs to existing HAPI resources to avoid HAPI-0902
+    URL+version uniqueness conflicts silently dropping updates inside a batch.
+    """
+    prepared = _fix_valueset_compose_for_hapi(resources)
+    stubs = _get_missing_valueset_stubs(bundle_json)
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        if stubs:
+            filtered_stubs = []
+            for stub in stubs:
+                url = stub.get("url")
+                if not url:
+                    continue
+                if await _find_existing_valueset_id(url, client):
+                    continue
+                filtered_stubs.append(stub)
+            if filtered_stubs:
+                prepared = [*prepared, *filtered_stubs]
+                logger.info("Prepared missing ValueSet stubs", extra={"count": len(filtered_stubs)})
+
+        aligned = []
+        for resource in prepared:
+            if resource.get("resourceType") != "ValueSet" or not resource.get("url"):
+                aligned.append(resource)
+                continue
+            existing_id = await _find_existing_valueset_id(resource["url"], client)
+            if existing_id and existing_id != resource.get("id"):
+                resource = copy.deepcopy(resource)
+                resource["id"] = existing_id
+            aligned.append(resource)
+
+    return aligned
+
+
 async def triage_test_bundle(
     bundle_json: dict[str, Any],
     filename: str,
@@ -379,9 +492,10 @@ async def triage_test_bundle(
         primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
         secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
         try:
-            if secondary:
-                # ValueSets/CodeSystems: patch compose before loading (HAPI-0902 is OK)
-                await push_resources(_fix_valueset_compose_for_hapi(secondary))
+            # ValueSets/CodeSystems plus ELM-declared missing ValueSet stubs.
+            support_resources = await _prepare_measure_support_resources(secondary, bundle_json)
+            if support_resources:
+                await push_resources(support_resources)
             if primary:
                 await push_resources(primary)  # Measure + Library always pushed
         except Exception as exc:
@@ -585,8 +699,9 @@ async def _reload_measures_from_seed_bundles() -> dict[str, int]:
             if measure_defs:
                 primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
                 secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
-                if secondary:
-                    await push_resources(_fix_valueset_compose_for_hapi(secondary))
+                support_resources = await _prepare_measure_support_resources(secondary, bundle_json)
+                if support_resources:
+                    await push_resources(support_resources)
                 if primary:
                     await push_resources(primary)
                     for r in primary:

@@ -295,6 +295,42 @@ async def test_evaluate_measure(mock_measure_report):
     assert "subject=Patient/patient-1" in url
 
 
+async def test_evaluate_measure_retries_transient_5xx(mock_measure_report):
+    """Transient HAPI 5xx responses are retried before returning the MeasureReport."""
+    responses = [
+        _make_response(500, {"resourceType": "OperationOutcome"}),
+        _make_response(502, {"resourceType": "OperationOutcome"}),
+        _make_response(200, mock_measure_report),
+    ]
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=responses)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        with patch("app.services.fhir_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            result = await evaluate_measure("measure-1", "patient-1", "2024-01-01", "2024-12-31")
+
+    assert result["resourceType"] == "MeasureReport"
+    assert mock_ctx.get.call_count == 3
+    assert mock_sleep.await_count == 2
+
+
+async def test_evaluate_measure_does_not_retry_4xx():
+    """Known HAPI/MADiE 4xx failures should surface without retrying."""
+    response = _make_response(400, {"resourceType": "OperationOutcome"})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        with pytest.raises(httpx.HTTPStatusError):
+            await evaluate_measure("measure-1", "patient-1", "2024-01-01", "2024-12-31")
+
+    mock_ctx.get.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # wipe_patient_data
 # ---------------------------------------------------------------------------
