@@ -12,7 +12,7 @@
           "git reset --hard FETCH_HEAD",
           "scripts/deploy-prod.sh"
         ],
-        "timeoutSeconds": "900"
+        "timeoutSeconds": 900
       }
     }
   ]
