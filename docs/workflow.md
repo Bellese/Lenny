@@ -77,7 +77,7 @@ scripts/deploy-prod.sh
 |--------|--------|
 | `EC2_HOST` | ✅ Deleted (2026-04-23) — no longer used by the deploy workflow |
 | `EC2_USER` | ✅ Deleted (2026-04-23) — no longer used by the deploy workflow |
-| `EC2_SSH_KEY` | Keep for one more release cycle, then delete |
+| `EC2_SSH_KEY` | ✅ Deleted (2026-04-23) — GitHub secret removed; SSH key remains on instance and on maintainer laptops for break-glass use |
 | `POSTGRES_PASSWORD` | ✅ Deleted (2026-04-23) — now sourced from SSM |
 | `AWS_DEPLOY_ROLE_ARN` | Active — used by the OIDC deploy workflow |
 
