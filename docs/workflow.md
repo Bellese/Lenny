@@ -51,12 +51,14 @@ scripts/deploy-prod.sh
 
 ### Systemd setup (one-time, on EC2)
 
-Run once after the initial Part A deploy to ensure secrets are fetched on reboot:
+Run once after the initial Part A deploy to ensure secrets are fetched on reboot. The drop-in override makes Docker depend on `leonard-bootstrap`, so a failed secrets fetch prevents Docker from starting entirely.
 
 ```bash
 sudo cp deploy/leonard-tmpfiles.conf /etc/tmpfiles.d/leonard.conf
 sudo systemd-tmpfiles --create /etc/tmpfiles.d/leonard.conf
 sudo cp deploy/leonard-bootstrap.service /etc/systemd/system/
+sudo mkdir -p /etc/systemd/system/docker.service.d/
+sudo cp deploy/docker-override-leonard.conf /etc/systemd/system/docker.service.d/leonard.conf
 sudo systemctl daemon-reload
 sudo systemctl enable --now leonard-bootstrap
 ```

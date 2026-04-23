@@ -8,8 +8,11 @@ Before=docker.service
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/opt/leonard/scripts/fetch-prod-secrets.sh
-StandardOutput=journal
-StandardError=journal
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/run/leonard
+PrivateTmp=yes
 
 [Install]
 WantedBy=multi-user.target
