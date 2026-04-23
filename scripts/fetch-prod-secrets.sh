@@ -53,7 +53,7 @@ readonly REQUIRED_PARAMS=("POSTGRES_PASSWORD")
 readonly ENV_DIR="${LEONARD_ENV_DIR:-/run/leonard}"
 readonly ENV_FILE="${ENV_DIR}/env"
 # Value must be printable, no whitespace/quotes/semicolons, length 16–128.
-readonly VALIDATION_REGEX='^[A-Za-z0-9+/=_.-]{16,128}$'
+readonly VALIDATION_REGEX='^[A-Za-z0-9_.-]{16,128}$'
 
 # ── functions ──────────────────────────────────────────────────────────────────
 
@@ -71,7 +71,7 @@ validate_value() {
     local name="$1"
     local value="$2"
     if ! printf '%s' "$value" | grep -qE "$VALIDATION_REGEX"; then
-        die 2 "Value for '${name}' failed validation — check length (16–128) and allowed characters ([A-Za-z0-9+/=_.-]). Value not logged."
+        die 2 "Value for '${name}' failed validation — check length (16–128) and allowed characters ([A-Za-z0-9_.-]). Value not logged."
     fi
 }
 
