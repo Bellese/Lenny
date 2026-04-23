@@ -178,7 +178,6 @@ if [ -n "$ASSOC_ID" ]; then
       --association-id "$ASSOC_ID" \
       --region "$REGION"
     echo "[+] Waiting for disassociation to complete ..."
-    aws ec2 wait instance-running --instance-ids "$INSTANCE_ID" --region "$REGION" 2>/dev/null || true
     sleep 5
     echo "[+] Associating new profile ..."
     aws ec2 associate-iam-instance-profile \
