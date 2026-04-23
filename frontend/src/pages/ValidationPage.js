@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import styles from './ValidationPage.module.css';
 import {
+  deleteValidationRun,
   uploadTestBundle,
   getUploads,
   getExpectedResults,
@@ -8,6 +9,7 @@ import {
   getValidationRuns,
   getValidationRun,
 } from '../api/client';
+import { useToast } from '../components/Toast';
 
 function SummaryCard({ label, value, variant = 'default' }) {
   return (
@@ -30,9 +32,11 @@ export default function ValidationPage() {
   const [runDetail, setRunDetail] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [runStarting, setRunStarting] = useState(false);
+  const [deletingRunIds, setDeletingRunIds] = useState([]);
   const [error, setError] = useState(null);
   const fileInputRef = useRef(null);
   const pollRef = useRef(null);
+  const toast = useToast();
 
   // Load initial data
   const loadData = useCallback(async () => {
@@ -57,7 +61,7 @@ export default function ValidationPage() {
   // Poll for status updates when uploads or runs are in progress
   useEffect(() => {
     const hasActive = uploads.some(u => u.status === 'queued' || u.status === 'running')
-      || runs.some(r => r.status === 'queued' || r.status === 'running');
+      || runs.some(r => r.status === 'queued' || r.status === 'running' || r.delete_requested);
 
     if (hasActive) {
       pollRef.current = setInterval(loadData, 3000);
@@ -78,6 +82,11 @@ export default function ValidationPage() {
         const detail = await getValidationRun(selectedRunId);
         setRunDetail(detail);
       } catch (err) {
+        if (err.status === 404) {
+          setSelectedRunId('');
+          setRunDetail(null);
+          return;
+        }
         setError(err.message);
       }
     }
@@ -122,7 +131,35 @@ export default function ValidationPage() {
     }
   };
 
+  const handleDeleteRun = async () => {
+    if (!selectedRunId) return;
+    const runId = String(selectedRunId);
+    const selectedRun = runs.find(run => String(run.id) === runId);
+    const label = selectedRun ? `Run #${selectedRun.id}` : `run ${runId}`;
+    if (!window.confirm(`Delete ${label}?`)) return;
+
+    setDeletingRunIds(prev => [...prev, runId]);
+    setSelectedRunId('');
+    setRunDetail(null);
+
+    try {
+      const result = await deleteValidationRun(runId);
+      if (result?.delete_requested) {
+        toast.warning('Deletion requested. The run will disappear once background work stops.');
+      } else {
+        toast.success('Validation run deleted');
+      }
+      await loadData();
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setDeletingRunIds(prev => prev.filter(id => id !== runId));
+    }
+  };
+
   const hasExpected = expected && expected.total_measures > 0;
+  const selectedRun = runs.find(run => String(run.id) === String(selectedRunId));
+  const selectedRunDeleting = selectedRun && (selectedRun.delete_requested || deletingRunIds.includes(String(selectedRun.id)));
 
   return (
     <div className={styles.page}>
@@ -219,14 +256,24 @@ export default function ValidationPage() {
       <section className={styles.section}>
         <div className={styles.runHeader}>
           <h2 className={styles.sectionTitle}>Validation Runs</h2>
-          <button
-            onClick={handleRunValidation}
-            disabled={!hasExpected || runStarting}
-            className={styles.primaryBtn}
-            title={!hasExpected ? 'Upload a test bundle first' : ''}
-          >
-            {runStarting ? 'Starting...' : 'Run Validation'}
-          </button>
+          <div className={styles.runActions}>
+            <button
+              onClick={handleRunValidation}
+              disabled={!hasExpected || runStarting}
+              className={styles.primaryBtn}
+              title={!hasExpected ? 'Upload a test bundle first' : ''}
+            >
+              {runStarting ? 'Starting...' : 'Run Validation'}
+            </button>
+            <button
+              type="button"
+              onClick={handleDeleteRun}
+              disabled={!selectedRunId || selectedRunDeleting}
+              className={styles.dangerBtn}
+            >
+              {selectedRunDeleting ? 'Deleting...' : 'Delete Run'}
+            </button>
+          </div>
         </div>
 
         {runs.length > 0 && (
@@ -240,7 +287,7 @@ export default function ValidationPage() {
               <option value="">Select a run...</option>
               {runs.map(r => (
                 <option key={r.id} value={r.id}>
-                  Run #{r.id} — {r.status} — {r.created_at ? new Date(r.created_at).toLocaleString() : ''}
+                  Run #{r.id} — {r.delete_requested ? 'deleting' : r.status} — {r.created_at ? new Date(r.created_at).toLocaleString() : ''}
                 </option>
               ))}
             </select>

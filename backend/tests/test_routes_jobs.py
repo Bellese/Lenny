@@ -319,6 +319,108 @@ async def test_create_job_stamps_cdr_auth_type_as_string_value(client, test_sess
     assert job.cdr_auth_type == "bearer"
 
 
+async def test_list_jobs_includes_delete_requested(client, test_session):
+    """GET /jobs includes delete_requested so the UI can reflect pending deletion."""
+    from app.models.job import Job
+
+    job = Job(
+        measure_id="measure-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="https://example.com/fhir",
+        delete_requested=True,
+    )
+    test_session.add(job)
+    await test_session.commit()
+
+    resp = await client.get("/jobs")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data[0]["delete_requested"] is True
+
+
+async def test_delete_terminal_job_removes_results_and_batches(client, test_session):
+    """DELETE /jobs/{id} immediately removes terminal jobs and cascades dependents."""
+    from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
+
+    job = Job(
+        measure_id="measure-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="https://example.com/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.flush()
+    batch = Batch(job_id=job.id, batch_number=1, patient_ids=["p1"], status=BatchStatus.complete)
+    result = MeasureResult(
+        job_id=job.id,
+        patient_id="p1",
+        patient_name="Patient One",
+        measure_report={"resourceType": "MeasureReport"},
+        populations={"initial_population": True},
+    )
+    test_session.add_all([batch, result])
+    await test_session.commit()
+    job_id = job.id
+    batch_id = batch.id
+    result_id = result.id
+
+    resp = await client.delete(f"/jobs/{job_id}")
+    assert resp.status_code == 204
+    test_session.expire_all()
+    assert await test_session.get(Job, job_id) is None
+    assert await test_session.get(Batch, batch_id) is None
+    assert await test_session.get(MeasureResult, result_id) is None
+
+
+async def test_delete_queued_job_marks_for_delete_and_cleanup_removes_it(client, test_session):
+    """DELETE /jobs/{id} on a queued job returns 202 and worker cleanup removes it."""
+    from app.models.job import Job
+    from app.services.worker import _cleanup_delete_requested_jobs
+
+    job = Job(
+        measure_id="measure-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="https://example.com/fhir",
+    )
+    test_session.add(job)
+    await test_session.commit()
+
+    resp = await client.delete(f"/jobs/{job.id}")
+    assert resp.status_code == 202
+    data = resp.json()
+    assert data["delete_requested"] is True
+
+    await test_session.refresh(job)
+    assert job.delete_requested is True
+
+    deleted = await _cleanup_delete_requested_jobs(test_session)
+    assert deleted == 1
+    assert await test_session.get(Job, job.id) is None
+
+
+async def test_delete_running_job_sets_delete_requested(client, test_session):
+    """DELETE /jobs/{id} on a running job returns 202 and leaves the row pending deletion."""
+    from app.models.job import Job, JobStatus
+
+    job = Job(
+        measure_id="measure-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="https://example.com/fhir",
+        status=JobStatus.running,
+    )
+    test_session.add(job)
+    await test_session.commit()
+
+    resp = await client.delete(f"/jobs/{job.id}")
+    assert resp.status_code == 202
+    await test_session.refresh(job)
+    assert job.delete_requested is True
+
+
 # ---------------------------------------------------------------------------
 # GET /jobs/{id}/comparison
 # ---------------------------------------------------------------------------

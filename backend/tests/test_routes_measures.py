@@ -3,6 +3,7 @@
 import json
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 import app.routes.measures as measures_module
@@ -225,3 +226,46 @@ async def test_upload_measure_small_file_not_rejected_by_size_check(client, monk
         )
 
     assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+
+
+async def test_delete_measure_success(client):
+    """DELETE /measures/{id} proxies measure deletion to the engine."""
+    with patch(
+        "app.routes.measures.delete_measure",
+        new_callable=AsyncMock,
+        return_value=None,
+    ) as mock_delete:
+        resp = await client.delete("/measures/measure-1")
+
+    assert resp.status_code == 204
+    mock_delete.assert_awaited_once_with("measure-1")
+
+
+async def test_delete_measure_not_found(client):
+    """DELETE /measures/{id} returns 404 when the engine reports the measure is missing."""
+    request = httpx.Request("DELETE", "http://test/measures/measure-1")
+    response = httpx.Response(404, request=request)
+    with patch(
+        "app.routes.measures.delete_measure",
+        new_callable=AsyncMock,
+        side_effect=httpx.HTTPStatusError("not found", request=request, response=response),
+    ):
+        resp = await client.delete("/measures/measure-1")
+
+    assert resp.status_code == 404
+    data = resp.json()["detail"]
+    assert data["issue"][0]["code"] == "not-found"
+
+
+async def test_delete_measure_engine_error(client):
+    """DELETE /measures/{id} returns 502 for upstream delete failures."""
+    with patch(
+        "app.routes.measures.delete_measure",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("Connection refused"),
+    ):
+        resp = await client.delete("/measures/measure-1")
+
+    assert resp.status_code == 502
+    data = resp.json()["detail"]
+    assert "Cannot reach measure engine" in data["issue"][0]["diagnostics"]

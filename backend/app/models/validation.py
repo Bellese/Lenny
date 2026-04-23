@@ -6,6 +6,7 @@ from typing import List, Optional
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -23,6 +24,7 @@ from app.models.base import Base
 class ValidationStatus(str, enum.Enum):
     queued = "queued"
     running = "running"
+    cancelled = "cancelled"
     complete = "complete"
     failed = "failed"
 
@@ -72,6 +74,7 @@ class ValidationRun(Base):
     patients_tested: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     patients_passed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     patients_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    delete_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

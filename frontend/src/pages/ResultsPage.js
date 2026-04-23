@@ -46,20 +46,34 @@ export default function ResultsPage() {
           return s === 'completed' || s === 'complete';
         });
         setJobs(completed);
-        if (!selectedJobId && completed.length > 0) {
-          const id = routeJobId || completed[0].id;
-          setSelectedJobId(id);
+        const preferredId = routeJobId || selectedJobId;
+        const preferredExists = preferredId && completed.some(j => String(j.id) === String(preferredId));
+
+        if (preferredExists) {
+          if (String(selectedJobId) !== String(preferredId)) {
+            setSelectedJobId(String(preferredId));
+          }
+          return;
+        }
+
+        const fallbackId = completed[0] ? String(completed[0].id) : '';
+        if (String(selectedJobId) !== fallbackId) {
+          setSelectedJobId(fallbackId);
+        }
+        if (routeJobId && String(routeJobId) !== fallbackId) {
+          navigate(fallbackId ? `/results/${fallbackId}` : '/results', { replace: true });
         }
       } catch {
         // Non-blocking
       }
     }
     loadJobs();
-  }, [routeJobId, selectedJobId]);
+  }, [navigate, routeJobId, selectedJobId]);
 
   // Load results when job is selected
   const loadResults = useCallback(async () => {
     if (!selectedJobId) {
+      setResults(null);
       setLoading(false);
       return;
     }

@@ -67,12 +67,30 @@ def _extract_patient_name(patient_resource: dict[str, Any]) -> Optional[str]:
     return None
 
 
+async def _stop_or_delete_job(job_id: int) -> bool:
+    """Return True when work should stop because the job was cancelled or deleted."""
+    async with async_session() as session:
+        job = await session.get(Job, job_id)
+        if not job:
+            return True
+        if job.delete_requested:
+            await session.delete(job)
+            await session.commit()
+            return True
+        return job.status == JobStatus.cancelled
+
+
 async def run_job(job_id: int) -> None:
     """Execute the full $gather workflow for a job."""
     async with async_session() as session:
         job = await session.get(Job, job_id)
         if not job:
             logger.error("Job not found", extra={"job_id": job_id})
+            return
+        if job.delete_requested:
+            await session.delete(job)
+            await session.commit()
+            logger.info("Job deleted before start", extra={"job_id": job_id})
             return
         if job.status == JobStatus.cancelled:
             logger.info("Job already cancelled", extra={"job_id": job_id})
@@ -85,10 +103,14 @@ async def run_job(job_id: int) -> None:
         # Step 1: Wipe patient data from measure engine (cleanup from prior job)
         logger.info("Wiping prior patient data from measure engine", extra={"job_id": job_id})
         await wipe_patient_data()
+        if await _stop_or_delete_job(job_id):
+            return
 
         # Step 2: Resolve CDR connection settings
         auth_headers = await _get_cdr_auth_headers(job_id)
         cdr_url = await _get_cdr_url(job_id)
+        if await _stop_or_delete_job(job_id):
+            return
 
         # Step 3: Fetch patients from CDR (optionally filtered by Group)
         async with async_session() as session:
@@ -104,6 +126,8 @@ async def run_job(job_id: int) -> None:
             patients = await strategy.gather_patients(cdr_url, auth_headers)
 
         if not patients:
+            if await _stop_or_delete_job(job_id):
+                return
             async with async_session() as session:
                 job = await session.get(Job, job_id)
                 if job:
@@ -119,6 +143,8 @@ async def run_job(job_id: int) -> None:
         patient_ids = list(patient_map.keys())
         batch_size = settings.BATCH_SIZE
 
+        if await _stop_or_delete_job(job_id):
+            return
         async with async_session() as session:
             job = await session.get(Job, job_id)
             if not job:
@@ -152,14 +178,14 @@ async def run_job(job_id: int) -> None:
                 )
 
         # Check for cancellation before starting
-        async with async_session() as session:
-            job = await session.get(Job, job_id)
-            if job and job.status == JobStatus.cancelled:
-                return
+        if await _stop_or_delete_job(job_id):
+            return
 
         await asyncio.gather(*[process_batch(bid) for bid in batch_ids])
 
         # Step 6: Finalize job
+        if await _stop_or_delete_job(job_id):
+            return
         async with async_session() as session:
             job = await session.get(Job, job_id)
             if not job:
@@ -174,6 +200,8 @@ async def run_job(job_id: int) -> None:
 
     except Exception as exc:
         logger.exception("Job failed", extra={"job_id": job_id})
+        if await _stop_or_delete_job(job_id):
+            return
         async with async_session() as session:
             job = await session.get(Job, job_id)
             if job:
@@ -236,6 +264,8 @@ async def _process_single_batch(
         try:
             processed = 0
             failed = 0
+            if await _stop_or_delete_job(job_id):
+                return
 
             # Read job params once
             async with async_session() as session:
@@ -252,10 +282,8 @@ async def _process_single_batch(
             # Phase 1: Gather all patient data and push to measure engine
             # ----------------------------------------------------------
             for patient_id in patient_ids:
-                async with async_session() as session:
-                    job = await session.get(Job, job_id)
-                    if job and job.status == JobStatus.cancelled:
-                        return
+                if await _stop_or_delete_job(job_id):
+                    return
 
                 try:
                     resources = await strategy.gather_patient_data(cdr_url, patient_id, auth_headers)
@@ -284,15 +312,15 @@ async def _process_single_batch(
                 extra={"job_id": job_id, "batch_id": batch_id},
             )
             await asyncio.sleep(5.0)
+            if await _stop_or_delete_job(job_id):
+                return
 
             # ----------------------------------------------------------
             # Phase 2: Evaluate each patient
             # ----------------------------------------------------------
             for patient_id in patient_ids:
-                async with async_session() as session:
-                    job = await session.get(Job, job_id)
-                    if job and job.status == JobStatus.cancelled:
-                        return
+                if await _stop_or_delete_job(job_id):
+                    return
 
                 try:
                     measure_report = await evaluate_measure(measure_id, patient_id, period_start, period_end)
@@ -300,6 +328,8 @@ async def _process_single_batch(
                     populations = _extract_populations(measure_report)
                     patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
 
+                    if await _stop_or_delete_job(job_id):
+                        return
                     async with async_session() as session:
                         result = MeasureResult(
                             job_id=job_id,
@@ -326,6 +356,8 @@ async def _process_single_batch(
                     failed += 1
 
             # Update batch and job counters
+            if await _stop_or_delete_job(job_id):
+                return
             async with async_session() as session:
                 batch = await session.get(Batch, batch_id)
                 if batch:

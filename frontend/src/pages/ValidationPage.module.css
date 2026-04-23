@@ -58,6 +58,27 @@
   filter: brightness(0.9);
 }
 
+.dangerBtn {
+  padding: var(--space-2) var(--space-4);
+  background: transparent;
+  color: var(--color-error);
+  border: 1px solid var(--color-error);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-body);
+  font-weight: var(--font-weight-semibold);
+  cursor: pointer;
+  min-height: 36px;
+}
+
+.dangerBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.dangerBtn:hover:not(:disabled) {
+  background: var(--color-error-light);
+}
+
 /* Tables */
 .table {
   width: 100%;
@@ -98,6 +119,7 @@
 
 .badge_queued { color: #666; border: 1px solid #ccc; }
 .badge_running { color: #1a73e8; border: 1px solid #1a73e8; }
+.badge_cancelled { color: #cf222e; border: 1px solid #cf222e; }
 .badge_complete { color: #2d8a4e; border: 1px solid #2d8a4e; }
 .badge_failed { color: #cf222e; border: 1px solid #cf222e; }
 
@@ -115,6 +137,13 @@
   align-items: center;
   gap: var(--space-2);
   margin-top: var(--space-3);
+}
+
+.runActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
 }
 
 .runLabel {

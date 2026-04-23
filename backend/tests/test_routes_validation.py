@@ -154,6 +154,7 @@ class TestListValidationRuns:
         runs = response.json()["runs"]
         assert len(runs) == 1
         assert runs[0]["patients_tested"] == 10
+        assert runs[0]["delete_requested"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +184,7 @@ class TestGetValidationRun:
         assert response.status_code == 200
         data = response.json()
         assert data["patients_tested"] == 2
+        assert data["delete_requested"] is False
         assert data["measures"] == []  # No results stored yet
 
 
@@ -258,6 +260,73 @@ class TestListUploads:
         uploads = response.json()["uploads"]
         assert len(uploads) == 1
         assert uploads[0]["warning_message"] == "2 resources could not be loaded"
+
+
+# ---------------------------------------------------------------------------
+# DELETE /validation/runs/{run_id}
+# ---------------------------------------------------------------------------
+
+
+class TestDeleteValidationRun:
+    @pytest.mark.asyncio
+    async def test_delete_terminal_run_removes_results(self, client, test_session):
+        from app.models.validation import ValidationResult
+
+        run = ValidationRun(status=ValidationStatus.complete)
+        test_session.add(run)
+        await test_session.flush()
+        result = ValidationResult(
+            validation_run_id=run.id,
+            measure_url="https://example.com/Measure/CMS124",
+            patient_ref="Patient/test-patient-1",
+            expected_populations={"numerator": 1},
+            actual_populations={"numerator": 1},
+            status="pass",
+            mismatches=[],
+        )
+        test_session.add(result)
+        await test_session.commit()
+        run_id = run.id
+        result_id = result.id
+
+        response = await client.delete(f"/validation/runs/{run_id}")
+        assert response.status_code == 204
+        test_session.expire_all()
+        assert await test_session.get(ValidationRun, run_id) is None
+        assert await test_session.get(ValidationResult, result_id) is None
+
+    @pytest.mark.asyncio
+    async def test_delete_queued_run_marks_for_delete_and_cleanup_removes_it(self, client, test_session):
+        from app.services.worker import _cleanup_delete_requested_validation_runs
+
+        run = ValidationRun(status=ValidationStatus.queued)
+        test_session.add(run)
+        await test_session.commit()
+
+        response = await client.delete(f"/validation/runs/{run.id}")
+        assert response.status_code == 202
+        assert response.json()["delete_requested"] is True
+
+        await test_session.refresh(run)
+        assert run.delete_requested is True
+        assert run.status == ValidationStatus.cancelled
+
+        deleted = await _cleanup_delete_requested_validation_runs(test_session)
+        assert deleted == 1
+        assert await test_session.get(ValidationRun, run.id) is None
+
+    @pytest.mark.asyncio
+    async def test_delete_running_run_sets_delete_requested(self, client, test_session):
+        run = ValidationRun(status=ValidationStatus.running)
+        test_session.add(run)
+        await test_session.commit()
+
+        response = await client.delete(f"/validation/runs/{run.id}")
+        assert response.status_code == 202
+
+        await test_session.refresh(run)
+        assert run.delete_requested is True
+        assert run.status == ValidationStatus.running
 
 
 # ---------------------------------------------------------------------------

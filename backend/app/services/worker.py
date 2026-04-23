@@ -23,6 +23,38 @@ logger = logging.getLogger(__name__)
 _shutdown_event = asyncio.Event()
 
 
+async def _cleanup_delete_requested_jobs(session) -> int:
+    """Delete queued/cancelled jobs that were marked for deletion before pickup."""
+    result = await session.execute(
+        select(Job).where(
+            Job.delete_requested.is_(True),
+            Job.status != JobStatus.running,
+        )
+    )
+    jobs = result.scalars().all()
+    for job in jobs:
+        await session.delete(job)
+    if jobs:
+        await session.commit()
+    return len(jobs)
+
+
+async def _cleanup_delete_requested_validation_runs(session) -> int:
+    """Delete queued/cancelled validation runs marked for deletion before pickup."""
+    result = await session.execute(
+        select(ValidationRun).where(
+            ValidationRun.delete_requested.is_(True),
+            ValidationRun.status != ValidationStatus.running,
+        )
+    )
+    runs = result.scalars().all()
+    for run in runs:
+        await session.delete(run)
+    if runs:
+        await session.commit()
+    return len(runs)
+
+
 async def worker_loop() -> None:
     """Poll for queued work and process sequentially.
 
@@ -34,21 +66,28 @@ async def worker_loop() -> None:
     while not _shutdown_event.is_set():
         found_work = False
         try:
+            async with async_session() as session:
+                deleted_jobs = await _cleanup_delete_requested_jobs(session)
+                deleted_runs = await _cleanup_delete_requested_validation_runs(session)
+            if deleted_jobs or deleted_runs:
+                found_work = True
+
             # --- Priority 1: Production Jobs ---
             job_id: int | None = None
-            async with async_session() as session:
-                result = await session.execute(
-                    select(Job.id)
-                    .where(Job.status == JobStatus.queued)
-                    .order_by(Job.created_at.asc())
-                    .limit(1)
-                    .with_for_update(skip_locked=True)
-                )
-                row = result.scalar_one_or_none()
-                if row is not None:
-                    job_id = row
-                    await session.execute(update(Job).where(Job.id == job_id).values(status=JobStatus.running))
-                    await session.commit()
+            if not found_work:
+                async with async_session() as session:
+                    result = await session.execute(
+                        select(Job.id)
+                        .where(Job.status == JobStatus.queued, Job.delete_requested.is_(False))
+                        .order_by(Job.created_at.asc())
+                        .limit(1)
+                        .with_for_update(skip_locked=True)
+                    )
+                    row = result.scalar_one_or_none()
+                    if row is not None:
+                        job_id = row
+                        await session.execute(update(Job).where(Job.id == job_id).values(status=JobStatus.running))
+                        await session.commit()
 
             if job_id is not None:
                 found_work = True
@@ -108,7 +147,10 @@ async def worker_loop() -> None:
                 async with async_session() as session:
                     result = await session.execute(
                         select(ValidationRun.id)
-                        .where(ValidationRun.status == ValidationStatus.queued)
+                        .where(
+                            ValidationRun.status == ValidationStatus.queued,
+                            ValidationRun.delete_requested.is_(False),
+                        )
                         .order_by(ValidationRun.created_at.asc())
                         .limit(1)
                         .with_for_update(skip_locked=True)

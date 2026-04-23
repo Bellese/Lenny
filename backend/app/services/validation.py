@@ -125,6 +125,19 @@ def compare_populations(expected: dict[str, int], actual: dict[str, int]) -> tup
     return (len(mismatches) == 0, mismatches)
 
 
+async def _stop_or_delete_validation_run(validation_run_id: int) -> bool:
+    """Return True when validation work should stop because the run was cancelled or deleted."""
+    async with async_session() as session:
+        run = await session.get(ValidationRun, validation_run_id)
+        if not run:
+            return True
+        if run.delete_requested:
+            await session.delete(run)
+            await session.commit()
+            return True
+        return run.status == ValidationStatus.cancelled
+
+
 # ---------------------------------------------------------------------------
 # Test bundle parsing and expected result extraction
 # ---------------------------------------------------------------------------
@@ -604,10 +617,20 @@ async def run_validation(validation_run_id: int) -> None:
         if not run:
             logger.error("ValidationRun not found", extra={"run_id": validation_run_id})
             return
+        if run.delete_requested:
+            await session.delete(run)
+            await session.commit()
+            logger.info("Validation run deleted before start", extra={"run_id": validation_run_id})
+            return
+        if run.status == ValidationStatus.cancelled:
+            logger.info("Validation run already cancelled", extra={"run_id": validation_run_id})
+            return
         run.status = ValidationStatus.running
         await session.commit()
 
     try:
+        if await _stop_or_delete_validation_run(validation_run_id):
+            return
         # Load expected results
         async with async_session() as session:
             run = await session.get(ValidationRun, validation_run_id)
@@ -621,6 +644,8 @@ async def run_validation(validation_run_id: int) -> None:
             expected_results = list(result.scalars().all())
 
         if not expected_results:
+            if await _stop_or_delete_validation_run(validation_run_id):
+                return
             async with async_session() as session:
                 run = await session.get(ValidationRun, validation_run_id)
                 if run:
@@ -655,6 +680,8 @@ async def run_validation(validation_run_id: int) -> None:
                 "period_start": ers[0].period_start,
                 "period_end": ers[0].period_end,
             }
+        if await _stop_or_delete_validation_run(validation_run_id):
+            return
 
         # If measures are missing, try to reload from seed bundles (lazy loading)
         if missing_measures:
@@ -716,7 +743,6 @@ async def run_validation(validation_run_id: int) -> None:
                     )
                 )
 
-        # Resolve CDR connection
         resolved_expected_results = [er for er in expected_results if er.measure_url in measure_info]
         total_passed = 0
         total_failed = 0
@@ -733,8 +759,13 @@ async def run_validation(validation_run_id: int) -> None:
                     cdr_url = settings.DEFAULT_CDR_URL
                     auth_headers = {}
 
+            if await _stop_or_delete_validation_run(validation_run_id):
+                return
+
             # Wipe measure engine patient data for clean evaluation
             await wipe_patient_data()
+            if await _stop_or_delete_validation_run(validation_run_id):
+                return
 
             # Phase 1: Gather from CDR and push to measure engine
             strategy = BatchQueryStrategy()
@@ -742,6 +773,8 @@ async def run_validation(validation_run_id: int) -> None:
 
             async def gather_and_push(patient_ref: str) -> None:
                 async with semaphore:
+                    if await _stop_or_delete_validation_run(validation_run_id):
+                        return
                     resources = await strategy.gather_patient_data(cdr_url, patient_ref, auth_headers)
                     if resources:
                         await push_resources(resources)
@@ -760,11 +793,15 @@ async def run_validation(validation_run_id: int) -> None:
 
             # Wait for HAPI indexing (configurable via HAPI_INDEX_WAIT_SECONDS env var)
             await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
+            if await _stop_or_delete_validation_run(validation_run_id):
+                return
 
             # Phase 2: Evaluate and compare (shared client avoids N connection pools)
             async def evaluate_and_compare(er: ExpectedResult, http_client: httpx.AsyncClient) -> ValidationResult:
                 info = measure_info[er.measure_url]
                 try:
+                    if await _stop_or_delete_validation_run(validation_run_id):
+                        raise asyncio.CancelledError("Validation run deletion requested")
                     report = await evaluate_measure(
                         info["hapi_id"],
                         er.patient_ref,
@@ -819,6 +856,8 @@ async def run_validation(validation_run_id: int) -> None:
                 result_coros = [eval_with_semaphore(er) for er in resolved_expected_results]
                 all_results.extend(await asyncio.gather(*result_coros))
 
+        if await _stop_or_delete_validation_run(validation_run_id):
+            return
         for vr in all_results:
             if vr.status == "pass":
                 total_passed += 1
@@ -828,6 +867,8 @@ async def run_validation(validation_run_id: int) -> None:
                 total_errors += 1
 
         # Store results
+        if await _stop_or_delete_validation_run(validation_run_id):
+            return
         async with async_session() as session:
             run = await session.get(ValidationRun, validation_run_id)
             if not run:
@@ -854,6 +895,8 @@ async def run_validation(validation_run_id: int) -> None:
 
     except Exception as exc:
         logger.exception("Validation run failed", extra={"run_id": validation_run_id})
+        if await _stop_or_delete_validation_run(validation_run_id):
+            return
         async with async_session() as session:
             run = await session.get(ValidationRun, validation_run_id)
             if run:

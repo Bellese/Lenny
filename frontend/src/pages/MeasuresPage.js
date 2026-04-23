@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import styles from './MeasuresPage.module.css';
-import { getMeasures, uploadMeasure } from '../api/client';
+import { deleteMeasure, getMeasures, uploadMeasure } from '../api/client';
 import { useToast } from '../components/Toast';
 
 function getMeasureDisplayName(measure) {
@@ -52,6 +52,7 @@ export default function MeasuresPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [deletingMeasureId, setDeletingMeasureId] = useState(null);
   const fileInputRef = useRef(null);
   const toast = useToast();
 
@@ -93,6 +94,23 @@ export default function MeasuresPage() {
       toast.error(`Upload failed: ${message}`);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleDeleteMeasure = async (measure) => {
+    if (!measure.id) return;
+    const measureName = getMeasureDisplayName(measure);
+    if (!window.confirm(`Delete measure "${measureName}"?`)) return;
+
+    setDeletingMeasureId(measure.id);
+    try {
+      await deleteMeasure(measure.id);
+      toast.success(`Deleted ${measureName}`);
+      await loadMeasures();
+    } catch (err) {
+      toast.error(`Delete failed: ${err.message || 'Failed to delete measure'}`);
+    } finally {
+      setDeletingMeasureId(null);
     }
   };
 
@@ -183,7 +201,17 @@ export default function MeasuresPage() {
                     <td className={styles.version}>{getMeasureVersion(measure)}</td>
                     <td><StatusBadge status={getMeasureStatus(measure)} /></td>
                     <td>
-                      <a href="/jobs" className={styles.actionLink}>Calculate</a>
+                      <div className={styles.actionGroup}>
+                        <a href="/jobs" className={styles.actionLink}>Calculate</a>
+                        <button
+                          type="button"
+                          className={styles.deleteBtn}
+                          onClick={() => handleDeleteMeasure(measure)}
+                          disabled={deletingMeasureId === measure.id || !measure.id}
+                        >
+                          {deletingMeasureId === measure.id ? 'Deleting...' : 'Delete'}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))

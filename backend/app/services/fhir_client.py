@@ -458,6 +458,14 @@ async def upload_measure_bundle(bundle_json: dict[str, Any]) -> dict[str, Any]:
         return resp.json()
 
 
+async def delete_measure(measure_id: str) -> None:
+    """Delete a Measure resource from the measure engine."""
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.delete(f"{settings.MEASURE_ENGINE_URL}/Measure/{measure_id}")
+        if resp.status_code not in (200, 202, 204):
+            resp.raise_for_status()
+
+
 async def wipe_patient_data() -> None:
     """Delete patient-related data from the measure engine.
 
