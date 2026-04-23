@@ -8,9 +8,13 @@
 # On "fail": exits 1 and emits the PGPASSWORD value on stderr so the
 # redaction test can verify the script scrubs it from output.
 
-# Record the call for assertion later.
+# Record the call (args + any stdin) for assertion later.
 if [[ -n "${STUB_DOCKER_CALLS:-}" ]]; then
     printf '%s\n' "$*" >> "$STUB_DOCKER_CALLS"
+    # Capture stdin if it is not a terminal (piped input from reconcile script).
+    if [[ ! -t 0 ]]; then
+        cat >> "$STUB_DOCKER_CALLS"
+    fi
 fi
 
 SCENARIO="${STUB_DOCKER_SCENARIO:-ok}"
