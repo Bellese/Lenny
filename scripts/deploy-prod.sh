@@ -155,9 +155,12 @@ done
 printf '[+] Reconciling DB password...\n'
 LEONARD_DIR="$LEONARD_DIR" "$RECONCILE_SCRIPT"
 
-# ── step 7: bring up remaining services ──────────────────────────────────────
-printf '[+] Starting remaining services...\n'
-"${COMPOSE[@]}" up -d
+# ── step 7: build and bring up remaining services ────────────────────────────
+# --build ensures locally-built images (backend, frontend, seed) are rebuilt
+# from the current Dockerfile so the new entrypoint and code are picked up.
+# Services using pre-built images (hapi, postgres, caddy) are unaffected.
+printf '[+] Building and starting remaining services...\n'
+"${COMPOSE[@]}" up -d --build
 
 # ── step 8: health check ──────────────────────────────────────────────────────
 printf '[+] Waiting for API health check...\n'
