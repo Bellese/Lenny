@@ -7,7 +7,7 @@
       "name": "deploy",
       "inputs": {
         "runCommand": [
-          "sudo -u ec2-user bash -c 'cd /opt/leonard && git fetch origin && git reset --hard FETCH_HEAD'",
+          "sudo -u ec2-user bash -c 'cd /opt/leonard && git fetch origin && git reset --hard origin/main'",
           "bash /opt/leonard/scripts/deploy-prod.sh"
         ],
         "timeoutSeconds": 900
