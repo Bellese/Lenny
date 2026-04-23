@@ -49,7 +49,7 @@ if [[ ! -f "$ENV_FILE" ]]; then
 fi
 
 # Read only the POSTGRES_PASSWORD line — avoid sourcing the whole file.
-PW_LINE="$(grep -E '^POSTGRES_PASSWORD=' "$ENV_FILE" | head -1)"
+PW_LINE="$(grep -E '^POSTGRES_PASSWORD=' "$ENV_FILE" | head -1 || true)"
 if [[ -z "$PW_LINE" ]]; then
     die 1 "POSTGRES_PASSWORD not set in '${ENV_FILE}'."
 fi
