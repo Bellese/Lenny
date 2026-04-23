@@ -36,7 +36,29 @@ We maintain `docs/decisions.md` to record significant technical and process choi
 
 ## Deploying to prod
 
-Normal deployments happen automatically when a PR merges to `main` (see Part B for CI/CD setup). For manual deploys:
+### CI/CD deploy (automated — normal path)
+
+Merging to `main` triggers an automatic deploy in roughly 5 minutes via GitHub Actions (`Test and Deploy` workflow).
+
+The sequence:
+
+1. Unit tests and frontend build gate the deploy — a failure here blocks the deploy step entirely.
+2. OIDC federated credentials assume the `leonard-github-deploy` IAM role (no long-lived AWS keys stored in GitHub).
+3. SSM Run Command invokes the `leonard-deploy` document on instance `i-0f00585639d2f3ef1`.
+4. The document runs `git fetch origin && git reset --hard FETCH_HEAD && scripts/deploy-prod.sh` on the instance.
+5. The workflow polls SSM for up to 16 minutes, then hits the health endpoint to confirm the deploy succeeded.
+
+No manual steps are needed for routine deploys. If the workflow fails, check the Actions run — SSM command output is also streamed to CloudWatch log group `/leonard/deploy`.
+
+### Manual redeploy (workflow_dispatch)
+
+To redeploy without pushing a new commit (e.g., after changing instance config or environment variables):
+
+Actions tab → **Test and Deploy** → **Run workflow** → select `main` → **Run workflow**.
+
+### SSH / direct (break-glass only)
+
+SSH access and direct `deploy-prod.sh` invocation are reserved for emergencies where the automated path is unavailable.
 
 ```bash
 cd /opt/leonard
@@ -46,27 +68,19 @@ scripts/deploy-prod.sh
 
 **Rules:**
 - **Always** use `scripts/deploy-prod.sh` — never run `docker compose up` directly in prod
-- **Never** run `docker compose restart db` without following it with `scripts/deploy-prod.sh --post-db-restart` (skipping reconcile will break backend auth)
-- SSH into the EC2 is break-glass only. Normal deploys go through `deploy-prod.sh`
+- **Never** run `docker compose restart db` without following it with `scripts/deploy-prod.sh --post-db-restart`
+- Authorized maintainers with SSH access: @msutton
 
-### Systemd setup (one-time, on EC2)
+### GitHub Actions secrets — cleanup after Part B stabilizes
 
-Run once after the initial Part A deploy to ensure secrets are fetched on reboot. The drop-in override makes Docker depend on `leonard-bootstrap`, so a failed secrets fetch prevents Docker from starting entirely.
+Once the SSM-based deploy has run cleanly 3–4 times, prune stale secrets from the repo:
 
-```bash
-sudo cp deploy/leonard-tmpfiles.conf /etc/tmpfiles.d/leonard.conf
-sudo systemd-tmpfiles --create /etc/tmpfiles.d/leonard.conf
-sudo cp deploy/leonard-bootstrap.service /etc/systemd/system/
-sudo mkdir -p /etc/systemd/system/docker.service.d/
-sudo cp deploy/docker-override-leonard.conf /etc/systemd/system/docker.service.d/leonard.conf
-sudo systemctl daemon-reload
-# On a live host (Docker already running): restart Docker so the new dependency takes effect.
-# WARNING: this restarts all running containers.
-sudo systemctl restart docker
-sudo systemctl enable --now leonard-bootstrap
-```
-
-The `Requires=leonard-bootstrap.service` drop-in only takes effect after Docker (re)starts — either via the explicit restart above on a live host, or automatically on the next host reboot.
+| Secret | Action |
+|--------|--------|
+| `EC2_HOST` | Delete — no longer used by the deploy workflow |
+| `EC2_USER` | Delete — no longer used by the deploy workflow |
+| `EC2_SSH_KEY` | Keep for one release cycle, then delete |
+| `POSTGRES_PASSWORD` | Already removed from `deploy.yml` |
 
 ## Reference Docs
 
