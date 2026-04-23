@@ -108,8 +108,7 @@ if [[ -n "${LEONARD_SSM_VERSION:-}" ]]; then
     # ── rollback path: fetch POSTGRES_PASSWORD at a specific version ───────────
     if ! response=$(aws ssm get-parameter \
         --region "$SSM_REGION" \
-        --name "${SSM_PATH_PREFIX}POSTGRES_PASSWORD" \
-        --version "$LEONARD_SSM_VERSION" \
+        --name "${SSM_PATH_PREFIX}POSTGRES_PASSWORD:${LEONARD_SSM_VERSION}" \
         --with-decryption \
         --output json 2>"$_aws_err"); then
         die 1 "SSM get-parameter failed for POSTGRES_PASSWORD at version ${LEONARD_SSM_VERSION}: $(cat "$_aws_err")"
