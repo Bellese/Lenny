@@ -14,6 +14,11 @@ if aws ssm describe-document --name "$DOC_NAME" --region "$REGION" >/dev/null 2>
     --region "$REGION" \
     --output text \
     --query 'DocumentDescription.DocumentVersion')
+  if [[ -z "$NEW_VERSION" ]]; then
+    echo "[!] Failed to capture new document version from update-document output" >&2
+    exit 1
+  fi
+  echo "[+] Updated $DOC_NAME to version $NEW_VERSION"
   aws ssm update-document-default-version --name "$DOC_NAME" \
     --document-version "$NEW_VERSION" \
     --region "$REGION"
