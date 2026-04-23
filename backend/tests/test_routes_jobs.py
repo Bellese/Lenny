@@ -1,7 +1,6 @@
 """Tests for job endpoints (POST /jobs, GET /jobs, GET /jobs/{id}, POST /jobs/{id}/cancel)."""
 
 import pytest
-from sqlalchemy import select
 
 pytestmark = pytest.mark.asyncio
 

@@ -14,8 +14,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy import delete, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -362,7 +361,7 @@ async def triage_test_bundle(
     bundle_json: dict[str, Any],
     filename: str,
     session: AsyncSession,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """Triage a test bundle: send resources to their correct destinations.
 
     - Measure/Library/ValueSet → measure engine
@@ -392,31 +391,40 @@ async def triage_test_bundle(
                 f"Details: {str(exc)}"
             ) from exc
 
-    # Upsert expected results atomically (avoids TOCTOU on concurrent uploads)
-    for tc in test_cases:
-        stmt = (
-            pg_insert(ExpectedResult)
-            .values(
-                measure_url=tc["measure_url"],
-                patient_ref=tc["patient_ref"],
-                test_description=tc["test_description"],
-                expected_populations=tc["expected_populations"],
-                period_start=tc["period_start"],
-                period_end=tc["period_end"],
-                source_bundle=filename,
-            )
-            .on_conflict_do_update(
-                constraint="uq_measure_patient",
-                set_={
-                    "test_description": tc["test_description"],
-                    "expected_populations": tc["expected_populations"],
-                    "period_start": tc["period_start"],
-                    "period_end": tc["period_end"],
-                    "source_bundle": filename,
-                },
-            )
+    # Fully replace expected results owned by this source bundle before loading the
+    # current bundle contents. This removes stale rows when a bundle shrinks or when
+    # MADiE changes the canonical URL for the same filename.
+    await session.execute(delete(ExpectedResult).where(ExpectedResult.source_bundle == filename))
+
+    existing_by_key: dict[tuple[str, str], ExpectedResult] = {}
+    if test_cases:
+        key_tuples = [(tc["measure_url"], tc["patient_ref"]) for tc in test_cases]
+        existing_result = await session.execute(
+            select(ExpectedResult).where(tuple_(ExpectedResult.measure_url, ExpectedResult.patient_ref).in_(key_tuples))
         )
-        await session.execute(stmt)
+        existing_by_key = {(er.measure_url, er.patient_ref): er for er in existing_result.scalars().all()}
+
+    for tc in test_cases:
+        key = (tc["measure_url"], tc["patient_ref"])
+        existing = existing_by_key.get(key)
+        if existing:
+            existing.test_description = tc["test_description"]
+            existing.expected_populations = tc["expected_populations"]
+            existing.period_start = tc["period_start"]
+            existing.period_end = tc["period_end"]
+            existing.source_bundle = filename
+        else:
+            session.add(
+                ExpectedResult(
+                    measure_url=tc["measure_url"],
+                    patient_ref=tc["patient_ref"],
+                    test_description=tc["test_description"],
+                    expected_populations=tc["expected_populations"],
+                    period_start=tc["period_start"],
+                    period_end=tc["period_end"],
+                    source_bundle=filename,
+                )
+            )
     await session.commit()
 
     # Push clinical data to active CDR (default or external)
@@ -578,7 +586,7 @@ async def _reload_measures_from_seed_bundles() -> dict[str, int]:
                 primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
                 secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
                 if secondary:
-                    await push_resources(secondary)
+                    await push_resources(_fix_valueset_compose_for_hapi(secondary))
                 if primary:
                     await push_resources(primary)
                     for r in primary:
@@ -655,17 +663,23 @@ async def run_validation(validation_run_id: int) -> None:
         # Resolve measure IDs and get periods
         measure_info: dict[str, dict[str, str]] = {}
         missing_measures: list[str] = []
+        unresolved_errors: dict[str, str] = {}
+        all_results: list[ValidationResult] = []
 
         for measure_url, ers in measures.items():
-            hapi_id = await _resolve_measure_id(measure_url)
+            try:
+                hapi_id = await _resolve_measure_id(measure_url)
+            except Exception as exc:
+                unresolved_errors[measure_url] = f"Measure resolution failed: {sanitize_error(exc)}"
+                continue
             if not hapi_id:
                 missing_measures.append(measure_url)
-            else:
-                measure_info[measure_url] = {
-                    "hapi_id": hapi_id,
-                    "period_start": ers[0].period_start,
-                    "period_end": ers[0].period_end,
-                }
+                continue
+            measure_info[measure_url] = {
+                "hapi_id": hapi_id,
+                "period_start": ers[0].period_start,
+                "period_end": ers[0].period_end,
+            }
         if await _stop_or_delete_validation_run(validation_run_id):
             return
 
@@ -680,9 +694,15 @@ async def run_validation(validation_run_id: int) -> None:
                 logger.info("Seed bundle reload complete", extra=reload_result)
 
                 # Retry resolving measures after reload
-                still_missing: list[str] = []
                 for measure_url in missing_measures:
-                    hapi_id = await _resolve_measure_id(measure_url)
+                    try:
+                        hapi_id = await _resolve_measure_id(measure_url)
+                    except Exception as exc:
+                        unresolved_errors[measure_url] = (
+                            f"Measure resolution failed after reload attempt: {sanitize_error(exc)}"
+                        )
+                        continue
+
                     if hapi_id:
                         ers = measures[measure_url]
                         measure_info[measure_url] = {
@@ -691,137 +711,150 @@ async def run_validation(validation_run_id: int) -> None:
                             "period_end": ers[0].period_end,
                         }
                     else:
-                        still_missing.append(measure_url)
-
-                if still_missing:
-                    error_msg = (
-                        f"Measures not found on engine after reload attempt. "
-                        f"This may indicate the HAPI measure engine is unavailable or the seed bundles are missing. "
-                        f"Please ensure the backend is properly connected to the measure engine, "
-                        f"or manually upload test bundles using the Validation page. "
-                        f"Missing measures: {', '.join(still_missing[:3])}{'...' if len(still_missing) > 3 else ''}"
-                    )
-                    raise ValueError(error_msg)
-            except ValueError:
-                raise
+                        unresolved_errors[measure_url] = (
+                            "Measure not found on engine after reload attempt. "
+                            "Upload the current bundle or verify the measure engine seed state."
+                        )
             except Exception as exc:
-                error_msg = (
-                    f"Failed to reload measures from seed bundles: {str(exc)}. "
-                    f"Please manually upload test bundles using the Validation page."
+                reload_error = sanitize_error(exc)
+                logger.warning(
+                    "Seed bundle reload failed; unresolved measures will be reported per patient",
+                    extra={"run_id": validation_run_id, "error": reload_error},
                 )
-                raise ValueError(error_msg) from exc
+                for measure_url in missing_measures:
+                    unresolved_errors.setdefault(
+                        measure_url,
+                        f"Failed to reload measures from seed bundles: {reload_error}",
+                    )
 
-        # Resolve CDR connection
-        async with async_session() as session:
-            cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
-            active_cdr = cdr_result.scalar_one_or_none()
-            if active_cdr:
-                cdr_url = active_cdr.cdr_url
-                auth_headers = await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials)
-            else:
-                cdr_url = settings.DEFAULT_CDR_URL
-                auth_headers = {}
+        for measure_url, error_message in unresolved_errors.items():
+            for er in measures[measure_url]:
+                all_results.append(
+                    ValidationResult(
+                        validation_run_id=validation_run_id,
+                        measure_url=er.measure_url,
+                        patient_ref=er.patient_ref,
+                        patient_name=None,
+                        expected_populations=er.expected_populations,
+                        actual_populations=None,
+                        status="error",
+                        error_message=error_message,
+                        mismatches=[],
+                    )
+                )
 
-        if await _stop_or_delete_validation_run(validation_run_id):
-            return
-        # Wipe measure engine patient data for clean evaluation
-        await wipe_patient_data()
-        if await _stop_or_delete_validation_run(validation_run_id):
-            return
-
-        # Phase 1: Gather from CDR and push to measure engine
-        strategy = BatchQueryStrategy()
-        semaphore = asyncio.Semaphore(settings.MAX_WORKERS)
-
-        async def gather_and_push(patient_ref: str) -> None:
-            async with semaphore:
-                if await _stop_or_delete_validation_run(validation_run_id):
-                    return
-                resources = await strategy.gather_patient_data(cdr_url, patient_ref, auth_headers)
-                if resources:
-                    await push_resources(resources)
-
-        all_patient_refs = [er.patient_ref for er in expected_results]
-        gather_results = await asyncio.gather(
-            *[gather_and_push(pr) for pr in all_patient_refs],
-            return_exceptions=True,
-        )
-        failed_gathers = sum(1 for r in gather_results if isinstance(r, BaseException))
-        if failed_gathers:
-            logger.warning(
-                "Patient data gather partial failure — validation may reflect incomplete data",
-                extra={"failed": failed_gathers, "total": len(all_patient_refs), "run_id": validation_run_id},
-            )
-
-        # Wait for HAPI indexing (configurable via HAPI_INDEX_WAIT_SECONDS env var)
-        await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
-        if await _stop_or_delete_validation_run(validation_run_id):
-            return
-
-        # Phase 2: Evaluate and compare (shared client avoids N connection pools)
+        resolved_expected_results = [er for er in expected_results if er.measure_url in measure_info]
         total_passed = 0
         total_failed = 0
         total_errors = 0
-        all_results: list[ValidationResult] = []
 
-        async def evaluate_and_compare(er: ExpectedResult, http_client: httpx.AsyncClient) -> ValidationResult:
-            info = measure_info[er.measure_url]
-            try:
-                if await _stop_or_delete_validation_run(validation_run_id):
-                    raise asyncio.CancelledError("Validation run deletion requested")
-                report = await evaluate_measure(
-                    info["hapi_id"],
-                    er.patient_ref,
-                    info["period_start"],
-                    info["period_end"],
-                )
-                actual = _extract_population_counts(report)
+        if resolved_expected_results:
+            async with async_session() as session:
+                cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
+                active_cdr = cdr_result.scalar_one_or_none()
+                if active_cdr:
+                    cdr_url = active_cdr.cdr_url
+                    auth_headers = await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials)
+                else:
+                    cdr_url = settings.DEFAULT_CDR_URL
+                    auth_headers = {}
 
-                # Try to get patient name from the report's evaluated resources
-                patient_name = None
-                for eval_ref in report.get("evaluatedResource", []):
-                    ref_str = eval_ref.get("reference", "")
-                    if ref_str.startswith("Patient/"):
-                        try:
-                            resp = await http_client.get(f"{settings.MEASURE_ENGINE_URL}/{ref_str}")
-                            if resp.status_code == 200:
-                                patient_name = _extract_patient_name(resp.json())
-                        except Exception:
-                            pass
-                        break
+            if await _stop_or_delete_validation_run(validation_run_id):
+                return
 
-                passed, mismatches = compare_populations(er.expected_populations, actual)
-                return ValidationResult(
-                    validation_run_id=validation_run_id,
-                    measure_url=er.measure_url,
-                    patient_ref=er.patient_ref,
-                    patient_name=patient_name,
-                    expected_populations=er.expected_populations,
-                    actual_populations=actual,
-                    status="pass" if passed else "fail",
-                    mismatches=mismatches if mismatches else [],
-                )
-            except Exception as exc:
-                return ValidationResult(
-                    validation_run_id=validation_run_id,
-                    measure_url=er.measure_url,
-                    patient_ref=er.patient_ref,
-                    patient_name=None,
-                    expected_populations=er.expected_populations,
-                    actual_populations=None,
-                    status="error",
-                    error_message=sanitize_error(exc),
-                    mismatches=[],
-                )
+            # Wipe measure engine patient data for clean evaluation
+            await wipe_patient_data()
+            if await _stop_or_delete_validation_run(validation_run_id):
+                return
 
-        async with httpx.AsyncClient(timeout=10.0) as http_client:
+            # Phase 1: Gather from CDR and push to measure engine
+            strategy = BatchQueryStrategy()
+            semaphore = asyncio.Semaphore(settings.MAX_WORKERS)
 
-            async def eval_with_semaphore(er: ExpectedResult) -> ValidationResult:
+            async def gather_and_push(patient_ref: str) -> None:
                 async with semaphore:
-                    return await evaluate_and_compare(er, http_client)
+                    if await _stop_or_delete_validation_run(validation_run_id):
+                        return
+                    resources = await strategy.gather_patient_data(cdr_url, patient_ref, auth_headers)
+                    if resources:
+                        await push_resources(resources)
 
-            result_coros = [eval_with_semaphore(er) for er in expected_results]
-            all_results = list(await asyncio.gather(*result_coros))
+            all_patient_refs = [er.patient_ref for er in resolved_expected_results]
+            gather_results = await asyncio.gather(
+                *[gather_and_push(pr) for pr in all_patient_refs],
+                return_exceptions=True,
+            )
+            failed_gathers = sum(1 for r in gather_results if isinstance(r, BaseException))
+            if failed_gathers:
+                logger.warning(
+                    "Patient data gather partial failure — validation may reflect incomplete data",
+                    extra={"failed": failed_gathers, "total": len(all_patient_refs), "run_id": validation_run_id},
+                )
+
+            # Wait for HAPI indexing (configurable via HAPI_INDEX_WAIT_SECONDS env var)
+            await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
+            if await _stop_or_delete_validation_run(validation_run_id):
+                return
+
+            # Phase 2: Evaluate and compare (shared client avoids N connection pools)
+            async def evaluate_and_compare(er: ExpectedResult, http_client: httpx.AsyncClient) -> ValidationResult:
+                info = measure_info[er.measure_url]
+                try:
+                    if await _stop_or_delete_validation_run(validation_run_id):
+                        raise asyncio.CancelledError("Validation run deletion requested")
+                    report = await evaluate_measure(
+                        info["hapi_id"],
+                        er.patient_ref,
+                        info["period_start"],
+                        info["period_end"],
+                    )
+                    actual = _extract_population_counts(report)
+
+                    # Try to get patient name from the report's evaluated resources
+                    patient_name = None
+                    for eval_ref in report.get("evaluatedResource", []):
+                        ref_str = eval_ref.get("reference", "")
+                        if ref_str.startswith("Patient/"):
+                            try:
+                                resp = await http_client.get(f"{settings.MEASURE_ENGINE_URL}/{ref_str}")
+                                if resp.status_code == 200:
+                                    patient_name = _extract_patient_name(resp.json())
+                            except Exception:
+                                pass
+                            break
+
+                    passed, mismatches = compare_populations(er.expected_populations, actual)
+                    return ValidationResult(
+                        validation_run_id=validation_run_id,
+                        measure_url=er.measure_url,
+                        patient_ref=er.patient_ref,
+                        patient_name=patient_name,
+                        expected_populations=er.expected_populations,
+                        actual_populations=actual,
+                        status="pass" if passed else "fail",
+                        mismatches=mismatches if mismatches else [],
+                    )
+                except Exception as exc:
+                    return ValidationResult(
+                        validation_run_id=validation_run_id,
+                        measure_url=er.measure_url,
+                        patient_ref=er.patient_ref,
+                        patient_name=None,
+                        expected_populations=er.expected_populations,
+                        actual_populations=None,
+                        status="error",
+                        error_message=sanitize_error(exc),
+                        mismatches=[],
+                    )
+
+            async with httpx.AsyncClient(timeout=10.0) as http_client:
+
+                async def eval_with_semaphore(er: ExpectedResult) -> ValidationResult:
+                    async with semaphore:
+                        return await evaluate_and_compare(er, http_client)
+
+                result_coros = [eval_with_semaphore(er) for er in resolved_expected_results]
+                all_results.extend(await asyncio.gather(*result_coros))
 
         if await _stop_or_delete_validation_run(validation_run_id):
             return
