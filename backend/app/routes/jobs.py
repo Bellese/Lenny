@@ -338,12 +338,6 @@ async def get_job_comparison(
             },
         )
 
-    result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
-    actual_results = result.scalars().all()
-
-    if not actual_results:
-        return {"has_expected": False, "matched": None, "total": None, "patients": []}
-
     measure_url = ""
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -368,12 +362,24 @@ async def get_job_comparison(
     if not expected_by_patient:
         return {"has_expected": False, "matched": None, "total": None, "patients": []}
 
+    result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
+    actual_by_patient = {mr.patient_id: mr for mr in result.scalars().all()}
+
     patients_list = []
     matched_count = 0
 
-    for mr in actual_results:
-        expected = expected_by_patient.get(mr.patient_id)
-        if not expected:
+    for patient_id, expected in sorted(expected_by_patient.items()):
+        mr = actual_by_patient.get(patient_id)
+        if not mr:
+            patients_list.append(
+                {
+                    "subject_reference": f"Patient/{patient_id}",
+                    "match": False,
+                    "mismatches": ["missing-result"],
+                    "expected": expected.expected_populations,
+                    "actual": {},
+                }
+            )
             continue
 
         actual_counts = _extract_population_counts(mr.measure_report)
@@ -391,9 +397,15 @@ async def get_job_comparison(
             }
         )
 
+    unexpected_result_count = len(set(actual_by_patient) - set(expected_by_patient))
+
     return {
         "has_expected": True,
         "matched": matched_count,
         "total": len(patients_list),
+        "expected_total": len(expected_by_patient),
+        "actual_total": len(actual_by_patient),
+        "missing_results": len(expected_by_patient) - len(set(expected_by_patient) & set(actual_by_patient)),
+        "unexpected_results": unexpected_result_count,
         "patients": patients_list,
     }

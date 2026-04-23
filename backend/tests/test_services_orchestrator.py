@@ -404,8 +404,8 @@ async def test_get_cdr_auth_headers_reads_from_job_row(test_session, session_fac
     mock_auth.assert_called_once_with("bearer", {"token": "test-jwt"})
 
 
-async def test_process_batch_uses_data_requirements_strategy(test_session, session_factory):
-    """_process_single_batch uses DataRequirementsStrategy by default."""
+async def test_process_batch_uses_everything_strategy(test_session, session_factory):
+    """_process_single_batch uses $everything by default for complete patient graphs."""
     from unittest.mock import MagicMock
 
     from app.models.job import Batch, BatchStatus
@@ -436,7 +436,7 @@ async def test_process_batch_uses_data_requirements_strategy(test_session, sessi
 
     with (
         _make_session_factory_patch(session_factory),
-        patch("app.services.orchestrator.DataRequirementsStrategy") as mock_strategy_cls,
+        patch("app.services.orchestrator.BatchQueryStrategy") as mock_strategy_cls,
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
         patch(
             "app.services.orchestrator.evaluate_measure",
@@ -469,4 +469,4 @@ async def test_process_batch_uses_data_requirements_strategy(test_session, sessi
             auth_headers={},
         )
 
-    mock_strategy_cls.assert_called_once_with("CMS999")
+    mock_strategy_cls.assert_called_once_with()

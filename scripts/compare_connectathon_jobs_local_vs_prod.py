@@ -180,7 +180,52 @@ def get_results(api_base: str, job_id: int) -> dict[str, Any]:
     return _http_json("GET", f"{api_base}/results?job_id={job_id}")
 
 
-def normalize_job_result(job: dict[str, Any], results: dict[str, Any]) -> dict[str, Any]:
+def get_job_comparison(api_base: str, job_id: int) -> dict[str, Any]:
+    return _http_json("GET", f"{api_base}/jobs/{job_id}/comparison")
+
+
+def normalize_expected_comparison(comparison: dict[str, Any]) -> dict[str, Any]:
+    patients = {}
+    for patient in comparison.get("patients", []):
+        subject_reference = patient.get("subject_reference") or ""
+        patient_id = subject_reference.removeprefix("Patient/") or subject_reference
+        if not patient_id:
+            continue
+        patients[patient_id] = {
+            "match": bool(patient.get("match")),
+            "mismatches": sorted(patient.get("mismatches") or []),
+            "expected": patient.get("expected") or {},
+            "actual": patient.get("actual") or {},
+        }
+
+    return {
+        "has_expected": bool(comparison.get("has_expected")),
+        "matched": comparison.get("matched"),
+        "total": comparison.get("total"),
+        "expected_total": comparison.get("expected_total", comparison.get("total")),
+        "actual_total": comparison.get("actual_total"),
+        "missing_results": comparison.get("missing_results", 0),
+        "unexpected_results": comparison.get("unexpected_results", 0),
+        "patients": patients,
+    }
+
+
+def expected_comparison_passed(comparison: dict[str, Any]) -> bool:
+    return (
+        comparison.get("has_expected") is True
+        and comparison.get("total") is not None
+        and comparison.get("matched") == comparison.get("total")
+        and comparison.get("total") == comparison.get("expected_total")
+        and comparison.get("missing_results", 0) == 0
+        and comparison.get("unexpected_results", 0) == 0
+    )
+
+
+def normalize_job_result(
+    job: dict[str, Any],
+    results: dict[str, Any],
+    expected_comparison: dict[str, Any],
+) -> dict[str, Any]:
     patients = {}
     for patient in results.get("patients", []):
         patient_id = patient.get("patient_id") or patient.get("id")
@@ -217,6 +262,7 @@ def normalize_job_result(job: dict[str, Any], results: dict[str, Any]) -> dict[s
             "performance_rate": results.get("performance_rate"),
             "patients": patients,
         },
+        "expected_comparison": normalize_expected_comparison(expected_comparison),
     }
 
 
@@ -239,6 +285,23 @@ def compare_normalized(local: dict[str, Any], production: dict[str, Any]) -> dic
             }
         )
 
+    local_expected = local["expected_comparison"]
+    production_expected = production["expected_comparison"]
+    expected_patient_ids = sorted(set(local_expected["patients"]) | set(production_expected["patients"]))
+    expected_patient_diffs = []
+    for patient_id in expected_patient_ids:
+        local_patient = local_expected["patients"].get(patient_id)
+        production_patient = production_expected["patients"].get(patient_id)
+        if local_patient == production_patient:
+            continue
+        expected_patient_diffs.append(
+            {
+                "patient_id": patient_id,
+                "local": local_patient,
+                "production": production_patient,
+            }
+        )
+
     local_job = local["job"]
     production_job = production["job"]
     job_counts_match = {
@@ -252,12 +315,30 @@ def compare_normalized(local: dict[str, Any], production: dict[str, Any]) -> dic
         and local["results"].get("performance_rate") == production["results"].get("performance_rate")
         and len(patient_diffs) == 0
     )
+    expected_summary_match = {
+        key: local_expected.get(key) == production_expected.get(key)
+        for key in (
+            "has_expected",
+            "matched",
+            "total",
+            "expected_total",
+            "actual_total",
+            "missing_results",
+            "unexpected_results",
+        )
+    }
 
     return {
-        "matches": all(job_counts_match.values()) and aggregate_match,
+        "matches": all(job_counts_match.values()) and aggregate_match and all(expected_summary_match.values())
+        and len(expected_patient_diffs) == 0,
         "job_counts_match": job_counts_match,
+        "expected_summary_match": expected_summary_match,
         "patient_diff_count": len(patient_diffs),
         "patient_diffs": patient_diffs,
+        "expected_patient_diff_count": len(expected_patient_diffs),
+        "expected_patient_diffs": expected_patient_diffs,
+        "local_expected_passed": expected_comparison_passed(local_expected),
+        "production_expected_passed": expected_comparison_passed(production_expected),
         "local_job": local_job,
         "production_job": production_job,
         "local_results_summary": {
@@ -267,6 +348,30 @@ def compare_normalized(local: dict[str, Any], production: dict[str, Any]) -> dic
         "production_results_summary": {
             key: production["results"].get(key)
             for key in ("total_patients", "failed_patients", "populations", "performance_rate")
+        },
+        "local_expected_summary": {
+            key: local_expected.get(key)
+            for key in (
+                "has_expected",
+                "matched",
+                "total",
+                "expected_total",
+                "actual_total",
+                "missing_results",
+                "unexpected_results",
+            )
+        },
+        "production_expected_summary": {
+            key: production_expected.get(key)
+            for key in (
+                "has_expected",
+                "matched",
+                "total",
+                "expected_total",
+                "actual_total",
+                "missing_results",
+                "unexpected_results",
+            )
         },
     }
 
@@ -278,7 +383,10 @@ def markdown_for_measure(measure_id: str, measure_fhir_id: str, group_id: str, c
         f"- Measure FHIR id: `{measure_fhir_id}`",
         f"- Group id: `{group_id}`",
         f"- Match: `{'yes' if comparison['matches'] else 'no'}`",
+        f"- Local expected pass: `{'yes' if comparison['local_expected_passed'] else 'no'}`",
+        f"- Production expected pass: `{'yes' if comparison['production_expected_passed'] else 'no'}`",
         f"- Patient diffs: `{comparison['patient_diff_count']}`",
+        f"- Expected comparison diffs: `{comparison['expected_patient_diff_count']}`",
         "",
         "## Job Counts",
         "",
@@ -310,6 +418,23 @@ def markdown_for_measure(measure_id: str, measure_fhir_id: str, group_id: str, c
             f"{pops.get('denominator_exclusion')} | {result.get('performance_rate')} |"
         )
 
+    lines.extend(
+        [
+            "",
+            "## Expected Comparison",
+            "",
+            "| Environment | Has Expected | Matched | Total | Expected Total | Actual Total | Missing | Unexpected |",
+            "|---|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for label, key in (("Local", "local_expected_summary"), ("Production", "production_expected_summary")):
+        expected = comparison[key]
+        lines.append(
+            f"| {label} | {expected.get('has_expected')} | {expected.get('matched')} | {expected.get('total')} | "
+            f"{expected.get('expected_total')} | {expected.get('actual_total')} | "
+            f"{expected.get('missing_results')} | {expected.get('unexpected_results')} |"
+        )
+
     if comparison["patient_diffs"]:
         lines.extend(["", "## Patient Diffs", ""])
         for diff in comparison["patient_diffs"][:50]:
@@ -324,6 +449,20 @@ def markdown_for_measure(measure_id: str, measure_fhir_id: str, group_id: str, c
     else:
         lines.extend(["", "## Patient Diffs", "", "No patient-level differences detected.", ""])
 
+    if comparison["expected_patient_diffs"]:
+        lines.extend(["", "## Expected Comparison Diffs", ""])
+        for diff in comparison["expected_patient_diffs"][:50]:
+            lines.append(f"### `{diff['patient_id']}`")
+            lines.append("")
+            lines.append(f"- Local: `{json.dumps(diff['local'], sort_keys=True)}`")
+            lines.append(f"- Production: `{json.dumps(diff['production'], sort_keys=True)}`")
+            lines.append("")
+        if len(comparison["expected_patient_diffs"]) > 50:
+            lines.append(f"Only first 50 of {len(comparison['expected_patient_diffs'])} diffs shown.")
+            lines.append("")
+    else:
+        lines.extend(["", "## Expected Comparison Diffs", "", "No expected-comparison differences detected.", ""])
+
     return "\n".join(lines)
 
 
@@ -331,17 +470,19 @@ def summary_markdown(results: list[dict[str, Any]]) -> str:
     lines = [
         "# Connectathon Jobs Local vs Production Summary",
         "",
-        "| Measure | Match | Local status | Production status | Local rows | Production rows | Patient diffs |",
-        "|---|---|---|---|---:|---:|---:|",
+        "| Measure | Parity | Local expected | Production expected | Local status | Production status | Local rows | Production rows | Patient diffs | Expected diffs |",
+        "|---|---|---|---|---|---|---:|---:|---:|---:|",
     ]
     for result in results:
         comparison = result["comparison"]
         lines.append(
             f"| {result['measure_id']} | {'yes' if comparison['matches'] else 'no'} | "
+            f"{'pass' if comparison['local_expected_passed'] else 'fail'} | "
+            f"{'pass' if comparison['production_expected_passed'] else 'fail'} | "
             f"{comparison['local_job'].get('status')} | {comparison['production_job'].get('status')} | "
             f"{comparison['local_results_summary'].get('total_patients')} | "
             f"{comparison['production_results_summary'].get('total_patients')} | "
-            f"{comparison['patient_diff_count']} |"
+            f"{comparison['patient_diff_count']} | {comparison['expected_patient_diff_count']} |"
         )
     lines.append("")
     return "\n".join(lines)
@@ -351,6 +492,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--local-api-base", default="http://localhost:8000")
     parser.add_argument("--production-api-base", default="https://api.98-89-219-217.nip.io")
+    parser.add_argument(
+        "--expected-only",
+        action="store_true",
+        help="Run only the local API and validate it against expected results without starting a production job.",
+    )
     parser.add_argument("--manifest", default=str(MANIFEST_PATH))
     parser.add_argument("--measure-id", help="Optional manifest measure id to run")
     parser.add_argument(
@@ -359,6 +505,26 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--timeout-seconds", type=int, default=3600)
     parser.add_argument("--poll-seconds", type=int, default=5)
+    parser.add_argument(
+        "--fail-on-mismatch",
+        action="store_true",
+        help="Exit non-zero when parity, expected comparison, or job completion checks fail.",
+    )
+    parser.add_argument(
+        "--fail-on-parity-mismatch",
+        action="store_true",
+        help="Exit non-zero when local and production job outputs differ.",
+    )
+    parser.add_argument(
+        "--fail-on-expected-mismatch",
+        action="store_true",
+        help="Exit non-zero when either environment does not match loaded expected results.",
+    )
+    parser.add_argument(
+        "--fail-on-job-failure",
+        action="store_true",
+        help="Exit non-zero when either job does not complete successfully.",
+    )
     return parser.parse_args()
 
 
@@ -389,21 +555,35 @@ def main() -> int:
         print(f"[measure] {measure_id} measure={measure_fhir_id} group={group_id}", flush=True)
 
         local_upload_id = upload_bundle(local_api, bundle_path, group_id)
-        production_upload_id = upload_bundle(production_api, bundle_path, group_id)
         local_upload = wait_for_upload(local_api, local_upload_id, args.timeout_seconds, args.poll_seconds)
-        production_upload = wait_for_upload(production_api, production_upload_id, args.timeout_seconds, args.poll_seconds)
 
         local_job_id = create_job(local_api, measure_fhir_id, group_id, measure["period"])
-        production_job_id = create_job(production_api, measure_fhir_id, group_id, measure["period"])
-
         local_job = wait_for_job(local_api, local_job_id, args.timeout_seconds, args.poll_seconds)
-        production_job = wait_for_job(production_api, production_job_id, args.timeout_seconds, args.poll_seconds)
 
         local_results = get_results(local_api, local_job_id)
-        production_results = get_results(production_api, production_job_id)
+        local_expected_comparison = get_job_comparison(local_api, local_job_id)
+        normalized_local = normalize_job_result(local_job, local_results, local_expected_comparison)
 
-        normalized_local = normalize_job_result(local_job, local_results)
-        normalized_production = normalize_job_result(production_job, production_results)
+        if args.expected_only:
+            production_upload = None
+            normalized_production = normalized_local
+        else:
+            production_upload_id = upload_bundle(production_api, bundle_path, group_id)
+            production_upload = wait_for_upload(
+                production_api,
+                production_upload_id,
+                args.timeout_seconds,
+                args.poll_seconds,
+            )
+            production_job_id = create_job(production_api, measure_fhir_id, group_id, measure["period"])
+            production_job = wait_for_job(production_api, production_job_id, args.timeout_seconds, args.poll_seconds)
+            production_results = get_results(production_api, production_job_id)
+            production_expected_comparison = get_job_comparison(production_api, production_job_id)
+            normalized_production = normalize_job_result(
+                production_job,
+                production_results,
+                production_expected_comparison,
+            )
         comparison = compare_normalized(normalized_local, normalized_production)
 
         payload = {
@@ -428,6 +608,29 @@ def main() -> int:
     summary_payload = {"generated_at_epoch": int(time.time()), "results": all_results}
     (output_dir / "summary.json").write_text(json.dumps(summary_payload, indent=2, sort_keys=True), encoding="utf-8")
     (output_dir / "summary.md").write_text(summary_markdown(all_results), encoding="utf-8")
+    failures = []
+    for result in all_results:
+        measure_id = result["measure_id"]
+        comparison = result["comparison"]
+        if (args.fail_on_mismatch or args.fail_on_parity_mismatch) and not comparison["matches"]:
+            failures.append(f"{measure_id}: local/prod parity mismatch")
+        if (args.fail_on_mismatch or args.fail_on_expected_mismatch) and not comparison["local_expected_passed"]:
+            failures.append(f"{measure_id}: local job does not match expected results")
+        if (args.fail_on_mismatch or args.fail_on_expected_mismatch) and not comparison["production_expected_passed"]:
+            failures.append(f"{measure_id}: production job does not match expected results")
+        if args.fail_on_mismatch or args.fail_on_job_failure:
+            for label, key in (("local", "local_job"), ("production", "production_job")):
+                status = str(comparison[key].get("status", "")).lower()
+                if status not in {"complete", "completed"}:
+                    failures.append(f"{measure_id}: {label} job status is {status or 'unknown'}")
+
+    if failures:
+        print("Connectathon jobs comparison failed:", file=sys.stderr)
+        for failure in failures:
+            print(f"  - {failure}", file=sys.stderr)
+        print(f"Artifacts written to {output_dir}", file=sys.stderr)
+        return 1
+
     return 0
 
 

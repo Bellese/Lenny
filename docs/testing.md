@@ -83,9 +83,10 @@ Integration tests are marked `@pytest.mark.integration` and live in `backend/tes
 | `test_connectathon_measures.py` | Parametrized per-test-case run across all connectathon bundles; skipped on the PR gate and included in the nightly source-of-truth job |
 | `test_full_workflow.py` | Full-stack pipeline covering job orchestration → measure eval → result storage; skipped on the PR gate and run in its own clean nightly job |
 
-The nightly `connectathon-measures.yml` workflow still runs once per night, but it now uses two clean jobs:
+The nightly `connectathon-measures.yml` workflow still runs once per night, but it now uses three clean jobs:
 - `source-of-truth` runs `test_golden_measures.py` and `test_connectathon_measures.py`.
 - `full-workflow` runs `test_full_workflow.py` by itself so it does not inherit the connectathon-loaded CDR state.
+- `jobs-workflow` starts the product Docker API stack and runs documented-pass connectathon measures through the real `/validation/upload-bundle` → `/jobs` → `/jobs/{id}/comparison` path. This catches product-path regressions that direct HAPI `$evaluate-measure` tests can miss.
 
 ---
 

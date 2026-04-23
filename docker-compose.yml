@@ -65,6 +65,9 @@ services:
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_external_references=true
       - hapi.fhir.enforce_referential_integrity_on_write=false
+      # Connectathon ValueSets exceed HAPI's default expansion limit of 1000.
+      # Keep the product stack aligned with the integration harness.
+      - hapi.fhir.maximum_expansion_size=50000
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
       - JAVA_TOOL_OPTIONS=-Xmx1g -Xms256m
@@ -88,7 +91,10 @@ services:
       - hapi.fhir.reuse_cached_search_results_millis=0
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_multiple_delete=true
+      - hapi.fhir.allow_external_references=true
       - hapi.fhir.cr.enabled=true
+      - hapi.fhir.enforce_referential_integrity_on_write=false
+      - hapi.fhir.maximum_expansion_size=50000
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
       - spring.jpa.properties.hibernate.search.enabled=true
@@ -96,6 +102,7 @@ services:
       - spring.jpa.properties.hibernate.search.backend.analysis.configurer=ca.uhn.fhir.jpa.search.HapiHSearchAnalysisConfigurers$$HapiLuceneAnalysisConfigurer
       - spring.jpa.properties.hibernate.search.backend.directory.root=/data/hapi/lucene
       - spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
+      - spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100
       - JAVA_TOOL_OPTIONS=-Xmx1500m -Xms256m
 
   seed:

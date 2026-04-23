@@ -14,7 +14,6 @@ from app.db import async_session
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
 from app.services.fhir_client import (
     BatchQueryStrategy,
-    DataRequirementsStrategy,
     _build_auth_headers,
     evaluate_measure,
     get_group_members,
@@ -296,7 +295,9 @@ async def _process_single_batch(
                 period_start = job.period_start
                 period_end = job.period_end
 
-            strategy = DataRequirementsStrategy(measure_id)
+            # Match the proven connectathon integration path: evaluate-measure
+            # needs each patient's full clinical graph on the measure engine.
+            strategy = BatchQueryStrategy()
 
             # ----------------------------------------------------------
             # Phase 1: Gather all patient data and push to measure engine

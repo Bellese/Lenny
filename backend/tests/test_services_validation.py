@@ -14,6 +14,7 @@ from app.services.validation import (
     _extract_population_counts,
     _extract_test_case_info,
     _fix_valueset_compose_for_hapi,
+    _get_codesystem_stubs_from_valuesets,
     _get_missing_valueset_stubs,
     _is_test_case_measure_report,
     _prepare_measure_support_resources,
@@ -1358,6 +1359,42 @@ class TestMissingValueSetStubs:
         assert stubs[0]["resourceType"] == "ValueSet"
         assert stubs[0]["status"] == "active"
 
+    def test_get_codesystem_stubs_from_valuesets_uses_bundle_coding_versions(self):
+        valueset = {
+            "resourceType": "ValueSet",
+            "id": "payer",
+            "url": "http://cts.nlm.nih.gov/fhir/ValueSet/payer",
+            "compose": {
+                "include": [
+                    {
+                        "system": "https://nahdo.org/sopt",
+                        "concept": [{"code": "1", "display": "MEDICARE"}],
+                    }
+                ]
+            },
+        }
+        bundle = {
+            "resourceType": "Bundle",
+            "entry": [
+                {"resource": valueset},
+                {
+                    "resource": {
+                        "resourceType": "Coverage",
+                        "id": "coverage",
+                        "type": {"coding": [{"system": "https://nahdo.org/sopt", "version": "9.2", "code": "1"}]},
+                    }
+                },
+            ],
+        }
+
+        stubs = _get_codesystem_stubs_from_valuesets([valueset], bundle)
+
+        versioned_stub = next(stub for stub in stubs if stub.get("version") == "9.2")
+        assert versioned_stub["resourceType"] == "CodeSystem"
+        assert versioned_stub["url"] == "https://nahdo.org/sopt"
+        assert versioned_stub["content"] == "complete"
+        assert versioned_stub["concept"] == [{"code": "1", "display": "MEDICARE"}]
+
     async def test_prepare_measure_support_resources_adds_missing_stubs(self):
         missing_url = "http://cts.nlm.nih.gov/fhir/ValueSet/1.2.3"
         bundle = self._bundle_with_elm([missing_url])
@@ -1399,7 +1436,7 @@ class TestMissingValueSetStubs:
 
         assert prepared == []
 
-    async def test_prepare_measure_support_resources_remaps_existing_valueset_id(self):
+    async def test_prepare_measure_support_resources_deletes_existing_valueset_before_reload(self):
         valueset = {
             "resourceType": "ValueSet",
             "id": "bundle-id",
@@ -1414,8 +1451,12 @@ class TestMissingValueSetStubs:
             "resourceType": "Bundle",
             "entry": [{"resource": {"resourceType": "ValueSet", "id": "existing-id", "url": valueset["url"]}}],
         }
+        mock_delete_response = MagicMock()
+        mock_delete_response.status_code = 204
+        mock_delete_response.raise_for_status = MagicMock()
         mock_client = AsyncMock()
         mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.delete = AsyncMock(return_value=mock_delete_response)
         mock_ctx = MagicMock()
         mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
@@ -1423,5 +1464,8 @@ class TestMissingValueSetStubs:
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             prepared = await _prepare_measure_support_resources([valueset], bundle)
 
-        assert prepared[0]["id"] == "existing-id"
+        mock_client.delete.assert_awaited_once()
+        assert str(mock_client.delete.await_args.args[0]).endswith("/ValueSet/existing-id")
+        prepared_valueset = next(resource for resource in prepared if resource.get("resourceType") == "ValueSet")
+        assert prepared_valueset["id"] == "bundle-id"
         assert valueset["id"] == "bundle-id"

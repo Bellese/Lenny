@@ -8,6 +8,8 @@ name: Connectathon Measures
 #   - source-of-truth: golden isolation plus full-bundle connectathon coverage.
 #   - full-workflow: orchestration end-to-end coverage in a clean runner so it
 #     does not inherit the connectathon-loaded CDR state.
+#   - jobs-workflow: real MCT2 /jobs calculations for known passing
+#     Connectathon measures, compared against loaded expected patient outcomes.
 #
 # When STRICT_STU6 flips to "1" the source-of-truth job will hard-fail on
 # population mismatches, giving a daily signal of connectathon readiness.
@@ -71,3 +73,57 @@ jobs:
 
       - name: Run full workflow integration test in isolation
         run: ./scripts/run-integration-tests.sh tests/integration/test_full_workflow.py
+
+  jobs-workflow:
+    name: Jobs Workflow (connectathon expected parity)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Pull HAPI FHIR image
+        run: docker pull hapiproject/hapi:v8.8.0-1
+
+      - name: Start product API stack
+        run: docker compose up -d --build backend
+
+      - name: Wait for product API
+        run: |
+          for attempt in {1..60}; do
+            if curl -sf http://localhost:8000/health > /dev/null; then
+              exit 0
+            fi
+            echo "Waiting for backend health (${attempt}/60)..."
+            sleep 10
+          done
+          docker compose ps
+          docker compose logs --no-color --tail=200 backend hapi-fhir-cdr hapi-fhir-measure
+          exit 1
+
+      - name: Run real jobs-path connectathon checks
+        run: |
+          set -euo pipefail
+          for measure_id in \
+            CMS124FHIRCervicalCancerScreening \
+            CMS506FHIRSafeUseofOpioids \
+            CMS816FHIRHHHypo \
+            CMS529FHIRHybridHospitalWideReadmission; do
+            python3 scripts/compare_connectathon_jobs_local_vs_prod.py \
+              --local-api-base http://localhost:8000 \
+              --expected-only \
+              --measure-id "$measure_id" \
+              --output-dir "artifacts/connectathon-jobs-workflow/${measure_id}" \
+              --timeout-seconds 3600 \
+              --poll-seconds 5 \
+              --fail-on-mismatch
+          done
+
+      - name: Show jobs-path summary
+        if: always()
+        run: |
+          find artifacts/connectathon-jobs-workflow -name summary.md -print -exec sed -n '1,80p' {} \; || true
+
+      - name: Stop product API stack
+        if: always()
+        run: docker compose down -v
