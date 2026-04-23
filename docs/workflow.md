@@ -34,6 +34,24 @@ Each phase uses one recommended tool. The issue gets updated before moving on.
 
 We maintain `docs/decisions.md` to record significant technical and process choices with their rationale. When you make a decision that would be non-obvious to someone joining the project next month, add it to the log.
 
+## Deploying to prod
+
+### Systemd setup (one-time, on EC2)
+
+`/run/` is a tmpfs that is wiped on every reboot. The systemd units in `deploy/` ensure `/run/leonard/` exists and secrets are fetched before Docker starts.
+
+Install once after first provisioning the EC2:
+
+```bash
+sudo cp deploy/leonard-tmpfiles.conf /etc/tmpfiles.d/leonard.conf
+sudo systemd-tmpfiles --create /etc/tmpfiles.d/leonard.conf
+sudo cp deploy/leonard-bootstrap.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now leonard-bootstrap
+```
+
+`leonard-bootstrap.service` is ordered `Before=docker.service`, so on every subsequent reboot `fetch-prod-secrets.sh` runs and writes `/run/leonard/env` before Docker attempts to read it.
+
 ## Reference Docs
 
 | Doc | Contents |
