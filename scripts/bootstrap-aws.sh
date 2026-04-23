@@ -35,6 +35,17 @@ echo "Instance: $INSTANCE_ID"
 echo ""
 
 # ---------------------------------------------------------------------------
+# 0. Verify active AWS profile resolves to the expected account
+# ---------------------------------------------------------------------------
+echo "[+] Verifying AWS account..."
+CALLER_ACCOUNT=$(aws sts get-caller-identity --query Account --output text --region "$REGION")
+if [ "$CALLER_ACCOUNT" != "$ACCOUNT_ID" ]; then
+  echo "[!] ERROR: Active AWS profile resolves to account $CALLER_ACCOUNT, expected $ACCOUNT_ID. Aborting."
+  exit 1
+fi
+echo "[+] Confirmed account: $CALLER_ACCOUNT"
+
+# ---------------------------------------------------------------------------
 # 1. SSM parameter — skip if exists, generate random 32-char password if new
 # ---------------------------------------------------------------------------
 echo "[+] Checking SSM parameter $SSM_PARAM ..."
@@ -42,15 +53,26 @@ if aws ssm get-parameter --name "$SSM_PARAM" --region "$REGION" >/dev/null 2>&1;
   echo "[=] SSM parameter already exists — skipping creation"
 else
   echo "[+] Generating random POSTGRES_PASSWORD ..."
-  POSTGRES_PASSWORD=$(openssl rand -base64 24 | tr -d '/+=' | cut -c1-32)
+  # Write param JSON to a mode-600 temp file so the password never appears as a
+  # process argument (visible via `ps` / /proc/<pid>/cmdline).
+  PW_JSON=$(mktemp)
+  chmod 600 "$PW_JSON"
+  python3 -c "
+import json, sys
+print(json.dumps({
+  'Name': sys.argv[1],
+  'Value': sys.argv[2],
+  'Type': 'SecureString',
+  'Description': 'Leonard prod Postgres password',
+  'Overwrite': False,
+  'Tier': 'Standard'
+}))
+" "$SSM_PARAM" \
+  "$(openssl rand -base64 48 | tr -d '/+=' | cut -c1-32)" > "$PW_JSON"
   echo "[+] Creating SSM SecureString parameter ..."
-  aws ssm put-parameter \
-    --name "$SSM_PARAM" \
-    --value "$POSTGRES_PASSWORD" \
-    --type "SecureString" \
-    --description "Leonard prod Postgres password" \
-    --region "$REGION"
-  echo "[✓] SSM parameter created"
+  aws ssm put-parameter --cli-input-json "file://$PW_JSON" --region "$REGION"
+  rm -f "$PW_JSON"
+  echo "[+] SSM parameter $SSM_PARAM created (value stored in SSM, not printed)"
   echo ""
   echo "  IMPORTANT: The generated POSTGRES_PASSWORD has been stored in SSM."
   echo "  It is NOT printed here. Retrieve it with:"
@@ -66,10 +88,6 @@ if aws iam get-policy --policy-arn "$POLICY_ARN" --region "$REGION" >/dev/null 2
   echo "[=] IAM policy already exists — skipping creation"
 else
   echo "[+] Creating IAM policy from iam/leonard-prod-ssm-read-policy.json ..."
-  # Note: the kms:Decrypt Resource uses a wildcard because SSM SecureString
-  # parameters encrypted with the AWS-managed key (aws/ssm) do not expose the
-  # exact key ARN at policy-write time. The Sid 'DecryptSsmManagedKey' documents
-  # this intent. For customer-managed keys, replace '*' with the specific key ARN.
   aws iam create-policy \
     --policy-name "$POLICY_NAME" \
     --policy-document "file://$REPO_ROOT/iam/leonard-prod-ssm-read-policy.json" \

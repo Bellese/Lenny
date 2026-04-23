@@ -15,7 +15,12 @@
       "Sid": "DecryptSsmManagedKey",
       "Effect": "Allow",
       "Action": "kms:Decrypt",
-      "Resource": "arn:aws:kms:us-east-1:439475769170:key/*"
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "kms:ViaService": "ssm.us-east-1.amazonaws.com"
+        }
+      }
     }
   ]
 }
