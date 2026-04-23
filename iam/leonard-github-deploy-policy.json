@@ -13,10 +13,7 @@
     {
       "Sid": "SSMPollCommand",
       "Effect": "Allow",
-      "Action": [
-        "ssm:GetCommandInvocation",
-        "ssm:ListCommandInvocations"
-      ],
+      "Action": "ssm:GetCommandInvocation",
       "Resource": "*"
     },
     {
