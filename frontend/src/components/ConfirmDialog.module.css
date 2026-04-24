@@ -96,3 +96,28 @@
   background: var(--accent);
   color: oklch(0.99 0 0);
 }
+
+@media (max-width: 820px) {
+  .backdrop {
+    align-items: flex-end;
+    display: flex;
+    justify-content: center;
+    padding: 12px;
+    padding-bottom: calc(12px + env(safe-area-inset-bottom));
+  }
+
+  .panel {
+    width: 100%;
+    padding: 20px;
+  }
+
+  .actions {
+    flex-direction: column-reverse;
+  }
+
+  .cancelBtn,
+  .confirmBtn {
+    width: 100%;
+    min-height: 40px;
+  }
+}

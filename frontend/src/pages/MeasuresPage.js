@@ -186,11 +186,11 @@ export default function MeasuresPage() {
               ) : (
                 visible.map((measure, i) => (
                   <tr key={measure.id || i} className={styles.row}>
-                    <td><span className={styles.mono}>{measure.id || '--'}</span></td>
-                    <td className={styles.measureName}>{getMeasureDisplayName(measure)}</td>
-                    <td className={styles.mono} style={{ color: 'var(--text-muted)' }}>{getMeasureVersion(measure)}</td>
-                    <td><StatusBadge status={getMeasureStatus(measure)} /></td>
-                    <td>
+                    <td data-label="ID"><span className={styles.mono}>{measure.id || '--'}</span></td>
+                    <td data-label="Measure" className={styles.measureName}>{getMeasureDisplayName(measure)}</td>
+                    <td data-label="Version" className={styles.mono} style={{ color: 'var(--text-muted)' }}>{getMeasureVersion(measure)}</td>
+                    <td data-label="Status"><StatusBadge status={getMeasureStatus(measure)} /></td>
+                    <td data-label="Actions">
                       <div className={styles.actionGroup}>
                         <a href="/jobs" className={styles.calcBtn}>Calculate</a>
                         <KebabMenu items={[

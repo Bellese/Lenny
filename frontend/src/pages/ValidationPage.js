@@ -7,7 +7,7 @@ import {
 import { useToast } from '../components/Toast';
 import KebabMenu from '../components/KebabMenu';
 import ConfirmDialog from '../components/ConfirmDialog';
-import { TrashIcon, SparkIcon, PlusIcon } from '../components/Icons';
+import { TrashIcon, SparkIcon, ViewIcon, XIcon, ChevronIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
 
 function StatusBadge({ status }) {
@@ -75,13 +75,6 @@ export default function ValidationPage() {
     loadDetail();
   }, [selectedRunId]);
 
-  useEffect(() => {
-    if (!selectedRunId && runs.length > 0) {
-      const completed = runs.find(r => r.status === 'complete');
-      if (completed) setSelectedRunId(String(completed.id));
-    }
-  }, [runs, selectedRunId]);
-
   const handleUpload = async () => {
     const file = fileInputRef.current?.files[0];
     if (!file) return;
@@ -134,6 +127,7 @@ export default function ValidationPage() {
   };
 
   const hasExpected = expected && expected.total_measures > 0;
+  const expectedMeasures = expected?.measures || [];
 
   const q = query.trim().toLowerCase();
   const filteredRuns = runs.filter(r => {
@@ -142,10 +136,34 @@ export default function ValidationPage() {
   });
 
   // KPI values
-  const totalRuns = runs.length;
-  const passedRuns = runs.filter(r => r.status === 'complete').length;
-  const passRate = totalRuns > 0 ? `${Math.round((passedRuns / totalRuns) * 100)}%` : '--';
-  const lastRun = runs[0];
+  const bundlesLoaded = uploads.length;
+  const uploadPatients = uploads.reduce((sum, u) => sum + (u.patients_loaded || 0), 0);
+  const totalPatients = runs.reduce((sum, r) => sum + (r.patients_tested || 0), 0) || uploadPatients;
+  const totalPassedPatients = runs.reduce((sum, r) => sum + (r.patients_passed || 0), 0);
+  const passRate = totalPatients > 0 ? `${((totalPassedPatients / totalPatients) * 100).toFixed(1)}%` : '--';
+
+  const measureLabel = (measureUrl) => {
+    if (!measureUrl) return '--';
+    return measureUrl.split('/').pop() || measureUrl;
+  };
+
+  const runBundleName = (run, index) => (
+    run.bundle_filename
+    || run.filename
+    || uploads[index]?.filename
+    || uploads[0]?.filename
+    || `Run #${run.id}`
+  );
+
+  const runMeasureName = (run) => {
+    const measureUrl = run.measure_urls?.[0] || expectedMeasures[0]?.measure_url;
+    if (measureUrl) return measureLabel(measureUrl);
+    if (run.measures_tested) return `${run.measures_tested} measure${run.measures_tested === 1 ? '' : 's'}`;
+    return '--';
+  };
+
+  const selectedRunSummary = runs.find(r => String(r.id) === String(selectedRunId));
+  const selectedRunIndex = selectedRunSummary ? runs.findIndex(r => String(r.id) === String(selectedRunId)) : -1;
 
   return (
     <div className={styles.page}>
@@ -153,7 +171,7 @@ export default function ValidationPage() {
         <div>
           <div className={styles.eyebrow}>Testing</div>
           <h1 className={styles.title}>Validation</h1>
-          <div className={styles.sub}>Run measures against known test bundles and compare to expected results.</div>
+          <div className={styles.sub}>Run measures against known test bundles and compare to expected population membership.</div>
         </div>
         <div className={styles.headerActions}>
           <label className={styles.btnGhost}>
@@ -177,8 +195,8 @@ export default function ValidationPage() {
       {/* KPI cards */}
       <div className={styles.kpiRow}>
         {[
-          ['Total runs', String(totalRuns), 'text'],
-          ['Completed', String(passedRuns), 'text'],
+          ['Bundles loaded', String(bundlesLoaded || expected?.total_measures || 0), 'text'],
+          ['Test patients', totalPatients ? String(totalPatients) : '--', 'text'],
           ['Pass rate', passRate, 'accent'],
         ].map(([label, val, tone]) => (
           <div key={label} className={styles.kpiCard}>
@@ -191,44 +209,63 @@ export default function ValidationPage() {
       {/* Runs table */}
       <div className={styles.card}>
         <div className={styles.cardHeader}>
-          <span className={styles.cardTitle}>Validation runs</span>
+          <span className={styles.cardTitle}>Recent validation runs</span>
         </div>
         <table aria-label="Validation runs">
           <thead>
             <tr>
-              <th>Run</th>
+              <th>Bundle</th>
+              <th>Measure</th>
+              <th>Pass</th>
+              <th>Fail</th>
+              <th>Error</th>
+              <th>When</th>
               <th>Status</th>
-              <th>Patients tested</th>
-              <th>Started</th>
               <th style={{ width: 40 }}></th>
             </tr>
           </thead>
           <tbody>
             {filteredRuns.length === 0 ? (
-              <tr><td colSpan={5} className={styles.emptyRow}>
+              <tr><td colSpan={8} className={styles.emptyRow}>
                 {q ? `No runs match "${q}".` : 'No validation runs yet. Upload a test bundle and click "New run".'}
               </td></tr>
             ) : (
-              filteredRuns.map(r => {
+              filteredRuns.map((r, i) => {
                 const deleting = r.delete_requested || deletingRunIds.includes(String(r.id));
                 return (
-                  <tr key={r.id} className={`${styles.row} ${styles.rowClickable}`}
-                    onClick={() => setSelectedRunId(String(r.id))}>
-                    <td><span className={styles.mono}>#{r.id}</span></td>
-                    <td><StatusBadge status={deleting ? 'deleting' : r.status} /></td>
-                    <td>{r.patients_tested != null ? r.patients_tested : '--'}</td>
-                    <td className={styles.dateCell}>{r.created_at ? new Date(r.created_at).toLocaleString() : '--'}</td>
-                    <td>
-                      <KebabMenu items={[
-                        { divider: true },
-                        {
-                          label: 'Delete run',
-                          icon: <TrashIcon />,
-                          tone: 'destructive',
-                          disabled: deleting,
-                          onClick: () => setConfirmRun(r),
-                        },
-                      ]} />
+                  <tr key={r.id} className={styles.row}>
+                    <td data-label="Bundle" className={styles.bundleCell}>{runBundleName(r, i)}</td>
+                    <td data-label="Measure" className={styles.measureCell}>{runMeasureName(r)}</td>
+                    <td data-label="Pass" className={styles.passCount}>{r.patients_passed ?? '--'}</td>
+                    <td data-label="Fail" className={styles.failCount}>{r.patients_failed ?? '--'}</td>
+                    <td data-label="Error" className={styles.errorCount}>{r.patients_error ?? r.errors ?? 0}</td>
+                    <td data-label="When" className={styles.dateCell}>{r.created_at ? new Date(r.created_at).toLocaleString() : '--'}</td>
+                    <td data-label="Status"><StatusBadge status={deleting ? 'deleting' : r.status} /></td>
+                    <td data-label="Actions">
+                      <div className={styles.rowActions}>
+                        <button
+                          type="button"
+                          className={styles.viewDetailsBtn}
+                          onClick={() => setSelectedRunId(String(r.id))}
+                        >
+                          View details
+                        </button>
+                        <KebabMenu items={[
+                          {
+                            label: 'View details',
+                            icon: <ViewIcon />,
+                            onClick: () => setSelectedRunId(String(r.id)),
+                          },
+                          { divider: true },
+                          {
+                            label: 'Delete run',
+                            icon: <TrashIcon />,
+                            tone: 'destructive',
+                            disabled: deleting,
+                            onClick: () => setConfirmRun(r),
+                          },
+                        ]} />
+                      </div>
                     </td>
                   </tr>
                 );
@@ -238,88 +275,15 @@ export default function ValidationPage() {
         </table>
       </div>
 
-      {/* Run detail */}
       {runDetail && (
-        <div className={styles.card} style={{ marginTop: 16 }}>
-          <div className={styles.cardHeader}>
-            <span className={styles.cardTitle}>Run #{runDetail.id}</span>
-            <StatusBadge status={runDetail.status} />
-          </div>
-          {(runDetail.status === 'running' || runDetail.status === 'queued') ? (
-            <div className={styles.runningBanner}>
-              Validation {runDetail.status}… ({runDetail.patients_tested || 0} patients tested)
-            </div>
-          ) : runDetail.status === 'failed' ? (
-            <div className={styles.errorBanner}>Validation failed: {runDetail.error_message || 'Unknown error'}</div>
-          ) : (
-            <>
-              <div className={styles.detailKpiRow}>
-                {[
-                  ['Total patients', runDetail.patients_tested],
-                  ['Passing', runDetail.patients_passed],
-                  ['Failing', runDetail.patients_failed],
-                  ['Measures', runDetail.measures_tested],
-                ].map(([label, val]) => (
-                  <div key={label} className={styles.detailKpi}>
-                    <div className={styles.detailKpiLabel}>{label}</div>
-                    <div className={styles.detailKpiVal}>{val ?? '--'}</div>
-                  </div>
-                ))}
-              </div>
-              {(runDetail.measures || []).map((measure, mi) => (
-                <div key={mi} className={styles.measureSection}>
-                  <div className={styles.measureSectionHeader}>
-                    <span className={styles.measureUrl}>{measure.measure_url.split('/').pop()}</span>
-                    <span className={`${styles.badge} ${measure.failed + measure.errors > 0 ? styles.badgeErr : styles.badgeOk}`}>
-                      {measure.passed}/{measure.patients.length} PASS
-                    </span>
-                  </div>
-                  <table>
-                    <thead>
-                      <tr>
-                        <th style={{ width: 30 }}></th>
-                        <th>Patient</th>
-                        <th className={styles.popCell}>Init Pop</th>
-                        <th className={styles.popCell}>Denom</th>
-                        <th className={styles.popCell}>Excl.</th>
-                        <th className={styles.popCell}>Numer</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {measure.patients.map((p, pi) => (
-                        <tr key={pi} className={p.status === 'fail' ? styles.failRow : p.status === 'error' ? styles.errorRow : ''}>
-                          <td>
-                            {p.status === 'pass' && <span className={styles.passIcon}>✓</span>}
-                            {p.status === 'fail' && <span className={styles.failIcon}>✗</span>}
-                            {p.status === 'error' && <span className={styles.warnIcon}>!</span>}
-                          </td>
-                          <td>
-                            <div>{p.patient_name || p.patient_ref}</div>
-                            {p.status === 'error' && <div className={styles.errorText}>{p.error_message}</div>}
-                          </td>
-                          {['initial-population', 'denominator', 'denominator-exclusion', 'numerator'].map(code => {
-                            const exp = p.expected_populations?.[code];
-                            const act = p.actual_populations?.[code];
-                            const mismatch = (p.mismatches || []).includes(code);
-                            return (
-                              <td key={code} className={styles.popCell}>
-                                <span className={mismatch ? styles.mismatch : styles.match}>
-                                  {act !== undefined ? String(act) : '--'}
-                                </span>
-                                <br />
-                                <span className={styles.expected}>exp: {exp !== undefined ? String(exp) : '--'}</span>
-                              </td>
-                            );
-                          })}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ))}
-            </>
-          )}
-        </div>
+        <ValidationDetailsDrawer
+          run={runDetail}
+          bundle={runBundleName(selectedRunSummary || runDetail, selectedRunIndex >= 0 ? selectedRunIndex : 0)}
+          measure={runMeasureName(selectedRunSummary || runDetail)}
+          onRerun={handleRunValidation}
+          rerunning={runStarting}
+          onClose={() => setSelectedRunId('')}
+        />
       )}
 
       <ConfirmDialog
@@ -331,6 +295,239 @@ export default function ValidationPage() {
         onCancel={() => setConfirmRun(null)}
         onConfirm={handleDeleteConfirmed}
       />
+    </div>
+  );
+}
+
+const POPULATION_LABELS = {
+  'initial-population': 'IP',
+  denominator: 'DENOM',
+  'denominator-exclusion': 'EXCL',
+  numerator: 'NUMER',
+  'numerator-exclusion': 'NUMEX',
+};
+
+function populationList(populations) {
+  if (!populations) return [];
+  return Object.entries(POPULATION_LABELS)
+    .filter(([code]) => Boolean(populations[code]))
+    .map(([, label]) => label);
+}
+
+function measureNameFromUrl(url) {
+  if (!url) return '--';
+  return url.split('/').pop() || url;
+}
+
+function toCaseId(patient, measureIndex, patientIndex) {
+  if (patient.patient_ref) return patient.patient_ref.split('/').pop() || patient.patient_ref;
+  return `case-${measureIndex + 1}-${patientIndex + 1}`;
+}
+
+function flattenValidationCases(run) {
+  return (run.measures || []).flatMap((measure, measureIndex) => (
+    (measure.patients || []).map((patient, patientIndex) => {
+      const expected = populationList(patient.expected_populations);
+      const actual = populationList(patient.actual_populations);
+      const mismatches = patient.mismatches || [];
+      return {
+        id: toCaseId(patient, measureIndex, patientIndex),
+        name: patient.patient_name || patient.patient_ref || 'Unknown patient',
+        measure: measureNameFromUrl(measure.measure_url),
+        status: (patient.status || 'unknown').toLowerCase(),
+        expected,
+        actual,
+        error: patient.error_message,
+        mismatches: mismatches.map(code => POPULATION_LABELS[code] || code),
+      };
+    })
+  ));
+}
+
+function downloadValidationReport(run, bundle, measure, cases) {
+  const report = {
+    id: run.id,
+    status: run.status,
+    bundle,
+    measure,
+    created_at: run.created_at,
+    completed_at: run.completed_at,
+    patients_tested: run.patients_tested,
+    patients_passed: run.patients_passed,
+    patients_failed: run.patients_failed,
+    measures_tested: run.measures_tested,
+    cases,
+  };
+  const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `validation-run-${run.id || 'report'}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function ValidationDetailsDrawer({ run, bundle, measure, onClose, onRerun, rerunning }) {
+  const [tab, setTab] = useState('all');
+  const cases = flattenValidationCases(run);
+  const pass = run.patients_passed ?? (run.measures || []).reduce((sum, m) => sum + (m.passed || 0), 0);
+  const errorCount = (run.measures || []).reduce((sum, m) => sum + (m.errors || 0), 0);
+  const fail = (run.measures || []).reduce((sum, m) => sum + (m.failed || 0), 0);
+  const total = cases.length || run.patients_tested || pass + fail + errorCount || 0;
+  const passPct = total > 0 ? Math.round((pass / total) * 100) : 0;
+  const when = run.created_at ? new Date(run.created_at).toLocaleString() : `Run #${run.id}`;
+  const isActive = run.status === 'queued' || run.status === 'running';
+  const filteredCases = cases.filter(c => tab === 'all' || c.status === tab);
+  const passRateClass = passPct >= 90 ? styles.drawerStatOk : passPct >= 70 ? styles.drawerStatWarn : styles.drawerStatErr;
+
+  return (
+    <div className={styles.drawerOverlay} onClick={onClose} role="presentation">
+      <aside className={styles.drawer} aria-label={`Validation run ${run.id} details`} onClick={event => event.stopPropagation()}>
+        <div className={styles.drawerHeader}>
+          <div className={styles.drawerHeaderTop}>
+            <div className={styles.drawerTitleBlock}>
+              <div className={styles.drawerEyebrow}>Validation run · {when}</div>
+              <h2 className={styles.drawerTitle}>{bundle}</h2>
+              <div className={styles.drawerMeta}>{measure} · {total} test cases</div>
+            </div>
+            <button type="button" className={styles.drawerClose} onClick={onClose} aria-label="Close validation details">
+              <XIcon />
+            </button>
+          </div>
+          <div className={styles.drawerSummary}>
+            <div>
+              <div className={styles.drawerStatLabel}>Pass rate</div>
+              <div className={`${styles.drawerPassRate} ${passRateClass}`}>
+                {total > 0 ? passPct : '--'}{total > 0 && <span>%</span>}
+              </div>
+            </div>
+            <div className={styles.drawerCounts}>
+              <div>
+                <div className={styles.drawerStatLabel}>Pass</div>
+                <div className={`${styles.drawerCount} ${styles.drawerStatOk}`}>{pass}</div>
+              </div>
+              <div>
+                <div className={styles.drawerStatLabel}>Fail</div>
+                <div className={`${styles.drawerCount} ${fail ? styles.drawerStatErr : ''}`}>{fail}</div>
+              </div>
+              <div>
+                <div className={styles.drawerStatLabel}>Error</div>
+                <div className={`${styles.drawerCount} ${errorCount ? styles.drawerStatWarn : ''}`}>{errorCount}</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className={styles.drawerTabs} role="tablist" aria-label="Validation case filters">
+          {[
+            ['all', `All ${total}`],
+            ['fail', `Failures ${fail}`],
+            ['error', `Errors ${errorCount}`],
+            ['pass', `Passing ${pass}`],
+          ].map(([key, label]) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={tab === key}
+              className={`${styles.drawerTab} ${tab === key ? styles.drawerTabActive : ''}`}
+              onClick={() => setTab(key)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className={styles.drawerBody}>
+          {isActive && (
+            <div className={styles.drawerNotice}>
+              Validation {run.status} ({run.patients_tested || 0} patients tested)
+            </div>
+          )}
+          {run.status === 'failed' && (
+            <div className={styles.drawerError}>
+              Validation failed: {run.error_message || 'Unknown error'}
+            </div>
+          )}
+          {!isActive && run.status !== 'failed' && filteredCases.length === 0 && (
+            <div className={styles.drawerEmpty}>No {tab === 'all' ? '' : tab} cases in this run.</div>
+          )}
+          {filteredCases.map(c => (
+            <ValidationCaseRow key={`${c.measure}-${c.id}`} c={c} />
+          ))}
+        </div>
+
+        <div className={styles.drawerFooter}>
+          <button type="button" className={styles.drawerButton} onClick={() => downloadValidationReport(run, bundle, measure, cases)}>
+            Download report
+          </button>
+          <button
+            type="button"
+            className={`${styles.drawerButton} ${styles.drawerButtonPrimary}`}
+            onClick={onRerun}
+            disabled={rerunning}
+          >
+            <SparkIcon /> {rerunning ? 'Starting...' : 'Re-run'}
+          </button>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
+function ValidationCaseRow({ c }) {
+  const [open, setOpen] = useState(false);
+  const hasDetail = c.status === 'fail' || c.status === 'error' || c.mismatches.length > 0;
+  const statusClass = c.status === 'pass'
+    ? styles.caseDotPass
+    : c.status === 'fail'
+      ? styles.caseDotFail
+      : styles.caseDotError;
+
+  return (
+    <div
+      className={`${styles.caseRow} ${hasDetail ? styles.caseRowInteractive : ''}`}
+      onClick={() => hasDetail && setOpen(value => !value)}
+      role={hasDetail ? 'button' : undefined}
+      tabIndex={hasDetail ? 0 : undefined}
+      onKeyDown={(event) => {
+        if (!hasDetail) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          setOpen(value => !value);
+        }
+      }}
+    >
+      <div className={styles.caseMain}>
+        <span className={`${styles.caseDot} ${statusClass}`} aria-hidden="true" />
+        <span className={styles.caseId}>{c.id}</span>
+        <span className={styles.caseName}>{c.name}</span>
+        {c.status === 'error' ? (
+          <span className={styles.caseErrorLabel}>error</span>
+        ) : (
+          <span className={`${styles.caseResult} ${c.status === 'fail' ? styles.caseResultMismatch : ''}`}>
+            {c.expected.join(', ') || 'none'}
+            <span> &rarr; </span>
+            <strong>{c.actual.join(', ') || 'none'}</strong>
+          </span>
+        )}
+        {hasDetail && (
+          <ChevronIcon className={`${styles.caseChevron} ${open ? styles.caseChevronOpen : ''}`} />
+        )}
+      </div>
+      {open && c.status === 'error' && (
+        <div className={styles.caseError}>{c.error || 'Unexpected validation error.'}</div>
+      )}
+      {open && c.status !== 'error' && (
+        <div className={styles.caseDetail}>
+          <div>Measure: <span>{c.measure}</span></div>
+          <div>Expected: <span>{c.expected.join(', ') || 'none'}</span></div>
+          <div>Calculated: <span>{c.actual.join(', ') || 'none'}</span></div>
+          {c.mismatches.length > 0 && <div>Mismatch: <span>{c.mismatches.join(', ')}</span></div>}
+        </div>
+      )}
     </div>
   );
 }

@@ -36,9 +36,18 @@ const SEARCH_PLACEHOLDER = {
   '/settings': 'Search…',
 };
 
+function MenuIcon() {
+  return (
+    <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+      <path d="M3 5h12M3 9h12M3 13h12" />
+    </svg>
+  );
+}
+
 export default function App() {
   const location = useLocation();
   const navigate = useNavigate();
+  const [navOpen, setNavOpen] = useState(false);
   const [cdrStatus, setCdrStatus] = useState('unknown');
   const [cdrName, setCdrName] = useState('');
   const [theme, setTheme] = useState(() => localStorage.getItem('mct2-theme') || 'light');
@@ -54,6 +63,7 @@ export default function App() {
   // Clear search on navigation
   useEffect(() => {
     setQuery('');
+    setNavOpen(false);
   }, [location.pathname]);
 
   // CDR health check
@@ -90,6 +100,10 @@ export default function App() {
         setQuery('');
         return;
       }
+      if (e.key === 'Escape') {
+        setNavOpen(false);
+        return;
+      }
       if (!isInput && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
         if (e.key === 'm' || e.key === 'M') navigate('/measures');
         else if (e.key === 'j' || e.key === 'J') navigate('/jobs');
@@ -108,7 +122,13 @@ export default function App() {
 
   return (
     <SearchContext.Provider value={{ query, setQuery }}>
-      <div className={styles.screen}>
+      <div className={`${styles.screen} ${navOpen ? styles.navOpen : ''}`}>
+        <button
+          className={styles.navBackdrop}
+          type="button"
+          aria-label="Close navigation"
+          onClick={() => setNavOpen(false)}
+        />
         {/* Brand */}
         <div className={styles.brand}>
           <div className={styles.brandMark}>M</div>
@@ -117,6 +137,15 @@ export default function App() {
 
         {/* Topbar */}
         <header className={styles.topbar}>
+          <button
+            className={styles.hamburger}
+            type="button"
+            aria-label="Open navigation"
+            aria-expanded={navOpen}
+            onClick={() => setNavOpen(true)}
+          >
+            <MenuIcon />
+          </button>
           <span className={styles.crumb}>{pageTitle}</span>
           <div className={styles.spacer} />
           <div className={styles.topbarRight}>
@@ -152,6 +181,15 @@ export default function App() {
 
         {/* Sidebar nav */}
         <nav className={styles.nav} aria-label="Main navigation">
+          <button
+            className={styles.navClose}
+            type="button"
+            aria-label="Close navigation"
+            onClick={() => setNavOpen(false)}
+          >
+            <XIcon />
+            <span>Close</span>
+          </button>
           <div className={styles.navGroupLabel}>Workspace</div>
           {NAV_ITEMS.map(({ path, label, Icon, kbd }) => (
             <NavLink
@@ -166,7 +204,7 @@ export default function App() {
           ))}
 
           <div className={styles.navGroupLabel} style={{ marginTop: 16 }}>Data source</div>
-          <div className={styles.navItem} style={{ cursor: 'default' }}>
+          <div className={styles.dataSourceItem}>
             <span className={styles.navIcon}>
               <span className={`${styles.smallDot} ${cdrOk ? styles.smallDotOk : styles.smallDotErr}`} />
             </span>

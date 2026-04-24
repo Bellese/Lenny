@@ -181,6 +181,23 @@ export default function JobsPage() {
     return 0;
   };
 
+  const getCohortName = (job) => {
+    if (job.group_name) return job.group_name;
+    const group = groups.find(g => String(g.id) === String(job.group_id));
+    return group?.name || job.cohort || job.group_id || 'All patients';
+  };
+
+  const getPatientCount = (job) => {
+    const processed = job.processed_patients ?? job.patients_processed;
+    const total = job.total_patients;
+    if (processed != null && total != null && isRunning(job.status)) {
+      return `${processed.toLocaleString()} / ${total.toLocaleString()}`;
+    }
+    if (total != null) return total.toLocaleString();
+    if (processed != null) return processed.toLocaleString();
+    return '--';
+  };
+
   const q = query.trim().toLowerCase();
   const activeJob = jobs.find(j => isRunning(j.status));
   const filteredJobs = jobs.filter(j => {
@@ -225,6 +242,7 @@ export default function JobsPage() {
                   {activeJob.period_start && activeJob.period_end && (
                     <span className={styles.mono}>{activeJob.period_start} → {activeJob.period_end}</span>
                   )}
+                  <span>Cohort: {getCohortName(activeJob)}</span>
                   <span>Elapsed {formatElapsed(activeJob.started_at || activeJob.created_at)}</span>
                 </div>
               </div>
@@ -289,6 +307,8 @@ export default function JobsPage() {
               <tr>
                 <th>Measure</th>
                 <th>Period</th>
+                <th>Cohort</th>
+                <th>Patients</th>
                 <th>Status</th>
                 <th>Started</th>
                 <th style={{ width: 40 }}></th>
@@ -296,7 +316,7 @@ export default function JobsPage() {
             </thead>
             <tbody>
               {filteredJobs.length === 0 ? (
-                <tr><td colSpan={5} className={styles.emptyRow}>
+                <tr><td colSpan={7} className={styles.emptyRow}>
                   {q ? `No jobs match "${q}".` : 'No calculations yet. Click "New calculation" to get started.'}
                 </td></tr>
               ) : (
@@ -311,18 +331,20 @@ export default function JobsPage() {
                       onClick={() => complete && navigate(`/results/${job.id}`)}
                       style={{ cursor: complete ? 'pointer' : 'default' }}
                     >
-                      <td>
+                      <td data-label="Measure">
                         <div className={styles.jobMeta}>
                           <div className={styles.jobName}>{getMeasureName(job)}</div>
                           <div className={`${styles.mono} ${styles.jobId}`}>{job.id}</div>
                         </div>
                       </td>
-                      <td className={`${styles.mono} ${styles.periodCell}`}>
+                      <td data-label="Period" className={`${styles.mono} ${styles.periodCell}`}>
                         {job.period_start && job.period_end ? `${job.period_start} – ${job.period_end}` : '--'}
                       </td>
-                      <td><StatusBadge status={job.status} /></td>
-                      <td className={styles.dateCell}>{formatDateTime(job.started_at || job.created_at)}</td>
-                      <td>
+                      <td data-label="Cohort" className={styles.cohortCell}>{getCohortName(job)}</td>
+                      <td data-label="Patients" className={styles.patientCountCell}>{getPatientCount(job)}</td>
+                      <td data-label="Status"><StatusBadge status={job.status} /></td>
+                      <td data-label="Started" className={styles.dateCell}>{formatDateTime(job.started_at || job.created_at)}</td>
+                      <td data-label="Actions">
                         <KebabMenu items={[
                           { label: 'View results', icon: <ViewIcon />, disabled: !complete, onClick: () => navigate(`/results/${job.id}`) },
                           { label: 'Re-run', icon: <SparkIcon />, onClick: () => {} },

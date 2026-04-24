@@ -11,7 +11,7 @@ function MatchIcon({ match }) {
 function PopCount({ code, expected, actual }) {
   const match = expected === actual;
   return (
-    <td className={match ? styles.countMatch : styles.countMismatch} title={`Expected: ${expected}, Actual: ${actual}`}>
+    <td data-label={POPULATION_LABELS[code]} className={match ? styles.countMatch : styles.countMismatch} title={`Expected: ${expected}, Actual: ${actual}`}>
       <span className={styles.countVal}>{actual ?? 0}</span>
       {!match && <span className={styles.countExpected}>(exp: {expected ?? 0})</span>}
     </td>
@@ -92,8 +92,8 @@ export default function ComparisonView({ jobId }) {
           <tbody>
             {patients.slice(0, 50).map((p, i) => (
               <tr key={p.subject_reference || i} className={p.match ? styles.rowMatch : styles.rowMismatch}>
-                <td className={styles.patientRef}>{p.subject_reference}</td>
-                <td className={styles.statusCell}><MatchIcon match={p.match} /></td>
+                <td data-label="Patient" className={styles.patientRef}>{p.subject_reference}</td>
+                <td data-label="Status" className={styles.statusCell}><MatchIcon match={p.match} /></td>
                 {POPULATION_CODES.map(code => (
                   <PopCount
                     key={code}

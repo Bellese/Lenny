@@ -370,11 +370,11 @@ export default function ResultsPage() {
                       className={styles.patientRow}
                       onClick={() => handleViewPatient(patient)}
                     >
-                      <td><span className={styles.mono}>{patient.patient_id || patient.id || '--'}</span></td>
-                      <td className={styles.patientName}>{patient.patient_name || patient.name || '--'}</td>
-                      <td className={styles.popCell}>{patient.populations?.denominator ? <CheckIcon className={styles.iconOk} /> : <XIcon className={styles.iconDim} />}</td>
-                      <td className={styles.popCell}>{patient.populations?.numerator ? <CheckIcon className={styles.iconOk} /> : <XIcon className={styles.iconDim} />}</td>
-                      <td className={styles.popCell}>{patient.populations?.denominator_exclusion ? <CheckIcon className={styles.iconWarn} /> : <XIcon className={styles.iconDim} />}</td>
+                      <td data-label="Patient ID"><span className={styles.mono}>{patient.patient_id || patient.id || '--'}</span></td>
+                      <td data-label="Name" className={styles.patientName}>{patient.patient_name || patient.name || '--'}</td>
+                      <td data-label="Denom" className={styles.popCell}>{patient.populations?.denominator ? <CheckIcon className={styles.iconOk} /> : <XIcon className={styles.iconDim} />}</td>
+                      <td data-label="Numer" className={styles.popCell}>{patient.populations?.numerator ? <CheckIcon className={styles.iconOk} /> : <XIcon className={styles.iconDim} />}</td>
+                      <td data-label="Excl." className={styles.popCell}>{patient.populations?.denominator_exclusion ? <CheckIcon className={styles.iconWarn} /> : <XIcon className={styles.iconDim} />}</td>
                     </tr>
                   ))
                 )}
