@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     PATIENT_DATA_STRATEGY: str = "batch"
     VALUESET_RELOAD_MODE: str = "delete"
     HAPI_SYNC_AFTER_UPLOAD: bool = True
+    RELOAD_SUPPORT_PER_MEASURE: bool = True
     LOG_LEVEL: str = "INFO"
     ALLOWED_ORIGINS: str = "*"  # Comma-separated origins, or "*" for all (local dev default)
 

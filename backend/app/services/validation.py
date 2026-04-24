@@ -34,11 +34,13 @@ from app.services.fhir_client import (
     _build_auth_headers,
     evaluate_measure,
     push_resources,
+    reload_support_resources_for_measure,
     trigger_reindex_and_wait,
     trigger_reindex_and_wait_for_patients,
     wait_for_valueset_expansion,
     wipe_patient_data,
 )
+from app.services.locks import _measure_engine_lock
 
 logger = logging.getLogger(__name__)
 
@@ -847,6 +849,43 @@ async def process_bundle_upload(upload_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
+async def _push_patients_for_measure(
+    expected_results: list[ExpectedResult],
+    cdr_url: str,
+    auth_headers: dict[str, str],
+    validation_run_id: int,
+) -> set[str]:
+    """Gather and push patient data for a specific measure's expected results.
+
+    Returns a set of patient IDs found in Encounter resources during push.
+    Used by run_validation Phase 2 to re-push per-measure after reload.
+    """
+    strategy = BatchQueryStrategy()
+    semaphore = asyncio.Semaphore(settings.MAX_WORKERS)
+    patient_refs = [er.patient_ref for er in expected_results]
+
+    async def gather_and_push(patient_ref: str) -> set[str]:
+        async with semaphore:
+            resources = await strategy.gather_patient_data(cdr_url, patient_ref, auth_headers)
+            if resources:
+                await push_resources(resources)
+            return {
+                resource.get("subject", {}).get("reference", "").removeprefix("Patient/")
+                for resource in resources
+                if resource.get("resourceType") == "Encounter"
+                and resource.get("subject", {}).get("reference", "").startswith("Patient/")
+            }
+
+    gather_results = await asyncio.gather(
+        *[gather_and_push(pr) for pr in patient_refs],
+        return_exceptions=True,
+    )
+
+    return sorted(
+        {patient_id for result in gather_results if not isinstance(result, BaseException) for patient_id in result}
+    )
+
+
 async def _resolve_measure_id(measure_url: str) -> Optional[str]:
     """Resolve a measure URL or relative reference to a HAPI FHIR resource ID.
 
@@ -1276,14 +1315,62 @@ async def run_validation(validation_run_id: int) -> None:
                         mismatches=[],
                     )
 
+            # Group resolved_expected_results by measure for per-measure reload and evaluation
+            resolved_by_measure: dict[str, list[ExpectedResult]] = {}
+            for er in resolved_expected_results:
+                resolved_by_measure.setdefault(er.measure_url, []).append(er)
+
             async with httpx.AsyncClient(timeout=10.0) as http_client:
 
                 async def eval_with_semaphore(er: ExpectedResult) -> ValidationResult:
                     async with semaphore:
                         return await evaluate_and_compare(er, http_client)
 
-                result_coros = [eval_with_semaphore(er) for er in resolved_expected_results]
-                all_results.extend(await asyncio.gather(*result_coros))
+                # Phase 2: Evaluate measures serially (per-measure lock) with concurrent patients
+                for measure_url, ers_for_measure in resolved_by_measure.items():
+                    if await _stop_or_delete_validation_run(validation_run_id):
+                        return
+
+                    if settings.RELOAD_SUPPORT_PER_MEASURE:
+                        async with _measure_engine_lock:
+                            logger.info(
+                                "Reloading support resources for validation measure",
+                                extra={
+                                    "run_id": validation_run_id,
+                                    "measure_url": measure_url,
+                                    "patient_count": len(ers_for_measure),
+                                },
+                            )
+                            await reload_support_resources_for_measure(measure_url)
+                            # Re-push THIS measure's patients (wipe_patient_data is
+                            # per-validation-run, not per-measure, so patients need
+                            # to be pushed fresh here too).
+                            reindex_patient_ids = await _push_patients_for_measure(
+                                ers_for_measure,
+                                cdr_url,
+                                auth_headers,
+                                validation_run_id,
+                            )
+                            # Reindex wait scoped to the patients we just pushed.
+                            if reindex_patient_ids:
+                                await asyncio.to_thread(
+                                    trigger_reindex_and_wait_for_patients,
+                                    settings.MEASURE_ENGINE_URL,
+                                    reindex_patient_ids,
+                                )
+                            # Now evaluate.
+                            measure_eval_results = await asyncio.gather(
+                                *[eval_with_semaphore(er) for er in ers_for_measure],
+                                return_exceptions=True,
+                            )
+                    else:
+                        # Legacy path: evaluate without reload (pre-fix behavior).
+                        measure_eval_results = await asyncio.gather(
+                            *[eval_with_semaphore(er) for er in ers_for_measure],
+                            return_exceptions=True,
+                        )
+
+                    all_results.extend(measure_eval_results)
 
         if await _stop_or_delete_validation_run(validation_run_id):
             return

@@ -19,9 +19,11 @@ from app.services.fhir_client import (
     evaluate_measure,
     get_group_members,
     push_resources,
+    reload_support_resources_for_measure,
     trigger_reindex_and_wait,
     wipe_patient_data,
 )
+from app.services.locks import _measure_engine_lock
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -105,7 +107,12 @@ async def _stop_or_delete_job(job_id: int) -> bool:
 
 
 async def run_job(job_id: int) -> None:
-    """Execute the full $gather workflow for a job."""
+    """Execute the full $gather workflow for a job.
+
+    If RELOAD_SUPPORT_PER_MEASURE is enabled, reloads the measure's bundle-scoped
+    support resources before evaluation and holds the serialization lock across
+    the entire evaluation to prevent concurrent measure terminology overwrites.
+    """
     async with async_session() as session:
         job = await session.get(Job, job_id)
         if not job:
@@ -123,6 +130,20 @@ async def run_job(job_id: int) -> None:
         job.status = JobStatus.running
         await session.commit()
 
+    if settings.RELOAD_SUPPORT_PER_MEASURE:
+        async with _measure_engine_lock:
+            logger.info(
+                "Reloading support resources for job measure",
+                extra={"job_id": job_id, "measure_id": job.measure_id if job else None},
+            )
+            await reload_support_resources_for_measure(job.measure_id if job else "")
+            await _run_job_inner(job_id)
+    else:
+        await _run_job_inner(job_id)
+
+
+async def _run_job_inner(job_id: int) -> None:
+    """Inner body of run_job — executes under lock when RELOAD_SUPPORT_PER_MEASURE is enabled."""
     try:
         # Step 1: Wipe patient data from measure engine (cleanup from prior job)
         logger.info("Wiping prior patient data from measure engine", extra={"job_id": job_id})

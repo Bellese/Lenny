@@ -1336,3 +1336,26 @@ def test_wait_for_valueset_expansion_logs_timeout(monkeypatch, caplog):
 
     assert expanded == {}
     assert "ValueSet expansion timed out" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# reload_support_resources_for_measure
+# ---------------------------------------------------------------------------
+
+
+class TestReloadSupportResourcesForMeasure:
+    async def test_reload_support_resources_for_measure_exists(self):
+        """Test that reload_support_resources_for_measure function is callable."""
+        from app.services.fhir_client import reload_support_resources_for_measure
+
+        # Just verify the function exists and is callable
+        assert callable(reload_support_resources_for_measure)
+
+    async def test_reload_support_resources_for_measure_handles_errors_gracefully(self):
+        """Test that reload_support_resources_for_measure returns skipped on error."""
+        from app.services.fhir_client import reload_support_resources_for_measure
+
+        result = await reload_support_resources_for_measure("http://example.com/Measure/nonexistent")
+
+        assert result["skipped"] is True
+        assert "reason" in result

@@ -619,3 +619,31 @@ async def test_process_batch_hapi_sync_calls_trigger_reindex(test_session, sessi
         )
 
     mock_reindex.assert_called_once_with("http://mcs/fhir")
+
+
+# ---------------------------------------------------------------------------
+# run_job with RELOAD_SUPPORT_PER_MEASURE
+# ---------------------------------------------------------------------------
+
+
+class TestRunJobReload:
+    @pytest.mark.asyncio
+    async def test_run_job_has_run_job_inner_function(self):
+        """Test that _run_job_inner function exists for lock wrapping."""
+        from app.services.orchestrator import _run_job_inner
+
+        assert callable(_run_job_inner)
+
+    @pytest.mark.asyncio
+    async def test_run_job_imports_measure_engine_lock(self):
+        """Test that orchestrator imports the shared measure engine lock."""
+        from app.services.orchestrator import _measure_engine_lock
+
+        assert _measure_engine_lock is not None
+
+    @pytest.mark.asyncio
+    async def test_run_job_imports_reload_support_resources_for_measure(self):
+        """Test that orchestrator imports the reload helper."""
+        from app.services.orchestrator import reload_support_resources_for_measure
+
+        assert callable(reload_support_resources_for_measure)

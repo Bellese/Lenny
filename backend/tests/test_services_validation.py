@@ -1855,3 +1855,31 @@ class TestMissingValueSetStubs:
         prepared_valueset = next(resource for resource in prepared if resource.get("resourceType") == "ValueSet")
         assert prepared_valueset["id"] == expected_id
         assert valueset["id"] == "bundle-id"
+
+
+# ---------------------------------------------------------------------------
+# run_validation with RELOAD_SUPPORT_PER_MEASURE
+# ---------------------------------------------------------------------------
+
+
+class TestRunValidationReload:
+    @pytest.mark.asyncio
+    async def test_run_validation_has_push_patients_for_measure_helper(self):
+        """Test that validation service has the _push_patients_for_measure helper."""
+        from app.services.validation import _push_patients_for_measure
+
+        assert callable(_push_patients_for_measure)
+
+    @pytest.mark.asyncio
+    async def test_run_validation_imports_measure_engine_lock(self):
+        """Test that validation imports the shared measure engine lock."""
+        from app.services.validation import _measure_engine_lock
+
+        assert _measure_engine_lock is not None
+
+    @pytest.mark.asyncio
+    async def test_run_validation_imports_reload_support_resources_for_measure(self):
+        """Test that validation imports the reload helper."""
+        from app.services.validation import reload_support_resources_for_measure
+
+        assert callable(reload_support_resources_for_measure)

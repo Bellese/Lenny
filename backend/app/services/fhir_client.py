@@ -8,6 +8,7 @@ from __future__ import annotations
 import abc
 import asyncio
 import ipaddress
+import json
 import logging
 import re
 import time
@@ -15,9 +16,12 @@ from typing import Any, Optional
 from urllib.parse import urlparse
 
 import httpx
+from sqlalchemy import select
 
 from app.config import settings
+from app.db import async_session
 from app.models.config import AuthType
+from app.models.validation import BundleUpload, ExpectedResult
 
 logger = logging.getLogger(__name__)
 
@@ -833,6 +837,113 @@ async def list_measures() -> dict[str, Any]:
         resp = await client.get(url)
         resp.raise_for_status()
         return resp.json()
+
+
+async def reload_support_resources_for_measure(measure_url: str) -> dict:
+    """Re-push the bundle-scoped Library, ValueSet, CodeSystem resources for a measure.
+
+    Finds the most recent BundleUpload that produced ExpectedResult rows for this
+    measure_url, reads the bundle file from disk, extracts support resources
+    (Measure, Library, ValueSet, CodeSystem), and re-pushes them via push_resources.
+    Patient clinical data is NOT re-pushed.
+
+    Returns dict with counts: {"libraries": N, "valuesets": N, "codesystems": N,
+    "measures": N, "bundle_path": path, "skipped": bool, "reason": optional_str}.
+
+    If no bundle is found, logs a warning and returns skipped=True. Never raises.
+    """
+    try:
+        async with async_session() as session:
+            result = await session.execute(
+                select(BundleUpload)
+                .join(ExpectedResult, ExpectedResult.source_bundle == BundleUpload.filename)
+                .where(ExpectedResult.measure_url == measure_url)
+                .order_by(BundleUpload.created_at.desc())
+                .limit(1)
+            )
+            bundle_upload = result.scalar_one_or_none()
+
+        if not bundle_upload:
+            logger.warning(
+                "No bundle found for measure reload",
+                extra={"measure_url": measure_url},
+            )
+            return {"skipped": True, "reason": "No bundle found for this measure"}
+
+        bundle_path = bundle_upload.file_path
+
+        def read_bundle():
+            with open(bundle_path, "r") as f:
+                return json.load(f)
+
+        bundle_json = await asyncio.to_thread(read_bundle)
+
+        from app.services.validation import (
+            _classify_bundle_entries,
+            _prepare_measure_support_resources,
+        )
+
+        measure_defs, _, _ = _classify_bundle_entries(bundle_json)
+
+        if not measure_defs:
+            logger.warning(
+                "Bundle contains no measure definitions",
+                extra={"measure_url": measure_url, "bundle_path": bundle_path},
+            )
+            return {
+                "skipped": True,
+                "reason": "Bundle contains no measure definitions",
+                "bundle_path": bundle_path,
+            }
+
+        prepared = await _prepare_measure_support_resources(measure_defs, bundle_json)
+
+        if not prepared:
+            logger.warning(
+                "No resources to push after preparation",
+                extra={"measure_url": measure_url, "bundle_path": bundle_path},
+            )
+            return {
+                "skipped": True,
+                "reason": "No resources to push after preparation",
+                "bundle_path": bundle_path,
+            }
+
+        await push_resources(prepared)
+
+        await asyncio.to_thread(trigger_reindex_and_wait, settings.MEASURE_ENGINE_URL)
+
+        counts = {"libraries": 0, "valuesets": 0, "codesystems": 0, "measures": 0}
+        for r in prepared:
+            rt = r.get("resourceType")
+            if rt == "Library":
+                counts["libraries"] += 1
+            elif rt == "ValueSet":
+                counts["valuesets"] += 1
+            elif rt == "CodeSystem":
+                counts["codesystems"] += 1
+            elif rt == "Measure":
+                counts["measures"] += 1
+
+        logger.info(
+            "Reloaded support resources for measure",
+            extra={"measure_url": measure_url, "bundle_path": bundle_path, **counts},
+        )
+
+        return {**counts, "bundle_path": bundle_path, "skipped": False}
+
+    except FileNotFoundError:
+        logger.warning(
+            "Bundle file not found during reload",
+            extra={"measure_url": measure_url},
+        )
+        return {"skipped": True, "reason": "Bundle file not found"}
+    except Exception as exc:
+        logger.warning(
+            "Error reloading support resources",
+            extra={"measure_url": measure_url, "error": str(exc)},
+        )
+        return {"skipped": True, "reason": f"Error: {str(exc)[:200]}"}
 
 
 async def verify_fhir_connection(
