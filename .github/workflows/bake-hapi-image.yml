@@ -71,7 +71,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Start CDR container
         run: |
-          docker run -d --name hapi-cdr -p 8180:8080 mct2-hapi-cdr-config
+          docker run -d --name hapi-cdr -p 8180:8080 --user root mct2-hapi-cdr-config
 
       - name: Seed CDR container
         run: |
@@ -92,7 +92,7 @@ jobs:
       # -----------------------------------------------------------------------
       - name: Start Measure container
         run: |
-          docker run -d --name hapi-measure -p 8181:8080 mct2-hapi-measure-config
+          docker run -d --name hapi-measure -p 8181:8080 --user root mct2-hapi-measure-config
 
       - name: Seed Measure container
         run: |
