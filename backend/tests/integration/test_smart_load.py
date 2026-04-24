@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 from unittest.mock import patch
 
@@ -131,7 +132,14 @@ async def loader_result(integration_session_factory):
       - ``counts_by_measure`` — dict mapping canonical_url → ExpectedResult row count,
                                 captured atomically right after loading (before any
                                 function-scoped _truncate_tables teardown can clear rows)
+
+    When HAPI_PREBAKED=1 the bundles are already loaded in the pre-baked image.
+    Re-uploading them here would add 10-15 minutes to every PR gate run.  Skip
+    these tests instead; they run nightly via the connectathon-measures workflow.
     """
+    if os.environ.get("HAPI_PREBAKED") == "1":
+        pytest.skip("Bundle-loader tests skipped in pre-baked mode — run nightly")
+
     with (
         patch("app.config.settings.MEASURE_ENGINE_URL", TEST_MEASURE_URL),
         patch("app.config.settings.DEFAULT_CDR_URL", TEST_CDR_URL),
