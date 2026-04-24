@@ -354,7 +354,11 @@ async def test_run_job_all_patient_failures_marks_job_failed(test_session, sessi
             new_callable=AsyncMock,
             return_value=[{"resourceType": "Patient", "id": "p1"}],
         ),
-        patch("app.services.orchestrator.reload_support_resources_for_measure", new_callable=AsyncMock, return_value={"skipped": False, "counts": {"measures": 1}}),
+        patch(
+            "app.services.orchestrator.reload_support_resources_for_measure",
+            new_callable=AsyncMock,
+            return_value={"skipped": False, "counts": {"measures": 1}},
+        ),
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
         patch(
             "app.services.orchestrator.evaluate_measure",
