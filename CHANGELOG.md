@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.7.7] - 2026-04-24
+
+### Fixed
+- **Validation runs no longer fail with 409 CONFLICT on first evaluation** — concurrent `$evaluate-measure` calls to HAPI now include a warmup burst that serially evaluates one patient per measure before the concurrent batch. First concurrent batch against a fresh measure engine triggers a race during SearchParameter indexing; some concurrent requests hit 409 CONFLICT affecting ~20-30% of patients. Warmup avoids the race by completing indexing in single-threaded context before concurrent calls start. First run after bundle upload now succeeds; retry workarounds no longer necessary. Fixes #156.
+
 ## [0.0.6.7] - 2026-04-22
 
 ### Fixed
