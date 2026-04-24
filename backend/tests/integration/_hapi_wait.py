@@ -37,10 +37,7 @@ def wait_for_metadata(base_url: str, timeout: int = 300) -> None:
         except httpx.RequestError as exc:
             last_exc = exc
         time.sleep(2)
-    raise RuntimeError(
-        f"HAPI at {base_url} did not respond within {timeout}s. "
-        f"Last error: {last_exc}"
-    )
+    raise RuntimeError(f"HAPI at {base_url} did not respond within {timeout}s. Last error: {last_exc}")
 
 
 def trigger_reindex_and_wait(
@@ -71,15 +68,11 @@ def trigger_reindex_and_wait(
 
     r = httpx.post(f"{base_url}/$reindex", json=params, headers=headers, timeout=30)
     if r.status_code >= 400:
-        warnings.warn(
-            f"$reindex trigger at {base_url} returned {r.status_code}: {r.text[:200]}"
-        )
+        warnings.warn(f"$reindex trigger at {base_url} returned {r.status_code}: {r.text[:200]}")
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        resp = httpx.get(
-            f"{base_url}/Encounter?patient={probe_patient_id}&_count=1", timeout=10
-        )
+        resp = httpx.get(f"{base_url}/Encounter?patient={probe_patient_id}&_count=1", timeout=10)
         if resp.status_code == 200:
             try:
                 if resp.json().get("entry"):
@@ -133,9 +126,7 @@ def wait_for_valueset_expansion(
             try:
                 # count=2 so HAPI-0831 fires for any VS with >1 code until
                 # background pre-expansion completes and HAPI can serve from DB.
-                resp = httpx.get(
-                    f"{base_url}/ValueSet/{vs_id}/$expand?count=2", timeout=15
-                )
+                resp = httpx.get(f"{base_url}/ValueSet/{vs_id}/$expand?count=2", timeout=15)
                 if resp.status_code == 200:
                     newly_done.add(vs_id)
             except httpx.RequestError:
@@ -171,10 +162,7 @@ def _discover_large_valueset_ids(base_url: str, threshold: int = 900) -> list[st
             vs_id = vs.get("id")
             if not vs_id:
                 continue
-            concept_count = sum(
-                len(inc.get("concept", []))
-                for inc in vs.get("compose", {}).get("include", [])
-            )
+            concept_count = sum(len(inc.get("concept", [])) for inc in vs.get("compose", {}).get("include", []))
             if concept_count >= threshold:
                 ids.append(vs_id)
     except httpx.RequestError:
