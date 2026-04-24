@@ -1,0 +1,109 @@
+name: Bake HAPI Seeded Images
+
+# Builds HAPI images with seed data, $reindex, and ValueSet expansion
+# already baked into the H2 database. Runs weekly and on seed changes.
+#
+# Strategy: docker run → seed from runner → docker stop → docker commit → push.
+# We cannot use Dockerfile RUN steps because hapiproject/hapi is distroless
+# (no shell inside the container). Instead, seed-hapi.sh runs on the runner
+# and targets the container's exposed port.
+
+on:
+  schedule:
+    - cron: '0 5 * * 1'  # Monday 05:00 UTC weekly
+  workflow_dispatch:
+  push:
+    paths:
+      - 'seed/**'
+      - 'docker/hapi-*-seeded.Dockerfile'
+      - 'docker/seed-hapi.sh'
+      - 'docker-compose.test.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  bake:
+    name: Bake and push seeded HAPI images
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute seed hash
+        id: seed-hash
+        run: |
+          echo "hash=$(find seed/ docker/seed-hapi.sh docker-compose.test.yml \
+            docker/hapi-cdr-seeded.Dockerfile docker/hapi-measure-seeded.Dockerfile \
+            -type f 2>/dev/null | sort | xargs sha256sum | sha256sum | cut -c1-12)" \
+            >> "$GITHUB_OUTPUT"
+
+      # -----------------------------------------------------------------------
+      # Build config images (distroless base + ENV vars only, no RUN steps)
+      # These are intermediate images used to start the containers with the
+      # correct Spring env vars. Seeded data is committed via docker commit below.
+      # -----------------------------------------------------------------------
+      - name: Build CDR config image
+        run: |
+          docker build \
+            -f docker/hapi-cdr-seeded.Dockerfile \
+            -t mct2-hapi-cdr-config \
+            .
+
+      - name: Build Measure config image
+        run: |
+          docker build \
+            -f docker/hapi-measure-seeded.Dockerfile \
+            -t mct2-hapi-measure-config \
+            .
+
+      # -----------------------------------------------------------------------
+      # Bake CDR image: run → seed from runner → stop → commit → push
+      # -----------------------------------------------------------------------
+      - name: Start CDR container
+        run: |
+          docker run -d --name hapi-cdr -p 8180:8080 --user root mct2-hapi-cdr-config
+
+      - name: Seed CDR container
+        run: |
+          HAPI_PORT=8180 SEED_TYPE=cdr bash docker/seed-hapi.sh
+
+      - name: Commit and push CDR image
+        run: |
+          docker stop hapi-cdr
+          docker commit hapi-cdr ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }}
+          docker tag \
+            ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }} \
+            ghcr.io/bellese/mct2-hapi-cdr:latest
+          docker push ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }}
+          docker push ghcr.io/bellese/mct2-hapi-cdr:latest
+
+      # -----------------------------------------------------------------------
+      # Bake Measure image: run → seed from runner → stop → commit → push
+      # -----------------------------------------------------------------------
+      - name: Start Measure container
+        run: |
+          docker run -d --name hapi-measure -p 8181:8080 --user root mct2-hapi-measure-config
+
+      - name: Seed Measure container
+        run: |
+          HAPI_PORT=8181 SEED_TYPE=measure bash docker/seed-hapi.sh
+
+      - name: Commit and push Measure image
+        run: |
+          docker stop hapi-measure
+          docker commit hapi-measure ghcr.io/bellese/mct2-hapi-measure:${{ steps.seed-hash.outputs.hash }}
+          docker tag \
+            ghcr.io/bellese/mct2-hapi-measure:${{ steps.seed-hash.outputs.hash }} \
+            ghcr.io/bellese/mct2-hapi-measure:latest
+          docker push ghcr.io/bellese/mct2-hapi-measure:${{ steps.seed-hash.outputs.hash }}
+          docker push ghcr.io/bellese/mct2-hapi-measure:latest
