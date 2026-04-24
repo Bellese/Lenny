@@ -35,6 +35,7 @@ from app.services.fhir_client import (
     evaluate_measure,
     push_resources,
     trigger_reindex_and_wait,
+    trigger_reindex_and_wait_for_patients,
     wait_for_valueset_expansion,
     wipe_patient_data,
 )
@@ -1119,13 +1120,19 @@ async def run_validation(validation_run_id: int) -> None:
             strategy = BatchQueryStrategy()
             semaphore = asyncio.Semaphore(settings.MAX_WORKERS)
 
-            async def gather_and_push(patient_ref: str) -> None:
+            async def gather_and_push(patient_ref: str) -> set[str]:
                 async with semaphore:
                     if await _stop_or_delete_validation_run(validation_run_id):
-                        return
+                        return set()
                     resources = await strategy.gather_patient_data(cdr_url, patient_ref, auth_headers)
                     if resources:
                         await push_resources(resources)
+                    return {
+                        resource.get("subject", {}).get("reference", "").removeprefix("Patient/")
+                        for resource in resources
+                        if resource.get("resourceType") == "Encounter"
+                        and resource.get("subject", {}).get("reference", "").startswith("Patient/")
+                    }
 
             all_patient_refs = [er.patient_ref for er in resolved_expected_results]
             gather_results = await asyncio.gather(
@@ -1133,6 +1140,14 @@ async def run_validation(validation_run_id: int) -> None:
                 return_exceptions=True,
             )
             failed_gathers = sum(1 for r in gather_results if isinstance(r, BaseException))
+            reindex_probe_patient_ids = sorted(
+                {
+                    patient_id
+                    for result in gather_results
+                    if not isinstance(result, BaseException)
+                    for patient_id in result
+                }
+            )
             if failed_gathers:
                 logger.warning(
                     "Patient data gather partial failure — validation may reflect incomplete data",
@@ -1145,7 +1160,14 @@ async def run_validation(validation_run_id: int) -> None:
                     extra={"run_id": validation_run_id, "patient_count": len(all_patient_refs)},
                 )
                 try:
-                    await asyncio.to_thread(trigger_reindex_and_wait, settings.MEASURE_ENGINE_URL)
+                    if reindex_probe_patient_ids:
+                        await asyncio.to_thread(
+                            trigger_reindex_and_wait_for_patients,
+                            settings.MEASURE_ENGINE_URL,
+                            reindex_probe_patient_ids,
+                        )
+                    else:
+                        await asyncio.to_thread(trigger_reindex_and_wait, settings.MEASURE_ENGINE_URL)
                 except Exception as exc:
                     logger.warning(
                         "HAPI reindex failed during validation — falling back to sleep",

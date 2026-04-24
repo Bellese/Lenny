@@ -959,7 +959,16 @@ class TestRunValidation:
         monkeypatch.setattr("app.services.validation.settings.MEASURE_ENGINE_URL", "http://measure/fhir")
 
         strategy = MagicMock()
-        strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "patient-1"}])
+        strategy.gather_patient_data = AsyncMock(
+            return_value=[
+                {"resourceType": "Patient", "id": "patient-1"},
+                {
+                    "resourceType": "Encounter",
+                    "id": "encounter-1",
+                    "subject": {"reference": "Patient/patient-1"},
+                },
+            ]
+        )
 
         def make_ctx():
             return self._make_session_ctx(test_session)
@@ -1009,8 +1018,9 @@ class TestRunValidation:
         )
 
         mock_to_thread.assert_awaited_once()
-        assert mock_to_thread.await_args.args[0].__name__ == "trigger_reindex_and_wait"
+        assert mock_to_thread.await_args.args[0].__name__ == "trigger_reindex_and_wait_for_patients"
         assert mock_to_thread.await_args.args[1] == "http://measure/fhir"
+        assert mock_to_thread.await_args.args[2] == ["patient-1"]
         mock_sleep.assert_not_awaited()
 
     async def test_hapi_sync_disabled_uses_sleep_fallback(self, test_session, monkeypatch):
