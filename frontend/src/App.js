@@ -16,7 +16,7 @@ import SearchContext from './contexts/SearchContext';
 const NAV_ITEMS = [
   { path: '/measures',   label: 'Measures',   Icon: MeasuresIcon,  kbd: 'M' },
   { path: '/jobs',       label: 'Jobs',        Icon: JobsIcon,      kbd: 'J' },
-  { path: '/results',    label: 'Results',     Icon: ResultsIcon,   kbd: 'R' },
+  { path: '/results',    label: 'Results',     Icon: ResultsIcon,   kbd: 'E' },
   { path: '/validation', label: 'Validation',  Icon: ValidateIcon,  kbd: 'V' },
 ];
 
