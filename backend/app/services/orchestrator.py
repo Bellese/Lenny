@@ -19,6 +19,7 @@ from app.services.fhir_client import (
     evaluate_measure,
     get_group_members,
     push_resources,
+    trigger_reindex_and_wait,
     wipe_patient_data,
 )
 from app.services.validation import sanitize_error
@@ -338,11 +339,25 @@ async def _process_single_batch(
             # Wait for HAPI FHIR search indexes to catch up.
             # CQL evaluation relies on FHIR search internally; HAPI
             # indexes transactions asynchronously.
-            logger.info(
-                "All patient data pushed — waiting for HAPI indexing",
-                extra={"job_id": job_id, "batch_id": batch_id},
-            )
-            await asyncio.sleep(5.0)
+            if settings.HAPI_SYNC_AFTER_UPLOAD:
+                logger.info(
+                    "All patient data pushed — waiting for HAPI reindex",
+                    extra={"job_id": job_id, "batch_id": batch_id},
+                )
+                try:
+                    await asyncio.to_thread(trigger_reindex_and_wait, settings.MEASURE_ENGINE_URL)
+                except Exception as exc:
+                    logger.warning(
+                        "HAPI reindex failed during job — falling back to sleep",
+                        extra={"job_id": job_id, "batch_id": batch_id, "error": str(exc)},
+                    )
+                    await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
+            else:
+                logger.info(
+                    "All patient data pushed — waiting for HAPI indexing",
+                    extra={"job_id": job_id, "batch_id": batch_id},
+                )
+                await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
             if await _stop_or_delete_job(job_id):
                 return
 

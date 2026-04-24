@@ -147,6 +147,8 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
             new_callable=AsyncMock,
             return_value=mock_measure_report,
         ),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
     ):
         await run_job(job_id)
 
@@ -279,6 +281,8 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
             new_callable=AsyncMock,
             side_effect=mock_evaluate,
         ),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
     ):
         await run_job(job_id)
 
@@ -331,6 +335,8 @@ async def test_run_job_all_patient_failures_marks_job_failed(test_session, sessi
             new_callable=AsyncMock,
             side_effect=Exception("HAPI returned 400"),
         ),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
     ):
         await run_job(job_id)
 
@@ -440,6 +446,8 @@ async def test_process_batch_uses_everything_strategy(test_session, session_fact
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.BatchQueryStrategy") as mock_strategy_cls,
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
         patch("app.services.orchestrator.asyncio.sleep", new_callable=AsyncMock),
         patch(
             "app.services.orchestrator.evaluate_measure",
@@ -513,6 +521,8 @@ async def test_process_batch_uses_data_requirements_strategy_when_configured(
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.DataRequirementsStrategy") as mock_strategy_cls,
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
         patch("app.services.orchestrator.asyncio.sleep", new_callable=AsyncMock),
         patch(
             "app.services.orchestrator.evaluate_measure",
@@ -545,3 +555,67 @@ async def test_process_batch_uses_data_requirements_strategy_when_configured(
         )
 
     mock_strategy_cls.assert_called_once_with("CMS999")
+
+
+async def test_process_batch_hapi_sync_calls_trigger_reindex(test_session, session_factory, monkeypatch):
+    """When HAPI_SYNC_AFTER_UPLOAD=True, _process_single_batch calls trigger_reindex_and_wait."""
+    from unittest.mock import MagicMock
+
+    from app.models.job import Batch, BatchStatus
+    from app.services.orchestrator import _process_single_batch
+
+    monkeypatch.setattr("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", True)
+    monkeypatch.setattr("app.services.orchestrator.settings.MEASURE_ENGINE_URL", "http://mcs/fhir")
+
+    job = Job(
+        measure_id="CMS122",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    batch = Batch(
+        job_id=job.id,
+        batch_number=1,
+        patient_ids=["p1"],
+        status=BatchStatus.pending,
+    )
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    patient_map = {"p1": {"resourceType": "Patient", "id": "p1"}}
+    mock_reindex = MagicMock()
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.BatchQueryStrategy") as mock_strategy_cls,
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch("app.services.orchestrator.trigger_reindex_and_wait", mock_reindex),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={
+                "resourceType": "MeasureReport",
+                "status": "complete",
+                "group": [{"population": [{"code": {"coding": [{"code": "initial-population"}]}, "count": 1}]}],
+            },
+        ),
+    ):
+        mock_strategy = MagicMock()
+        mock_strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p1"}])
+        mock_strategy_cls.return_value = mock_strategy
+
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map=patient_map,
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+        )
+
+    mock_reindex.assert_called_once_with("http://mcs/fhir")
