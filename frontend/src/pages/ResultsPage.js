@@ -1,19 +1,70 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import styles from './ResultsPage.module.css';
-import { getJobs, getResults, getResult } from '../api/client';
+import { getJobs, getResults, getResult, createJob } from '../api/client';
+import { useToast } from '../components/Toast';
 import PatientDetail from '../components/PatientDetail';
 import ComparisonView from '../components/ComparisonView';
 import Sparkline from '../components/Sparkline';
 import DistBar from '../components/DistBar';
-import { CheckIcon, XIcon, FilterIcon } from '../components/Icons';
+import { CheckIcon, XIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
 
 const SPARK_FALLBACK = [61.2, 62.8, 63.1, 64.0, 64.7, 65.2, 65.9, 66.1, 66.4, 66.8, 67.1, 67.4];
 
+function timeAgo(dateStr) {
+  if (!dateStr) return null;
+  const diff = Math.floor((Date.now() - new Date(dateStr)) / 1000);
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+function exportCsv(patients, measureName, period) {
+  const header = ['Patient ID', 'Name', 'Initial Population', 'Denominator', 'Numerator', 'Denom Exclusion'];
+  const rows = patients.map(p => [
+    p.patient_id || p.id || '',
+    p.patient_name || p.name || '',
+    p.populations?.initial_population ? 'Yes' : 'No',
+    p.populations?.denominator ? 'Yes' : 'No',
+    p.populations?.numerator ? 'Yes' : 'No',
+    p.populations?.denominator_exclusion ? 'Yes' : 'No',
+  ]);
+  const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `results-${measureName || 'measure'}-${period || 'period'}.csv`.replace(/\s+/g, '-');
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+const FILTER_OPTIONS = [
+  { value: 'all', label: 'All Patients' },
+  { value: 'numerator', label: 'In Numerator' },
+  { value: 'denominator_only', label: 'Denominator (not Numerator)' },
+  { value: 'excluded', label: 'Denominator Exclusion' },
+  { value: 'not_in_denominator', label: 'Not in Denominator' },
+];
+
+function applyFilter(patients, filter) {
+  if (filter === 'all') return patients;
+  return patients.filter(p => {
+    const pop = p.populations || {};
+    if (filter === 'numerator') return pop.numerator;
+    if (filter === 'denominator_only') return pop.denominator && !pop.numerator;
+    if (filter === 'excluded') return pop.denominator_exclusion;
+    if (filter === 'not_in_denominator') return !pop.denominator;
+    return true;
+  });
+}
+
 export default function ResultsPage() {
   const { jobId: routeJobId } = useParams();
   const navigate = useNavigate();
+  const toast = useToast();
   const { query } = useSearch();
 
   const [jobs, setJobs] = useState([]);
@@ -24,6 +75,8 @@ export default function ResultsPage() {
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [patientDetail, setPatientDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [populationFilter, setPopulationFilter] = useState('all');
+  const [rerunning, setRerunning] = useState(false);
 
   useEffect(() => {
     async function loadJobs() {
@@ -70,6 +123,7 @@ export default function ResultsPage() {
   const handleJobChange = (e) => {
     const id = e.target.value;
     setSelectedJobId(id);
+    setPopulationFilter('all');
     navigate(`/results/${id}`, { replace: true });
   };
 
@@ -95,9 +149,30 @@ export default function ResultsPage() {
     setPatientDetail(null);
   }, []);
 
+  const handleRerun = async () => {
+    if (!selectedJob) return;
+    setRerunning(true);
+    try {
+      await createJob({
+        measure_id: selectedJob.measure_id,
+        measure_name: selectedJob.measure_name,
+        group_id: selectedJob.group_id || undefined,
+        period_start: selectedJob.period_start || undefined,
+        period_end: selectedJob.period_end || undefined,
+      });
+      toast.success('Re-run started — check the Jobs page');
+      navigate('/jobs');
+    } catch (err) {
+      toast.error(`Failed to start re-run: ${err.message}`);
+    } finally {
+      setRerunning(false);
+    }
+  };
+
   const selectedJob = jobs.find(j => String(j.id) === String(selectedJobId));
   const populations = results?.populations || {};
-  const patients = results?.patients || [];
+  const allPatients = results?.patients || [];
+  const patients = applyFilter(allPatients, populationFilter);
   const measureName = results?.measure_name || selectedJob?.measure_name || selectedJob?.measure_id || '';
   const period = selectedJob?.period_start && selectedJob?.period_end
     ? `${selectedJob.period_start} → ${selectedJob.period_end}` : '';
@@ -116,6 +191,8 @@ export default function ResultsPage() {
     return name.includes(q) || id.includes(q);
   });
 
+  const completedAgo = selectedJob?.completed_at ? timeAgo(selectedJob.completed_at) : null;
+
   return (
     <div className={styles.page}>
       <div className={styles.pageHeader}>
@@ -123,6 +200,11 @@ export default function ResultsPage() {
           {measureName && <div className={styles.eyebrow}>{measureName}</div>}
           <h1 className={styles.title}>Results</h1>
           {period && <div className={styles.sub}><span className={styles.mono}>{period}</span></div>}
+          {completedAgo && (
+            <div className={styles.sub}>
+              <span className={styles.completeBadge}>Complete</span>{' '}Calculated {completedAgo}
+            </div>
+          )}
         </div>
         <div className={styles.headerActions}>
           {jobs.length > 0 && (
@@ -134,6 +216,27 @@ export default function ResultsPage() {
                 </option>
               ))}
             </select>
+          )}
+          {selectedJobId && results && (
+            <>
+              <button
+                className={styles.btnGhost}
+                onClick={() => exportCsv(allPatients, measureName, period)}
+                disabled={allPatients.length === 0}
+              >
+                Export CSV
+              </button>
+              {selectedJob && (
+                <button
+                  className={styles.btnAccent}
+                  onClick={handleRerun}
+                  disabled={rerunning}
+                  aria-busy={rerunning}
+                >
+                  {rerunning ? 'Starting…' : 'Re-run'}
+                </button>
+              )}
+            </>
           )}
         </div>
       </div>
@@ -223,9 +326,22 @@ export default function ResultsPage() {
           <div className={styles.card}>
             <div className={styles.tableHeader}>
               <span className={styles.tableTitle}>Patients</span>
-              {ip != null && <span className={styles.tableBadge}>{ip.toLocaleString()}</span>}
+              <span className={styles.tableBadge}>
+                {filteredPatients.length !== allPatients.length
+                  ? `${filteredPatients.length} / ${allPatients.length}`
+                  : allPatients.length.toLocaleString()}
+              </span>
               <div className={styles.tableActions}>
-                <button className={styles.btnGhost}><FilterIcon /> Filter</button>
+                <select
+                  className={styles.filterSelect}
+                  value={populationFilter}
+                  onChange={e => setPopulationFilter(e.target.value)}
+                  aria-label="Filter by population"
+                >
+                  {FILTER_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </select>
               </div>
             </div>
             <table aria-label="Patient results">
@@ -241,7 +357,11 @@ export default function ResultsPage() {
               <tbody>
                 {filteredPatients.length === 0 ? (
                   <tr><td colSpan={5} className={styles.emptyRow}>
-                    {q ? `No patients match "${q}".` : 'No individual patient results available.'}
+                    {q
+                      ? `No patients match "${q}".`
+                      : populationFilter !== 'all'
+                        ? 'No patients match this filter.'
+                        : 'No individual patient results available.'}
                   </td></tr>
                 ) : (
                   filteredPatients.map((patient, i) => (
