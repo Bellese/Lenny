@@ -1,205 +1,173 @@
 .page {
-  max-width: 960px;
+  padding: 28px 32px;
+  max-width: 1100px;
 }
 
-.header {
+.pageHeader {
   display: flex;
-  align-items: center;
-  margin-bottom: var(--space-6);
-  gap: var(--space-4);
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+
+.eyebrow {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+  margin-bottom: 4px;
 }
 
 .title {
-  font-size: var(--font-size-page);
-  font-weight: var(--font-weight-semibold);
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text);
 }
 
-.uploadBtn {
-  margin-left: auto;
-  padding: var(--space-2) var(--space-5);
-  background: var(--color-accent);
-  color: #fff;
-  border-radius: var(--radius-md);
-  font-weight: var(--font-weight-semibold);
-  min-height: 44px;
-  transition: background var(--transition);
+.sub {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 4px;
 }
 
-.uploadBtn:hover:not(:disabled) {
-  background: var(--color-accent-hover);
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.uploadBtn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+.btnPrimary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  background: var(--accent);
+  color: oklch(0.99 0 0);
+  border: none;
+  border-radius: var(--radius);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 120ms ease;
 }
 
-.tableWrapper {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
-  border: 1px solid var(--color-border);
+.btnPrimary:hover { opacity: 0.88; }
+.btnPrimary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.card {
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
   border-radius: var(--radius-lg);
-  background: var(--color-bg-primary);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
 }
 
-.tableWrapper table {
-  min-width: 480px;
+.row:hover td {
+  background: var(--bg-sunken);
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
 }
 
 .measureName {
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-primary);
-}
-
-.measureId {
-  font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
-  color: var(--color-text-secondary);
-}
-
-.version {
-  font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
-  color: var(--color-text-secondary);
+  font-weight: 500;
 }
 
 .badge {
   display: inline-flex;
   align-items: center;
-  gap: var(--space-1);
-  padding: 2px var(--space-2);
-  border-radius: 100px;
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--line-soft);
+  color: var(--text-muted);
 }
 
-.badgeDot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
+.badgeOk {
+  background: var(--ok-wash);
+  color: var(--ok);
 }
 
-.success {
-  background: var(--color-success-light);
-  color: var(--color-success);
+.badgeDraft {
+  background: var(--warn-wash);
+  color: var(--warn);
 }
 
-.success .badgeDot {
-  background: var(--color-success);
+.badgeRetired {
+  background: var(--err-wash);
+  color: var(--err);
 }
 
-.warning {
-  background: var(--color-warning-light);
-  color: var(--color-warning);
-}
-
-.warning .badgeDot {
-  background: var(--color-warning);
-}
-
-.error {
-  background: var(--color-error-light);
-  color: var(--color-error);
-}
-
-.error .badgeDot {
-  background: var(--color-error);
-}
-
-.default {
-  background: var(--color-bg-secondary);
-  color: var(--color-text-tertiary);
-}
-
-.default .badgeDot {
-  background: var(--color-text-tertiary);
-}
-
-.actionLink {
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
+.badgeIcon {
+  width: 10px;
+  height: 10px;
 }
 
 .actionGroup {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
 }
 
-.deleteBtn {
-  padding: 0;
-  border: none;
+.calcBtn {
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  color: var(--text-muted);
   background: transparent;
-  color: var(--color-error);
-  font-size: var(--font-size-sm);
-  font-weight: var(--font-weight-semibold);
+  text-decoration: none;
+  transition: background 100ms ease, color 100ms ease;
+  white-space: nowrap;
 }
 
-.deleteBtn:hover:not(:disabled) {
-  text-decoration: underline;
-}
-
-.deleteBtn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
+.calcBtn:hover {
+  background: var(--bg-sunken);
+  color: var(--text);
+  text-decoration: none;
 }
 
 .emptyRow {
   text-align: center;
-  color: var(--color-text-tertiary);
-  padding: var(--space-12) var(--space-4) !important;
-}
-
-.skeletonCell {
-  height: 18px;
+  color: var(--text-dim);
+  padding: 40px 16px !important;
+  font-size: 13px;
 }
 
 .errorState {
-  padding: var(--space-8);
-  background: var(--color-error-light);
-  border-radius: var(--radius-lg);
+  padding: 32px;
   text-align: center;
 }
 
 .errorMessage {
-  font-size: var(--font-size-emphasis);
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-error);
-  margin-bottom: var(--space-2);
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 6px;
 }
 
 .errorDetail {
-  font-size: var(--font-size-body);
-  color: var(--color-text-secondary);
-  margin-bottom: var(--space-4);
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 16px;
 }
 
 .retryBtn {
-  padding: var(--space-2) var(--space-5);
-  background: var(--color-bg-primary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  font-weight: var(--font-weight-semibold);
-  min-height: 44px;
+  padding: 6px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-muted);
+  background: transparent;
 }
 
 .retryBtn:hover {
-  background: var(--color-bg-secondary);
-}
-
-.hint {
-  margin-top: var(--space-6);
-  font-size: var(--font-size-sm);
-  color: var(--color-text-tertiary);
-}
-
-@media (max-width: 767px) {
-  .header {
-    flex-wrap: wrap;
-  }
-
-  .title {
-    font-size: var(--font-size-section);
-  }
+  background: var(--bg-sunken);
+  color: var(--text);
 }

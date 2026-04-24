@@ -2,48 +2,22 @@ import React, { useState, useEffect, useCallback } from 'react';
 import styles from './SettingsPage.module.css';
 import { getConnections, deleteConnection, activateConnection, getHealth } from '../api/client';
 import ConnectionModal from '../components/ConnectionModal';
+import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
 
-function StatusIndicator({ label, status, detail }) {
-  const isHealthy = status === 'healthy' || status === 'connected' || status === true;
-  const isUnknown = status === 'unknown' || status === undefined || status === null;
-
-  return (
-    <div className={styles.statusRow}>
-      <span className={styles.statusIcon} aria-hidden="true">
-        {isHealthy ? (
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="7" fill="var(--color-success-light)" stroke="var(--color-success)" strokeWidth="1.5" />
-            <path d="M5 8l2 2 4-4" stroke="var(--color-success)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        ) : isUnknown ? (
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="7" fill="var(--color-bg-secondary)" stroke="var(--color-text-tertiary)" strokeWidth="1.5" />
-            <text x="8" y="12" textAnchor="middle" fontSize="10" fill="var(--color-text-tertiary)">?</text>
-          </svg>
-        ) : (
-          <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-            <circle cx="8" cy="8" r="7" fill="var(--color-error-light)" stroke="var(--color-error)" strokeWidth="1.5" />
-            <path d="M5.5 5.5l5 5M10.5 5.5l-5 5" stroke="var(--color-error)" strokeWidth="1.5" strokeLinecap="round" />
-          </svg>
-        )}
-      </span>
-      <span className={styles.statusLabel}>{label}</span>
-      <span className={`${styles.statusText} ${isHealthy ? styles.healthy : isUnknown ? styles.unknown : styles.unhealthy}`}>
-        {isHealthy ? 'Connected' : isUnknown ? 'Unknown' : 'Disconnected'}
-      </span>
-      {detail && <span className={styles.statusDetail}>{detail}</span>}
-    </div>
-  );
+function DotStatus({ ok }) {
+  return <span className={`${styles.statusDot} ${ok ? styles.statusDotOk : styles.statusDotErr}`} />;
 }
 
 export default function SettingsPage() {
   const toast = useToast();
+  const [tab, setTab] = useState('connections');
   const [connections, setConnections] = useState([]);
   const [health, setHealth] = useState(null);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [editingConnection, setEditingConnection] = useState(null);
+  const [confirmConn, setConfirmConn] = useState(null);
 
   const loadConnections = useCallback(async () => {
     try {
@@ -68,27 +42,12 @@ export default function SettingsPage() {
     loadHealth();
   }, [loadConnections, loadHealth]);
 
-  const handleOpenAdd = () => {
-    setEditingConnection(null);
-    setModalOpen(true);
-  };
-
-  const handleOpenEdit = (conn) => {
-    setEditingConnection(conn);
-    setModalOpen(true);
-  };
-
-  const handleModalClose = () => {
-    setModalOpen(false);
-    setEditingConnection(null);
-  };
-
   const handleModalSaved = async () => {
     const wasEdit = !!editingConnection;
     setModalOpen(false);
     setEditingConnection(null);
     await Promise.all([loadConnections(), loadHealth()]);
-    toast.success(wasEdit ? 'Connection updated successfully' : 'Connection added successfully');
+    toast.success(wasEdit ? 'Connection updated' : 'Connection added');
   };
 
   const handleActivate = async (id) => {
@@ -96,146 +55,149 @@ export default function SettingsPage() {
       await activateConnection(id);
       await Promise.all([loadConnections(), loadHealth()]);
     } catch (err) {
-      alert(err.message || 'Failed to activate connection');
+      toast.error(err.message || 'Failed to activate connection');
     }
   };
 
-  const handleDelete = async (conn) => {
-    if (!window.confirm(`Delete connection "${conn.name}"?`)) return;
+  const handleDeleteConfirmed = async () => {
+    const conn = confirmConn;
+    setConfirmConn(null);
     try {
       await deleteConnection(conn.id);
       await loadConnections();
+      toast.success('Connection deleted');
     } catch (err) {
       const diag = err.body?.detail?.issue?.[0]?.diagnostics;
-      alert(diag || err.message || 'Failed to delete connection');
+      toast.error(diag || err.message || 'Failed to delete connection');
     }
   };
 
-  if (loading) {
-    return (
-      <div className={styles.page} role="status" aria-label="Loading settings">
-        <h1 className={styles.title}>Settings</h1>
-        <div className={styles.sections}>
-          {[1, 2].map(i => (
-            <div key={i} className={`skeleton ${styles.skeletonSection}`} />
-          ))}
-        </div>
-      </div>
-    );
-  }
+  const TABS = [
+    { id: 'connections', label: 'CDR Connections' },
+    { id: 'status', label: 'System Status' },
+  ];
+
+  const statusServices = [
+    { label: 'Backend', ok: !!health, detail: null },
+    { label: 'Measure Engine', ok: health?.measure_engine?.status === 'healthy' || health?.measure_engine?.status === 'connected', detail: health?.measure_engine?.error || null },
+    { label: 'CDR', ok: health?.cdr?.status === 'healthy' || health?.cdr?.status === 'connected', detail: health?.cdr?.name || null },
+    { label: 'Database', ok: health?.database?.status === 'healthy' || health?.database?.status === 'connected', detail: null },
+  ];
 
   return (
     <div className={styles.page}>
-      <h1 className={styles.title}>Settings</h1>
+      <div className={styles.pageHeader}>
+        <div>
+          <div className={styles.eyebrow}>Configuration</div>
+          <h1 className={styles.title}>Settings</h1>
+        </div>
+      </div>
 
-      <div className={styles.sections}>
-        {/* CDR Connections */}
-        <section className={styles.section}>
-          <div className={styles.sectionHeader}>
-            <h2 className={styles.sectionTitle}>CDR Connections</h2>
-            <button className={styles.addBtn} onClick={handleOpenAdd}>
-              Add Connection
+      <div className={styles.layout}>
+        {/* Sub-nav */}
+        <nav className={styles.subNav}>
+          {TABS.map(t => (
+            <button
+              key={t.id}
+              className={`${styles.subNavItem} ${tab === t.id ? styles.subNavItemActive : ''}`}
+              onClick={() => setTab(t.id)}
+            >
+              {t.label}
             </button>
-          </div>
+          ))}
+        </nav>
 
-          {connections.length === 0 ? (
-            <div className={styles.emptyState}>No connections configured.</div>
-          ) : (
-            <div className={styles.connectionList}>
-              {connections.map(conn => (
-                <div
-                  key={conn.id}
-                  className={styles.connectionRow}
-                  data-active={conn.is_active ? 'true' : 'false'}
-                >
-                  <span
-                    className={styles.connectionDot}
-                    data-active={conn.is_active ? 'true' : 'false'}
-                    aria-label={conn.is_active ? 'Active' : 'Inactive'}
-                  />
-                  <div className={styles.connectionInfo}>
-                    <div className={styles.connectionName}>
-                      {conn.name}
-                      {conn.is_active && <span style={{ marginLeft: 6, fontWeight: 'normal', color: 'var(--color-success)', fontSize: 'var(--font-size-sm)' }}>(active)</span>}
+        {/* Content */}
+        <div className={styles.content}>
+          {loading ? (
+            <div className={styles.card}>
+              <div className="skeleton" style={{ height: 80, borderRadius: 8 }} />
+            </div>
+          ) : tab === 'connections' ? (
+            <div className={styles.card}>
+              <div className={styles.cardHeader}>
+                <span className={styles.cardTitle}>CDR Connections</span>
+                <button className={styles.btnPrimary} onClick={() => { setEditingConnection(null); setModalOpen(true); }}>
+                  Add connection
+                </button>
+              </div>
+              {connections.length === 0 ? (
+                <div className={styles.emptyState}>No connections configured.</div>
+              ) : (
+                <div className={styles.connList}>
+                  {connections.map(conn => (
+                    <div key={conn.id} className={`${styles.connRow} ${conn.is_active ? styles.connRowActive : ''}`}>
+                      <span className={`${styles.connDot} ${conn.is_active ? styles.connDotActive : ''}`} />
+                      <div className={styles.connInfo}>
+                        <div className={styles.connName}>
+                          {conn.name}
+                          {conn.is_active && <span className={styles.activeTag}>(active)</span>}
+                        </div>
+                        <div className={styles.connUrl}>{conn.cdr_url}</div>
+                      </div>
+                      <div className={styles.connMeta}>
+                        <span className={styles.connBadge}>{{ none: 'No Auth', basic: 'Basic', bearer: 'Bearer', smart: 'SMART' }[conn.auth_type] || conn.auth_type || 'No Auth'}</span>
+                        {conn.is_read_only && <span className={`${styles.connBadge} ${styles.connBadgeReadOnly}`}>read-only</span>}
+                      </div>
+                      <div className={styles.connActions}>
+                        <button className={styles.btnLink} onClick={() => { setEditingConnection(conn); setModalOpen(true); }}>Edit</button>
+                        <button className={styles.btnLink} onClick={() => handleActivate(conn.id)} disabled={conn.is_active}>Activate</button>
+                        <button
+                          className={`${styles.btnLink} ${styles.btnLinkDanger}`}
+                          onClick={() => setConfirmConn(conn)}
+                          disabled={conn.is_default || conn.is_active}
+                          title={conn.is_default ? 'Cannot delete the built-in CDR' : conn.is_active ? 'Activate a different connection first' : undefined}
+                        >
+                          Delete
+                        </button>
+                      </div>
                     </div>
-                    <div className={styles.connectionUrl} title={conn.cdr_url}>{conn.cdr_url}</div>
-                  </div>
-                  <div className={styles.connectionBadges}>
-                    <span className={styles.badge}>{{ none: 'No Auth', basic: 'Basic', bearer: 'Bearer', smart: 'SMART' }[conn.auth_type] || conn.auth_type || 'No Auth'}</span>
-                    {conn.is_read_only && (
-                      <span className={`${styles.badge} ${styles.badgeReadOnly}`}>read-only</span>
-                    )}
-                  </div>
-                  <div className={styles.connectionActions}>
-                    <button
-                      className={styles.iconBtn}
-                      onClick={() => handleOpenEdit(conn)}
-                      aria-label={`Edit ${conn.name}`}
-                    >
-                      Edit
-                    </button>
-                    <button
-                      className={styles.iconBtn}
-                      onClick={() => handleActivate(conn.id)}
-                      disabled={conn.is_active}
-                      aria-label={`Activate ${conn.name}`}
-                    >
-                      Activate
-                    </button>
-                    <button
-                      className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
-                      onClick={() => handleDelete(conn)}
-                      disabled={conn.is_default || conn.is_active}
-                      title={conn.is_default ? 'Cannot delete the built-in Local CDR' : conn.is_active ? 'Activate a different connection first, then delete this one' : undefined}
-                      aria-label={`Delete ${conn.name}`}
-                    >
-                      Delete
-                    </button>
-                  </div>
+                  ))}
                 </div>
-              ))}
+              )}
+            </div>
+          ) : (
+            <div className={styles.card}>
+              <div className={styles.cardHeader}>
+                <span className={styles.cardTitle}>System Status</span>
+                <button className={styles.btnGhost} onClick={loadHealth} aria-label="Refresh status">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                    <path d="M12 7a5 5 0 11-1.3-3.3" /><path d="M12 2v3h-3" />
+                  </svg>
+                  Refresh
+                </button>
+              </div>
+              <div className={styles.statusList}>
+                {statusServices.map(s => (
+                  <div key={s.label} className={styles.statusRow}>
+                    <DotStatus ok={s.ok} />
+                    <span className={styles.statusLabel}>{s.label}</span>
+                    <span className={`${styles.statusText} ${s.ok ? styles.statusOk : styles.statusErr}`}>
+                      {s.ok ? 'Connected' : 'Unavailable'}
+                    </span>
+                    {s.detail && <span className={styles.statusDetail}>{s.detail}</span>}
+                  </div>
+                ))}
+              </div>
             </div>
           )}
-        </section>
-
-        {/* System Status */}
-        <section className={styles.section}>
-          <div className={styles.sectionHeader}>
-            <h2 className={styles.sectionTitle}>System Status</h2>
-            <button className={styles.refreshBtn} onClick={loadHealth} aria-label="Refresh status">
-              <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-                <path d="M14 8a6 6 0 11-1.5-4" />
-                <path d="M14 2v4h-4" />
-              </svg>
-            </button>
-          </div>
-          <div className={styles.statusGrid}>
-            <StatusIndicator
-              label="Backend"
-              status={health ? 'healthy' : 'unknown'}
-            />
-            <StatusIndicator
-              label="Measure Engine"
-              status={health?.measure_engine?.status}
-              detail={health?.measure_engine?.error}
-            />
-            <StatusIndicator
-              label="CDR"
-              status={health?.cdr?.status}
-              detail={health?.cdr?.name ? `${health.cdr.name}${health?.cdr?.is_read_only ? ' · read-only' : ''}` : null}
-            />
-            <StatusIndicator
-              label="Database"
-              status={health?.database?.status}
-            />
-          </div>
-        </section>
+        </div>
       </div>
+
+      <ConfirmDialog
+        open={!!confirmConn}
+        title={`Delete "${confirmConn?.name}"?`}
+        body="This connection will be permanently removed. Any active sessions using it will lose access."
+        confirmLabel="Delete connection"
+        tone="destructive"
+        onCancel={() => setConfirmConn(null)}
+        onConfirm={handleDeleteConfirmed}
+      />
 
       {modalOpen && (
         <ConnectionModal
           connection={editingConnection}
-          onClose={handleModalClose}
+          onClose={() => { setModalOpen(false); setEditingConnection(null); }}
           onSaved={handleModalSaved}
         />
       )}
