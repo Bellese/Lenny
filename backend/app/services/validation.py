@@ -1139,8 +1139,22 @@ async def run_validation(validation_run_id: int) -> None:
                     extra={"failed": failed_gathers, "total": len(all_patient_refs), "run_id": validation_run_id},
                 )
 
-            # Wait for HAPI indexing (configurable via HAPI_INDEX_WAIT_SECONDS env var)
-            await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
+            if settings.HAPI_SYNC_AFTER_UPLOAD:
+                logger.info(
+                    "Waiting for HAPI reindex before validation evaluation",
+                    extra={"run_id": validation_run_id, "patient_count": len(all_patient_refs)},
+                )
+                try:
+                    await asyncio.to_thread(trigger_reindex_and_wait, settings.MEASURE_ENGINE_URL)
+                except Exception as exc:
+                    logger.warning(
+                        "HAPI reindex failed during validation — falling back to sleep",
+                        extra={"run_id": validation_run_id, "error": sanitize_error(exc)},
+                    )
+                    await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
+            else:
+                # Rollback path: old sleep-based wait
+                await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
 
