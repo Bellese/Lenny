@@ -34,8 +34,8 @@
   width: 22px;
   height: 22px;
   border-radius: 5px;
-  background: var(--accent);
-  color: oklch(0.99 0 0);
+  background: var(--text);
+  color: var(--bg-elevated);
   font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 600;
@@ -216,6 +216,7 @@
   align-items: center;
   gap: 10px;
   padding: 7px 16px;
+  border: 1px solid transparent;
   color: var(--text-muted);
   font-size: 13px;
   text-decoration: none;
@@ -233,14 +234,16 @@
 }
 
 .navItemActive {
-  background: var(--accent-wash);
-  color: var(--accent-ink);
+  background: var(--bg-elevated);
+  border-color: var(--line);
+  box-shadow: var(--shadow-card);
+  color: var(--text);
   font-weight: 500;
 }
 
 .navItemActive:hover {
-  background: var(--accent-wash);
-  color: var(--accent-ink);
+  background: var(--bg-elevated);
+  color: var(--text);
 }
 
 .navIcon {
@@ -269,9 +272,9 @@
 
 .navItemActive .navKbd {
   opacity: 1;
-  background: var(--accent-wash);
-  border-color: var(--accent-wash);
-  color: var(--accent-ink);
+  background: var(--bg-sunken);
+  border-color: var(--line);
+  color: var(--text-dim);
 }
 
 .navItemSettings {
