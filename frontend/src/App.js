@@ -90,7 +90,7 @@ export default function App() {
         setQuery('');
         return;
       }
-      if (!isInput) {
+      if (!isInput && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
         if (e.key === 'm' || e.key === 'M') navigate('/measures');
         else if (e.key === 'j' || e.key === 'J') navigate('/jobs');
         else if (e.key === 'r' || e.key === 'R') navigate('/results');
