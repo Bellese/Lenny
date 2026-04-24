@@ -204,7 +204,7 @@ export default function App() {
           ))}
 
           <div className={styles.navGroupLabel} style={{ marginTop: 16 }}>Data source</div>
-          <div className={styles.navItem} style={{ cursor: 'default' }}>
+          <div className={styles.dataSourceItem}>
             <span className={styles.navIcon}>
               <span className={`${styles.smallDot} ${cdrOk ? styles.smallDotOk : styles.smallDotErr}`} />
             </span>

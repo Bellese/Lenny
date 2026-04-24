@@ -278,6 +278,17 @@
   margin-top: auto;
 }
 
+.dataSourceItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 6px;
+  padding: 7px 16px;
+  color: var(--text-muted);
+  font-size: 13px;
+  cursor: default;
+}
+
 /* Data source dots */
 .smallDot {
   display: inline-block;
