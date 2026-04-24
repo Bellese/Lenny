@@ -208,7 +208,25 @@ def _load_seed_data(_require_infrastructure):
     REINDEX that prevents patient-reference searches from working until the reindex
     settles.
     """
+    import os
+
     import httpx as _httpx
+
+    if os.environ.get("HAPI_PREBAKED") == "1":
+        # Images are pre-seeded; skip loading + reindex + ValueSet expansion.
+        # Smoke probe: if Patient count is 0 the baked image is corrupt — fail fast.
+        for base_url, label in [(TEST_CDR_URL, "CDR"), (TEST_MEASURE_URL, "measure")]:
+            try:
+                resp = _httpx.get(f"{base_url}/Patient?_summary=count", timeout=15)
+                total = resp.json().get("total", 0) if resp.status_code == 200 else 0
+            except Exception:
+                total = 0
+            if total == 0:
+                raise RuntimeError(
+                    f"HAPI_PREBAKED=1 but {label} HAPI at {base_url} has no Patient resources. "
+                    f"The pre-baked image may be corrupt or the wrong image was pulled."
+                )
+        return
 
     measure_bundle_path = SEED_DIR / "measure-bundle.json"
     patient_bundle_path = SEED_DIR / "patient-bundle.json"

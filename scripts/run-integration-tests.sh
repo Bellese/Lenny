@@ -24,12 +24,69 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMPOSE_FILE="$PROJECT_ROOT/docker-compose.test.yml"
+PREBAKED_OVERLAY="$PROJECT_ROOT/docker-compose.prebaked.yml"
 
 CDR_METADATA="http://localhost:8180/fhir/metadata"
 MEASURE_METADATA="http://localhost:8181/fhir/metadata"
 
 MAX_WAIT=300  # seconds
 POLL_INTERVAL=5
+
+# ---------------------------------------------------------------------------
+# Pre-baked image resolution (CI fast path)
+# Set USE_PREBAKED=1 to pull pre-seeded GHCR images instead of running the
+# full seed + reindex + ValueSet expansion on every test run.
+# ---------------------------------------------------------------------------
+USE_PREBAKED="${USE_PREBAKED:-0}"
+_using_prebaked=false
+
+if [ "$USE_PREBAKED" = "1" ]; then
+    echo "==> USE_PREBAKED=1 — resolving pre-baked HAPI images from GHCR..."
+    SEED_HASH=$(find "$PROJECT_ROOT/seed/" \
+        "$PROJECT_ROOT/docker/seed-hapi.sh" \
+        "$PROJECT_ROOT/docker-compose.test.yml" \
+        "$PROJECT_ROOT/docker/hapi-cdr-seeded.Dockerfile" \
+        "$PROJECT_ROOT/docker/hapi-measure-seeded.Dockerfile" \
+        -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-12)
+    echo "  Seed hash: ${SEED_HASH}"
+
+    _try_pull() {
+        local image="$1"
+        if docker pull "$image" > /dev/null 2>&1; then
+            echo "$image"
+            return 0
+        fi
+        return 1
+    }
+
+    CDR_HASH_IMAGE="ghcr.io/bellese/mct2-hapi-cdr:${SEED_HASH}"
+    CDR_LATEST_IMAGE="ghcr.io/bellese/mct2-hapi-cdr:latest"
+    MEASURE_HASH_IMAGE="ghcr.io/bellese/mct2-hapi-measure:${SEED_HASH}"
+    MEASURE_LATEST_IMAGE="ghcr.io/bellese/mct2-hapi-measure:latest"
+    VANILLA_IMAGE="hapiproject/hapi:v8.8.0-1"
+
+    if _cdr_image=$(_try_pull "$CDR_HASH_IMAGE") && _measure_image=$(_try_pull "$MEASURE_HASH_IMAGE"); then
+        echo "  Using hash-tagged prebaked images."
+        _using_prebaked=true
+    elif _cdr_image=$(_try_pull "$CDR_LATEST_IMAGE") && _measure_image=$(_try_pull "$MEASURE_LATEST_IMAGE"); then
+        echo "  WARNING: hash-tagged images not found; falling back to :latest prebaked images."
+        _using_prebaked=true
+    else
+        echo "  WARNING: prebaked images unavailable; falling back to vanilla $VANILLA_IMAGE + full seed."
+        _cdr_image="$VANILLA_IMAGE"
+        _measure_image="$VANILLA_IMAGE"
+    fi
+
+    export HAPI_CDR_IMAGE="$_cdr_image"
+    export HAPI_MEASURE_IMAGE="$_measure_image"
+    echo "  CDR image:     $HAPI_CDR_IMAGE"
+    echo "  Measure image: $HAPI_MEASURE_IMAGE"
+
+    if $_using_prebaked; then
+        export HAPI_PREBAKED=1
+        export HAPI_REUSE_SEARCH_CACHE_MS=60000
+    fi
+fi
 
 # Phase timing
 _ts() { date +%s; }
@@ -45,10 +102,26 @@ _phase_done() {
     _t_prev=$_now
 }
 
+_compose_up() {
+    if $_using_prebaked; then
+        docker compose -f "$COMPOSE_FILE" -f "$PREBAKED_OVERLAY" up -d
+    else
+        docker compose -f "$COMPOSE_FILE" up -d
+    fi
+}
+
+_compose_down() {
+    if $_using_prebaked; then
+        docker compose -f "$COMPOSE_FILE" -f "$PREBAKED_OVERLAY" down -v 2>/dev/null || true
+    else
+        docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
+    fi
+}
+
 cleanup() {
     echo ""
     echo "==> Stopping test containers..."
-    docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
+    _compose_down
 
     local _t_end
     _t_end=$(_ts)
@@ -79,13 +152,15 @@ has_explicit_pytest_target() {
     return 1
 }
 
-echo "==> Pulling HAPI FHIR image (avoids compose startup timeout on cold pull)..."
-docker pull hapiproject/hapi:v8.8.0-1
+if ! $_using_prebaked; then
+    echo "==> Pulling HAPI FHIR image (avoids compose startup timeout on cold pull)..."
+    docker pull hapiproject/hapi:v8.8.0-1
+fi
 _elapsed_pull=$(( $(_ts) - _t_start ))
 _phase_done "docker pull"
 
 echo "==> Starting test infrastructure..."
-docker compose -f "$COMPOSE_FILE" up -d
+_compose_up
 _elapsed_compose_up=$(( $(_ts) - _t_start ))
 _phase_done "docker compose up -d"
 
