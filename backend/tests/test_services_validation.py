@@ -1135,7 +1135,220 @@ class TestRunValidation:
         assert "Measure not found on engine after reload attempt" in rows[1].error_message
         mock_wipe.assert_awaited_once()
         mock_push.assert_awaited_once()
-        mock_evaluate.assert_awaited_once()
+        # Warmup burst adds 1 call per measure + 1 main eval = 2 total
+        assert mock_evaluate.await_count == 2
+
+    async def test_warmup_burst_runs_one_eval_per_measure_serially(self, test_session, monkeypatch):
+        """Warmup burst should call evaluate_measure once per measure before concurrent evals.
+
+        This serializes SearchParameter auto-creation so concurrent evals don't collide.
+        Warmup failures should not stop the main run.
+        """
+        run = ValidationRun(status=ValidationStatus.queued)
+        test_session.add(run)
+        test_session.add_all(
+            [
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/CMS124",
+                    patient_ref="patient-1",
+                    test_description="CMS124-1",
+                    expected_populations={"numerator": 1},
+                    period_start="2026-01-01",
+                    period_end="2026-12-31",
+                    source_bundle="cms124.json",
+                ),
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/CMS124",
+                    patient_ref="patient-2",
+                    test_description="CMS124-2",
+                    expected_populations={"numerator": 1},
+                    period_start="2026-01-01",
+                    period_end="2026-12-31",
+                    source_bundle="cms124.json",
+                ),
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/CMS816",
+                    patient_ref="patient-3",
+                    test_description="CMS816-1",
+                    expected_populations={"numerator": 1},
+                    period_start="2026-01-01",
+                    period_end="2026-12-31",
+                    source_bundle="cms816.json",
+                ),
+            ]
+        )
+        await test_session.commit()
+        await test_session.refresh(run)
+
+        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", True)
+        monkeypatch.setattr("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0)
+        monkeypatch.setattr("app.services.validation.settings.MEASURE_ENGINE_URL", "http://measure/fhir")
+        monkeypatch.setattr("app.services.validation.settings.MAX_WORKERS", 2)
+
+        strategy = MagicMock()
+        strategy.gather_patient_data = AsyncMock(
+            return_value=[{"resourceType": "Patient", "id": "patient-1"}]
+        )
+
+        def make_ctx():
+            return self._make_session_ctx(test_session)
+
+        async def resolve_measure_side_effect(measure_url):
+            if "CMS124" in measure_url:
+                return "measure-1"
+            if "CMS816" in measure_url:
+                return "measure-2"
+            return None
+
+        measure_report = {
+            "group": [
+                {
+                    "population": [
+                        {
+                            "code": {"coding": [{"code": "numerator"}]},
+                            "count": 1,
+                        }
+                    ]
+                }
+            ],
+            "evaluatedResource": [],
+        }
+
+        with patch("app.services.validation.async_session", side_effect=lambda: make_ctx()):
+            with patch(
+                "app.services.validation._resolve_measure_id",
+                side_effect=resolve_measure_side_effect,
+            ):
+                with patch(
+                    "app.services.validation._reload_measures_from_seed_bundles",
+                    new_callable=AsyncMock,
+                    return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
+                ):
+                    with patch("app.services.validation.BatchQueryStrategy", return_value=strategy):
+                        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+                            with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock):
+                                with patch(
+                                    "app.services.validation.evaluate_measure",
+                                    new_callable=AsyncMock,
+                                    return_value=measure_report,
+                                ) as mock_evaluate:
+                                    with patch(
+                                        "app.services.validation.asyncio.to_thread",
+                                        new_callable=AsyncMock,
+                                    ):
+                                        await run_validation(run.id)
+
+        await test_session.refresh(run)
+
+        # Verify 5 total evaluate_measure calls:
+        # - 2 warmup calls (one per measure)
+        # - 3 main concurrent calls (one per patient)
+        assert mock_evaluate.await_count == 5
+
+        # Check call sequence: warmup calls should be for measure-1, then measure-2
+        # then 3 main evals (any order due to concurrency).
+        # Extract measure IDs from all calls
+        calls = mock_evaluate.call_args_list
+        warmup_measure_ids = [call.args[0] for call in calls[:2]]
+        concurrent_measure_ids = [call.args[0] for call in calls[2:]]
+
+        # Warmup should hit measure-1 first, then measure-2
+        assert warmup_measure_ids == ["measure-1", "measure-2"]
+        # Concurrent batch should have 2x measure-1, 1x measure-2 (3 patients total)
+        assert sorted(concurrent_measure_ids) == ["measure-1", "measure-1", "measure-2"]
+
+    async def test_warmup_failure_does_not_stop_main_evaluation(self, test_session, monkeypatch):
+        """Even if warmup fails (e.g., 409 CONFLICT), main evaluation should continue."""
+        run = ValidationRun(status=ValidationStatus.queued)
+        test_session.add(run)
+        test_session.add(
+            ExpectedResult(
+                measure_url="https://example.com/Measure/CMS124",
+                patient_ref="patient-1",
+                test_description="warmup fails but main passes",
+                expected_populations={"numerator": 1},
+                period_start="2026-01-01",
+                period_end="2026-12-31",
+                source_bundle="cms124.json",
+            )
+        )
+        await test_session.commit()
+        await test_session.refresh(run)
+
+        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", True)
+        monkeypatch.setattr("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0)
+        monkeypatch.setattr("app.services.validation.settings.MEASURE_ENGINE_URL", "http://measure/fhir")
+
+        strategy = MagicMock()
+        strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "patient-1"}])
+
+        def make_ctx():
+            return self._make_session_ctx(test_session)
+
+        measure_report = {
+            "group": [
+                {
+                    "population": [
+                        {
+                            "code": {"coding": [{"code": "numerator"}]},
+                            "count": 1,
+                        }
+                    ]
+                }
+            ],
+            "evaluatedResource": [],
+        }
+
+        call_count = 0
+
+        async def evaluate_measure_side_effect(*args, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Warmup fails (first call)
+                raise RuntimeError("409 CONFLICT on SearchParameter creation")
+            # Main evaluation succeeds (second call)
+            return measure_report
+
+        with patch("app.services.validation.async_session", side_effect=lambda: make_ctx()):
+            with patch(
+                "app.services.validation._resolve_measure_id",
+                new_callable=AsyncMock,
+                return_value="measure-1",
+            ):
+                with patch(
+                    "app.services.validation._reload_measures_from_seed_bundles",
+                    new_callable=AsyncMock,
+                    return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
+                ):
+                    with patch("app.services.validation.BatchQueryStrategy", return_value=strategy):
+                        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+                            with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock):
+                                with patch(
+                                    "app.services.validation.evaluate_measure",
+                                    side_effect=evaluate_measure_side_effect,
+                                ):
+                                    with patch(
+                                        "app.services.validation.asyncio.to_thread",
+                                        new_callable=AsyncMock,
+                                    ):
+                                        await run_validation(run.id)
+
+        await test_session.refresh(run)
+        rows = (
+            (
+                await test_session.execute(
+                    select(ValidationResult).where(ValidationResult.validation_run_id == run.id)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        # Despite warmup failure, main evaluation should pass
+        assert run.status == ValidationStatus.complete
+        assert len(rows) == 1
+        assert rows[0].status == "pass"
 
 
 # ---------------------------------------------------------------------------

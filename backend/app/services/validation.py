@@ -1158,6 +1158,41 @@ async def run_validation(validation_run_id: int) -> None:
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
 
+            # Phase 1b: Warmup burst to pre-create SearchParameters serially before concurrent eval.
+            # HAPI auto-creates SearchParameters for CQL references on first $evaluate-measure.
+            # Concurrent requests can cause 409 CONFLICT on uniqueness constraint. Running one
+            # serial eval per measure forces creation in single-threaded context; concurrent
+            # batch then hits existing SPs without collisions.
+            logger.info(
+                "Pre-creating SearchParameters via warmup evaluations",
+                extra={"run_id": validation_run_id, "measure_count": len(measure_info)},
+            )
+            for measure_url, info in measure_info.items():
+                warmup_er = next(
+                    (er for er in resolved_expected_results if er.measure_url == measure_url),
+                    None,
+                )
+                if warmup_er:
+                    try:
+                        await evaluate_measure(
+                            info["hapi_id"],
+                            warmup_er.patient_ref,
+                            info["period_start"],
+                            info["period_end"],
+                        )
+                        logger.debug(
+                            "Warmup evaluation complete",
+                            extra={"measure_url": measure_url, "patient_ref": warmup_er.patient_ref},
+                        )
+                    except Exception as exc:
+                        # Warmup failures are expected (e.g., data not ready); don't stop the run.
+                        logger.debug(
+                            "Warmup evaluate-measure failed (expected on first-load 409s)",
+                            extra={"measure_url": measure_url, "error": sanitize_error(exc)},
+                        )
+            if await _stop_or_delete_validation_run(validation_run_id):
+                return
+
             # Phase 2: Evaluate and compare (shared client avoids N connection pools)
             async def evaluate_and_compare(er: ExpectedResult, http_client: httpx.AsyncClient) -> ValidationResult:
                 info = measure_info[er.measure_url]
