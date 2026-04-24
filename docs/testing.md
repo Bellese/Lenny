@@ -93,6 +93,8 @@ The nightly `connectathon-measures.yml` workflow still runs once per night, but 
 
 If `/jobs` reports lower initial population counts than the direct-HAPI integration harness, check `HAPI_SYNC_AFTER_UPLOAD`, `PATIENT_DATA_STRATEGY`, and `VALUESET_RELOAD_MODE` first. HAPI indexes Encounter patient references and expands large ValueSets asynchronously after bundle upload, so MCT2 waits for reindex and `$expand` readiness before jobs can run against freshly uploaded Connectathon bundles. To isolate a regression, temporarily set `HAPI_SYNC_AFTER_UPLOAD=False`, `PATIENT_DATA_STRATEGY=data_requirements`, or `VALUESET_RELOAD_MODE=remap` and restart the backend.
 
+The validation dashboard path uses the same `HAPI_SYNC_AFTER_UPLOAD` reindex wait after the validation worker pushes patient data to the measure engine. Upload-bundle and `/jobs` still wait for both reindex and ValueSet expansion readiness; validation runs only need the reindex wait because they do not load new ValueSets.
+
 ---
 
 ## Connectathon Measure Tests (manifest-driven)
