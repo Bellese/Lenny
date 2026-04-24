@@ -77,6 +77,16 @@ jobs:
         run: |
           HAPI_PORT=8180 SEED_TYPE=cdr bash docker/seed-hapi.sh
 
+      - name: Dump CDR container state on failure
+        if: failure()
+        run: |
+          echo "=== docker ps -a ==="
+          docker ps -a
+          echo "=== container state ==="
+          docker inspect --format='{{json .State}}' hapi-cdr 2>/dev/null | python3 -m json.tool || true
+          echo "=== docker logs hapi-cdr (last 300 lines) ==="
+          docker logs --tail 300 hapi-cdr 2>&1 || true
+
       - name: Commit and push CDR image
         run: |
           docker stop hapi-cdr
@@ -86,6 +96,8 @@ jobs:
             ghcr.io/bellese/mct2-hapi-cdr:latest
           docker push ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }}
           docker push ghcr.io/bellese/mct2-hapi-cdr:latest
+          # Free runner memory before starting the Measure container
+          docker rm hapi-cdr
 
       # -----------------------------------------------------------------------
       # Bake Measure image: run → seed from runner → stop → commit → push
@@ -97,6 +109,16 @@ jobs:
       - name: Seed Measure container
         run: |
           HAPI_PORT=8181 SEED_TYPE=measure bash docker/seed-hapi.sh
+
+      - name: Dump Measure container state on failure
+        if: failure()
+        run: |
+          echo "=== docker ps -a ==="
+          docker ps -a
+          echo "=== container state ==="
+          docker inspect --format='{{json .State}}' hapi-measure 2>/dev/null | python3 -m json.tool || true
+          echo "=== docker logs hapi-measure (last 300 lines) ==="
+          docker logs --tail 300 hapi-measure 2>&1 || true
 
       - name: Commit and push Measure image
         run: |
