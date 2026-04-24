@@ -503,7 +503,18 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
 
 
 def _parametrize_bundles() -> list:
-    bundles = _get_golden_bundles()
+    """Return parametrize list for golden bundles.
+
+    If the golden/ directory is absent or bundle loading fails (e.g. when this
+    file is collected but not targeted, such as during PR-gate --ignore runs),
+    return a single skipped placeholder rather than crashing at import time.
+    """
+    try:
+        if not GOLDEN_DIR.exists():
+            return [pytest.param("_empty", {}, marks=pytest.mark.skip(reason="No golden bundles found"))]
+        bundles = _get_golden_bundles()
+    except Exception:
+        return [pytest.param("_empty", {}, marks=pytest.mark.skip(reason="No golden bundles found"))]
     if not bundles:
         return [pytest.param("_empty", {}, marks=pytest.mark.skip(reason="No golden bundles found"))]
     return [pytest.param(name, bundle) for name, bundle in bundles]

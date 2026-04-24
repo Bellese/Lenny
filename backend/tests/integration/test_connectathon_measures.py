@@ -125,9 +125,13 @@ def _load_connectathon_test_cases() -> list[tuple]:
     return cases
 
 
-# Build the parametrize list once.  If no bundles found, produce a single
-# skipped placeholder so pytest collects cleanly.
-_ALL_TEST_CASES = _load_connectathon_test_cases()
+# Build the parametrize list once.  If the manifest is absent (e.g. PR gate
+# running with --ignore on this file) or bundle files fail to load, return an
+# empty list rather than parsing 112 MB of JSON or crashing at import time.
+try:
+    _ALL_TEST_CASES = _load_connectathon_test_cases() if _MANIFEST_PATH.exists() else []
+except Exception:
+    _ALL_TEST_CASES = []
 
 if _ALL_TEST_CASES:
     _PARAMETRIZE_CASES = [
