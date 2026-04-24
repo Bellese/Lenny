@@ -84,7 +84,6 @@ if [ "$USE_PREBAKED" = "1" ]; then
 
     if $_using_prebaked; then
         export HAPI_PREBAKED=1
-        export HAPI_REUSE_SEARCH_CACHE_MS=60000
     fi
 fi
 
