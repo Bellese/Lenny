@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_session
 from app.dependencies import CDRContext, get_active_cdr
-from app.models.job import Job, JobStatus, MeasureResult
+from app.models.job import BatchStatus, Job, JobStatus, MeasureResult
 from app.models.validation import ExpectedResult
 from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups
 from app.services.validation import _extract_population_counts, compare_populations
@@ -63,6 +63,8 @@ class JobResponse(BaseModel):
     total_patients: int
     processed_patients: int
     failed_patients: int
+    total_batches: int = 0
+    batches_completed: int = 0
     delete_requested: bool
     created_at: str
     completed_at: Optional[str]
@@ -94,6 +96,7 @@ class JobDetailResponse(JobResponse):
 
 
 def _job_to_response(job: Job) -> dict:
+    batches = job.batches if job.batches is not None else []
     return {
         "id": job.id,
         "measure_id": job.measure_id,
@@ -108,6 +111,8 @@ def _job_to_response(job: Job) -> dict:
         "total_patients": job.total_patients,
         "processed_patients": job.processed_patients,
         "failed_patients": job.failed_patients,
+        "total_batches": len(batches),
+        "batches_completed": sum(1 for b in batches if b.status == BatchStatus.complete),
         "delete_requested": job.delete_requested,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,

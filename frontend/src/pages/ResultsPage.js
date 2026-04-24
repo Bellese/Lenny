@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import styles from './ResultsPage.module.css';
-import { getJobs, getResults, getResult } from '../api/client';
+import { getJobs, getResults, getResult, createJob } from '../api/client';
+import { useToast } from '../components/Toast';
 import PatientDetail from '../components/PatientDetail';
 import ComparisonView from '../components/ComparisonView';
 
@@ -22,9 +23,59 @@ function CrossMark() {
   return <span className={styles.cross} aria-label="No" title="No">&#10007;</span>;
 }
 
+function timeAgo(dateStr) {
+  if (!dateStr) return null;
+  const diff = Math.floor((Date.now() - new Date(dateStr)) / 1000);
+  if (diff < 60) return `${diff}s ago`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
+}
+
+function exportCsv(patients, measureName, period) {
+  const header = ['Patient ID', 'Name', 'Initial Population', 'Denominator', 'Numerator', 'Denom Exclusion'];
+  const rows = patients.map(p => [
+    p.patient_id || p.id || '',
+    p.patient_name || p.name || '',
+    p.populations?.initial_population ? 'Yes' : 'No',
+    p.populations?.denominator ? 'Yes' : 'No',
+    p.populations?.numerator ? 'Yes' : 'No',
+    p.populations?.denominator_exclusion ? 'Yes' : 'No',
+  ]);
+  const csv = [header, ...rows].map(r => r.map(v => `"${String(v).replace(/"/g, '""')}"`).join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `results-${measureName || 'measure'}-${period || 'period'}.csv`.replace(/\s+/g, '-');
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+const FILTER_OPTIONS = [
+  { value: 'all', label: 'All Patients' },
+  { value: 'numerator', label: 'In Numerator' },
+  { value: 'denominator_only', label: 'Denominator (not Numerator)' },
+  { value: 'excluded', label: 'Denominator Exclusion' },
+  { value: 'not_in_denominator', label: 'Not in Denominator' },
+];
+
+function applyFilter(patients, filter) {
+  if (filter === 'all') return patients;
+  return patients.filter(p => {
+    const pop = p.populations || {};
+    if (filter === 'numerator') return pop.numerator;
+    if (filter === 'denominator_only') return pop.denominator && !pop.numerator;
+    if (filter === 'excluded') return pop.denominator_exclusion;
+    if (filter === 'not_in_denominator') return !pop.denominator;
+    return true;
+  });
+}
+
 export default function ResultsPage() {
   const { jobId: routeJobId } = useParams();
   const navigate = useNavigate();
+  const toast = useToast();
 
   const [jobs, setJobs] = useState([]);
   const [selectedJobId, setSelectedJobId] = useState(routeJobId || '');
@@ -34,6 +85,8 @@ export default function ResultsPage() {
   const [selectedPatient, setSelectedPatient] = useState(null);
   const [patientDetail, setPatientDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [populationFilter, setPopulationFilter] = useState('all');
+  const [rerunning, setRerunning] = useState(false);
 
   // Load completed jobs for dropdown
   useEffect(() => {
@@ -96,6 +149,7 @@ export default function ResultsPage() {
   const handleJobChange = (e) => {
     const id = e.target.value;
     setSelectedJobId(id);
+    setPopulationFilter('all');
     navigate(`/results/${id}`, { replace: true });
   };
 
@@ -121,11 +175,32 @@ export default function ResultsPage() {
     setPatientDetail(null);
   }, []);
 
+  const handleRerun = async () => {
+    if (!selectedJob) return;
+    setRerunning(true);
+    try {
+      await createJob({
+        measure_id: selectedJob.measure_id,
+        measure_name: selectedJob.measure_name,
+        group_id: selectedJob.group_id || undefined,
+        period_start: selectedJob.period_start || undefined,
+        period_end: selectedJob.period_end || undefined,
+      });
+      toast.success('Re-run started — check the Jobs page');
+      navigate('/jobs');
+    } catch (err) {
+      toast.error(`Failed to start re-run: ${err.message}`);
+    } finally {
+      setRerunning(false);
+    }
+  };
+
   const selectedJob = jobs.find(j => String(j.id) === String(selectedJobId));
 
   // Extract aggregate data — API returns { populations: {...}, patients: [...], ... }
   const populations = results?.populations || {};
-  const patients = results?.patients || [];
+  const allPatients = results?.patients || [];
+  const patients = applyFilter(allPatients, populationFilter);
   const measureName = results?.measure_name || selectedJob?.measure_name || selectedJob?.measure_id || '';
   const period = selectedJob?.period_start && selectedJob?.period_end
     ? `${selectedJob.period_start} to ${selectedJob.period_end}`
@@ -136,6 +211,8 @@ export default function ResultsPage() {
   const numerator = populations.numerator;
   const denomExclusion = populations.denominator_exclusion;
   const performanceRate = results?.performance_rate;
+
+  const completedAgo = selectedJob?.completed_at ? timeAgo(selectedJob.completed_at) : null;
 
   return (
     <div className={styles.page}>
@@ -157,6 +234,27 @@ export default function ResultsPage() {
                 </option>
               ))}
             </select>
+          </div>
+        )}
+        {selectedJobId && results && (
+          <div className={styles.headerActions}>
+            <button
+              className={styles.btnSecondary}
+              onClick={() => exportCsv(allPatients, measureName, period)}
+              disabled={allPatients.length === 0}
+            >
+              Export CSV
+            </button>
+            {selectedJob && (
+              <button
+                className={styles.btnPrimary}
+                onClick={handleRerun}
+                disabled={rerunning}
+                aria-busy={rerunning}
+              >
+                {rerunning ? 'Starting…' : 'Re-run'}
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -218,7 +316,11 @@ export default function ResultsPage() {
           {/* Measure header */}
           {(measureName || period) && (
             <div className={styles.measureHeader}>
-              {measureName && <h2 className={styles.measureName}>{measureName}</h2>}
+              <div className={styles.measureTitleRow}>
+                {measureName && <h2 className={styles.measureName}>{measureName}</h2>}
+                <span className={styles.completeBadge}>Complete</span>
+                {completedAgo && <span className={styles.completedAgo}>Calculated {completedAgo}</span>}
+              </div>
               {period && <p className={styles.period}>Period: {period}</p>}
               {selectedJob?.cdr_name && <p className={styles.cdr}>CDR: {selectedJob.cdr_name}</p>}
             </div>
@@ -246,6 +348,21 @@ export default function ResultsPage() {
 
           {/* Patient list */}
           <div className={styles.tableWrapper}>
+            <div className={styles.tableToolbar}>
+              <span className={styles.patientCount}>
+                {patients.length.toLocaleString()} of {allPatients.length.toLocaleString()} patients
+              </span>
+              <select
+                className={styles.filterSelect}
+                value={populationFilter}
+                onChange={e => setPopulationFilter(e.target.value)}
+                aria-label="Filter by population"
+              >
+                {FILTER_OPTIONS.map(opt => (
+                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                ))}
+              </select>
+            </div>
             <table aria-label="Patient results">
               <thead>
                 <tr>
@@ -258,10 +375,12 @@ export default function ResultsPage() {
                 </tr>
               </thead>
               <tbody>
-                {(Array.isArray(patients) ? patients : []).length === 0 ? (
+                {patients.length === 0 ? (
                   <tr>
                     <td colSpan={6} className={styles.emptyRow}>
-                      No individual patient results available.
+                      {allPatients.length > 0
+                        ? 'No patients match this filter.'
+                        : 'No individual patient results available.'}
                     </td>
                   </tr>
                 ) : (

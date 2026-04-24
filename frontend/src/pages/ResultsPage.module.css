@@ -16,10 +16,56 @@
 }
 
 .jobSelector {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.headerActions {
   margin-left: auto;
   display: flex;
   align-items: center;
   gap: var(--space-2);
+}
+
+.btnSecondary {
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-secondary);
+  min-height: 36px;
+  transition: background var(--transition);
+}
+
+.btnSecondary:hover:not(:disabled) {
+  background: var(--color-bg-secondary);
+}
+
+.btnSecondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btnPrimary {
+  padding: var(--space-2) var(--space-4);
+  background: var(--color-accent);
+  color: #fff;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  min-height: 36px;
+  transition: background var(--transition);
+}
+
+.btnPrimary:hover:not(:disabled) {
+  background: var(--color-accent-hover);
+}
+
+.btnPrimary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .jobLabel {
@@ -41,10 +87,32 @@
   margin-bottom: var(--space-6);
 }
 
+.measureTitleRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+  margin-bottom: var(--space-1);
+}
+
 .measureName {
   font-size: var(--font-size-section);
   font-weight: var(--font-weight-semibold);
-  margin-bottom: var(--space-1);
+}
+
+.completeBadge {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  border-radius: 100px;
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-semibold);
+  background: var(--color-success-light);
+  color: var(--color-success);
+}
+
+.completedAgo {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-tertiary);
 }
 
 .period,
@@ -120,6 +188,30 @@
   font-size: var(--font-size-body);
   color: var(--color-text-secondary);
   margin-bottom: var(--space-6);
+}
+
+/* Table toolbar */
+.tableToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+}
+
+.patientCount {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.filterSelect {
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  min-height: 32px;
+  max-width: 240px;
 }
 
 /* Patient table */

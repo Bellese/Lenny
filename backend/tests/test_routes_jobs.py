@@ -319,6 +319,32 @@ async def test_create_job_stamps_cdr_auth_type_as_string_value(client, test_sess
     assert job.cdr_auth_type == "bearer"
 
 
+async def test_list_jobs_includes_batch_counts(client, test_session):
+    """GET /jobs includes total_batches and batches_completed counts."""
+    from app.models.job import Batch, BatchStatus, Job, JobStatus
+
+    job = Job(
+        measure_id="measure-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="https://example.com/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.flush()
+    test_session.add(Batch(job_id=job.id, batch_number=1, patient_ids=["p1"], status=BatchStatus.complete))
+    test_session.add(Batch(job_id=job.id, batch_number=2, patient_ids=["p2"], status=BatchStatus.complete))
+    test_session.add(Batch(job_id=job.id, batch_number=3, patient_ids=["p3"], status=BatchStatus.pending))
+    await test_session.commit()
+
+    resp = await client.get("/jobs")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert len(data) == 1
+    assert data[0]["total_batches"] == 3
+    assert data[0]["batches_completed"] == 2
+
+
 async def test_list_jobs_includes_delete_requested(client, test_session):
     """GET /jobs includes delete_requested so the UI can reflect pending deletion."""
     from app.models.job import Job
