@@ -86,6 +86,8 @@ jobs:
             ghcr.io/bellese/mct2-hapi-cdr:latest
           docker push ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }}
           docker push ghcr.io/bellese/mct2-hapi-cdr:latest
+          # Free runner memory before starting the Measure container
+          docker rm hapi-cdr
 
       # -----------------------------------------------------------------------
       # Bake Measure image: run → seed from runner → stop → commit → push
