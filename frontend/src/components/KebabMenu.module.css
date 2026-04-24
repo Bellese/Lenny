@@ -23,16 +23,14 @@
 }
 
 .popover {
-  position: absolute;
-  top: calc(100% + 4px);
-  right: 0;
+  position: fixed;
   min-width: 200px;
   padding: 4px;
   background: var(--bg-elevated);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   box-shadow: 0 10px 30px -10px oklch(0 0 0 / 0.2), 0 0 0 1px var(--line);
-  z-index: 50;
+  z-index: 9999;
   animation: fadeIn 0.1s ease;
 }
 

@@ -3,7 +3,18 @@ import styles from './KebabMenu.module.css';
 
 export default function KebabMenu({ items }) {
   const [open, setOpen] = useState(false);
+  const [pos, setPos] = useState({ top: 0, right: 0 });
   const ref = useRef(null);
+  const triggerRef = useRef(null);
+
+  useEffect(() => {
+    if (!open || !triggerRef.current) return;
+    const rect = triggerRef.current.getBoundingClientRect();
+    setPos({
+      top: rect.bottom + 4,
+      right: window.innerWidth - rect.right,
+    });
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -17,6 +28,7 @@ export default function KebabMenu({ items }) {
   return (
     <div ref={ref} className={styles.root} onClick={(e) => e.stopPropagation()}>
       <button
+        ref={triggerRef}
         className={styles.trigger}
         onClick={() => setOpen(!open)}
         aria-label="More actions"
@@ -29,7 +41,7 @@ export default function KebabMenu({ items }) {
         </svg>
       </button>
       {open && (
-        <div className={styles.popover} role="menu">
+        <div className={styles.popover} style={{ top: pos.top, right: pos.right }} role="menu">
           {items.map((item, i) => {
             if (item.divider) return <div key={i} className={styles.divider} />;
             const disabled = item.disabled;

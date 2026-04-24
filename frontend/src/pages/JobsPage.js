@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import styles from './JobsPage.module.css';
 import { getJobs, getMeasures, getGroups, createJob, cancelJob, deleteJob } from '../api/client';
 import { useToast } from '../components/Toast';
@@ -52,6 +52,7 @@ function isComplete(status) {
 }
 
 export default function JobsPage() {
+  const navigate = useNavigate();
   const [jobs, setJobs] = useState([]);
   const [measures, setMeasures] = useState([]);
   const [groups, setGroups] = useState([]);
@@ -316,7 +317,7 @@ export default function JobsPage() {
                       <td className={styles.dateCell}>{formatDateTime(job.started_at || job.created_at)}</td>
                       <td>
                         <KebabMenu items={[
-                          { label: 'View results', icon: <ViewIcon />, disabled: !complete, onClick: () => {} },
+                          { label: 'View results', icon: <ViewIcon />, disabled: !complete, onClick: () => navigate(`/results/${job.id}`) },
                           { label: 'Re-run', icon: <SparkIcon />, onClick: () => {} },
                           { divider: true },
                           {
