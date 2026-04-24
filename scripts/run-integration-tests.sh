@@ -90,7 +90,8 @@ _elapsed_compose_up=$(( $(_ts) - _t_start ))
 _phase_done "docker compose up -d"
 
 echo "==> Waiting for HAPI FHIR instances to be ready..."
-elapsed=0
+_poll_count=0
+_poll_interval=1
 while true; do
     cdr_ok=false
     measure_ok=false
@@ -107,22 +108,22 @@ while true; do
         break
     fi
 
-    if [ "$elapsed" -ge "$MAX_WAIT" ]; then
-        echo "ERROR: Timed out waiting for HAPI FHIR instances after ${MAX_WAIT}s"
+    _poll_count=$(( _poll_count + 1 ))
+    if [ "$_poll_count" -ge "$MAX_WAIT" ]; then
+        echo "ERROR: Timed out waiting for HAPI FHIR instances after ${MAX_WAIT} polls"
         echo "  CDR ready: $cdr_ok"
         echo "  Measure ready: $measure_ok"
         exit 1
     fi
 
-    # Poll at 1 s during first 60 s, then 5 s, to keep MAX_WAIT total accurate
-    if [ "$elapsed" -lt 60 ]; then
-        sleep 1
-        elapsed=$((elapsed + 1))
-    else
-        sleep "$POLL_INTERVAL"
-        elapsed=$((elapsed + POLL_INTERVAL))
+    # Exponential-ish backoff: 1s for first 10 polls, 2s up to 20, then 5s
+    if [ "$_poll_count" -gt 20 ]; then
+        _poll_interval=5
+    elif [ "$_poll_count" -gt 10 ]; then
+        _poll_interval=2
     fi
-    echo "  Waiting... (${elapsed}s / ${MAX_WAIT}s)"
+    sleep "$_poll_interval"
+    echo "  Waiting... (poll ${_poll_count}/${MAX_WAIT}, interval ${_poll_interval}s)"
 done
 _elapsed_hapi_ready=$(( $(_ts) - _t_start ))
 _phase_done "HAPI FHIR ready"

@@ -18,6 +18,8 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: 'backend/requirements*.txt'
 
       - name: Install dependencies
         working-directory: backend
@@ -39,6 +41,8 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: 'backend/requirements*.txt'
 
       - name: Install ruff
         run: pip install "ruff>=0.8.0"
@@ -65,18 +69,49 @@ jobs:
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
         with:
           python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-test.txt
 
       - name: Install dependencies
         working-directory: backend
         run: pip install -r requirements.txt -r requirements-test.txt
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4fd812986e6c8c2a69e18311145f9371337f27d4  # v3
+        with:
+          install: true
+
+      - name: Cache Docker images
+        uses: actions/cache@v4
+        with:
+          path: /tmp/docker-cache
+          key: docker-hapi-${{ hashFiles('docker-compose.test.yml') }}
+          restore-keys: docker-hapi-
+
+      - name: Load cached Docker images or pull
+        run: |
+          if [ -d /tmp/docker-cache ] && ls /tmp/docker-cache/*.tar 2>/dev/null; then
+            for f in /tmp/docker-cache/*.tar; do docker load -i "$f"; done
+          else
+            mkdir -p /tmp/docker-cache
+            docker pull hapiproject/hapi:v8.8.0-1
+            docker save hapiproject/hapi:v8.8.0-1 -o /tmp/docker-cache/hapi.tar
+          fi
+
       - name: Run integration tests
-        run: >-
-          ./scripts/run-integration-tests.sh
-          --ignore=tests/integration/test_golden_measures.py
-          --ignore=tests/integration/test_connectathon_measures.py
-          --ignore=tests/integration/test_full_workflow.py
-          --durations=25
+        run: |
+          ./scripts/run-integration-tests.sh \
+            --ignore=tests/integration/test_golden_measures.py \
+            --ignore=tests/integration/test_connectathon_measures.py \
+            --ignore=tests/integration/test_full_workflow.py \
+            --durations=25 \
+            2>&1 | tee /tmp/test-output.txt
+          STATUS=${PIPESTATUS[0]}
+          echo "## Integration Test Timings" >> "$GITHUB_STEP_SUMMARY"
+          grep -A 200 'slowest durations' /tmp/test-output.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          exit $STATUS
 
   script-security-lint:
     name: Script Security Lint
