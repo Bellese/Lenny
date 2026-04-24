@@ -1,0 +1,12 @@
+# docker-compose.prebaked.yml — override when using pre-baked HAPI images.
+#
+# Volume mounts at /data/hapi would shadow the baked H2/Lucene data, so
+# this overlay removes them.  Use with:
+#   docker compose -f docker-compose.test.yml -f docker-compose.prebaked.yml up -d
+
+services:
+  hapi-fhir-cdr:
+    volumes: []
+
+  hapi-fhir-measure:
+    volumes: []

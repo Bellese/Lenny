@@ -1186,9 +1186,7 @@ class TestRunValidation:
         monkeypatch.setattr("app.services.validation.settings.MAX_WORKERS", 2)
 
         strategy = MagicMock()
-        strategy.gather_patient_data = AsyncMock(
-            return_value=[{"resourceType": "Patient", "id": "patient-1"}]
-        )
+        strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "patient-1"}])
 
         def make_ctx():
             return self._make_session_ctx(test_session)
@@ -1336,11 +1334,7 @@ class TestRunValidation:
 
         await test_session.refresh(run)
         rows = (
-            (
-                await test_session.execute(
-                    select(ValidationResult).where(ValidationResult.validation_run_id == run.id)
-                )
-            )
+            (await test_session.execute(select(ValidationResult).where(ValidationResult.validation_run_id == run.id)))
             .scalars()
             .all()
         )
