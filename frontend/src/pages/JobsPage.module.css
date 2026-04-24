@@ -257,8 +257,24 @@
   font-size: 12px;
 }
 
-.jobName { font-weight: 500; }
-.jobId { color: var(--text-dim); margin-top: 2px; }
+.jobMeta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: nowrap;
+}
+
+.jobName {
+  font-weight: 500;
+  min-width: 0;
+  flex: 1;
+}
+
+.jobId {
+  color: var(--text-dim);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
 .periodCell { color: var(--text-muted); white-space: nowrap; }
 .dateCell { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
 

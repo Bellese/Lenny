@@ -312,8 +312,10 @@ export default function JobsPage() {
                       style={{ cursor: complete ? 'pointer' : 'default' }}
                     >
                       <td>
-                        <div className={styles.jobName}>{getMeasureName(job)}</div>
-                        <div className={`${styles.mono} ${styles.jobId}`}>{job.id}</div>
+                        <div className={styles.jobMeta}>
+                          <div className={styles.jobName}>{getMeasureName(job)}</div>
+                          <div className={`${styles.mono} ${styles.jobId}`}>{job.id}</div>
+                        </div>
                       </td>
                       <td className={`${styles.mono} ${styles.periodCell}`}>
                         {job.period_start && job.period_end ? `${job.period_start} – ${job.period_end}` : '--'}
