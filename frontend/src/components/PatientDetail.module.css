@@ -272,3 +272,36 @@
 .fhirJson :global(.number) { color: var(--warn); }
 .fhirJson :global(.boolean) { color: var(--accent); }
 .fhirJson :global(.null) { color: var(--text-dim); }
+
+@media (max-width: 820px) {
+  .overlay {
+    align-items: flex-end;
+    justify-content: center;
+  }
+
+  .drawer {
+    width: 100%;
+    height: auto;
+    min-height: 60dvh;
+    max-height: 92dvh;
+    border-left: none;
+    border-top: 1px solid var(--line);
+    border-top-left-radius: var(--radius-lg);
+    border-top-right-radius: var(--radius-lg);
+  }
+
+  .drawerHeader,
+  .drawerBody {
+    padding: 16px;
+  }
+
+  .sectionHeader,
+  .factRow {
+    align-items: stretch;
+    grid-template-columns: 1fr;
+  }
+
+  .toggleBtn {
+    align-self: flex-start;
+  }
+}

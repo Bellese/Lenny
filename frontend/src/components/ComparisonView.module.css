@@ -141,3 +141,27 @@
   font-size: var(--font-size-sm);
   color: var(--color-text-secondary);
 }
+
+@media (max-width: 820px) {
+  .summary {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .tableWrapper {
+    overflow: visible;
+  }
+
+  .patientRef {
+    overflow-wrap: anywhere;
+    text-align: left;
+    white-space: normal;
+  }
+
+  .statusCell,
+  .countMatch,
+  .countMismatch {
+    text-align: left;
+  }
+}

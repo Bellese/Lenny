@@ -171,3 +171,126 @@
   background: var(--bg-sunken);
   color: var(--text);
 }
+
+@media (max-width: 820px) {
+  .page {
+    max-width: none;
+    padding: 16px calc(16px + env(safe-area-inset-right)) 24px calc(16px + env(safe-area-inset-left));
+  }
+
+  .pageHeader {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  .headerActions,
+  .btnPrimary {
+    width: 100%;
+  }
+
+  .btnPrimary {
+    justify-content: center;
+    min-height: 40px;
+  }
+
+  .card {
+    overflow: visible;
+    border: none;
+    background: transparent;
+    box-shadow: none;
+  }
+
+  .card table,
+  .card tbody {
+    display: block;
+  }
+
+  .card tr {
+    display: block;
+    padding: 16px;
+  }
+
+  .card td {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 6px 0;
+    text-align: left;
+  }
+
+  .card td::after {
+    display: none;
+  }
+
+  .card td::before {
+    flex: 0 0 auto;
+    color: var(--text-dim);
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .card td[data-label="Measure"] {
+    display: block;
+    padding: 0 0 8px;
+  }
+
+  .card td[data-label="Measure"]::before {
+    display: none;
+  }
+
+  .card td[data-label="ID"] {
+    display: block;
+    padding: 0 0 12px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+
+  .card td[data-label="ID"]::before {
+    display: none;
+  }
+
+  .row:hover td {
+    background: transparent;
+  }
+
+  .measureName {
+    display: block;
+    max-width: none;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 1.28;
+    color: var(--text);
+    overflow-wrap: anywhere;
+    text-align: left;
+    white-space: normal;
+  }
+
+  .card td[data-label="ID"] .mono {
+    display: block;
+    max-width: none;
+    color: var(--text-dim);
+    font-size: 11px;
+    line-height: 1.35;
+    overflow-wrap: anywhere;
+    text-align: left;
+    white-space: normal;
+  }
+
+  .card td[data-label="Version"] .mono {
+    max-width: none;
+    text-align: right;
+  }
+
+  .badge {
+    max-width: 100%;
+  }
+
+  .actionGroup {
+    justify-content: flex-start;
+  }
+}
