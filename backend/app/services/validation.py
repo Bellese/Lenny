@@ -1159,10 +1159,10 @@ async def run_validation(validation_run_id: int) -> None:
                 return
 
             # Phase 1b: Warmup burst to pre-create SearchParameters serially before concurrent eval.
-            # HAPI auto-creates SearchParameters for CQL references on first $evaluate-measure.
-            # Concurrent requests can cause 409 CONFLICT on uniqueness constraint. Running one
-            # serial eval per measure forces creation in single-threaded context; concurrent
-            # batch then hits existing SPs without collisions.
+            # First concurrent $evaluate-measure batch against a fresh measure engine triggers a race
+            # during lazy SearchParameter indexing; some concurrent requests hit 409 CONFLICT.
+            # Running one serial eval per measure avoids the race by forcing indexing to complete
+            # in single-threaded context before concurrent batch starts.
             logger.info(
                 "Pre-creating SearchParameters via warmup evaluations",
                 extra={"run_id": validation_run_id, "measure_count": len(measure_info)},
@@ -1185,10 +1185,20 @@ async def run_validation(validation_run_id: int) -> None:
                             extra={"measure_url": measure_url, "patient_ref": warmup_er.patient_ref},
                         )
                     except Exception as exc:
-                        # Warmup failures are expected (e.g., data not ready); don't stop the run.
-                        logger.debug(
-                            "Warmup evaluate-measure failed (expected on first-load 409s)",
-                            extra={"measure_url": measure_url, "error": sanitize_error(exc)},
+                        # Warmup failures may indicate indexing race; log at WARNING to surface issues.
+                        error_body = None
+                        if isinstance(exc, httpx.HTTPStatusError):
+                            try:
+                                error_body = exc.response.text
+                            except Exception:
+                                error_body = str(exc)
+                        logger.warning(
+                            "Warmup evaluate-measure failed",
+                            extra={
+                                "measure_url": measure_url,
+                                "error": sanitize_error(exc),
+                                "error_body": error_body or sanitize_error(exc),
+                            },
                         )
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
