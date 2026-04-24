@@ -133,6 +133,27 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 4b. Attach AmazonSSMManagedInstanceCore — required for SSM Run Command
+# ---------------------------------------------------------------------------
+SSM_CORE_ARN="arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+echo "[+] Checking AmazonSSMManagedInstanceCore attachment ..."
+ATTACHED_CORE=$(aws iam list-attached-role-policies \
+  --role-name "$ROLE_NAME" \
+  --region "$REGION" \
+  --query "AttachedPolicies[?PolicyArn=='${SSM_CORE_ARN}'].PolicyArn" \
+  --output text)
+if [ -n "$ATTACHED_CORE" ]; then
+  echo "[=] AmazonSSMManagedInstanceCore already attached — skipping"
+else
+  echo "[+] Attaching AmazonSSMManagedInstanceCore ..."
+  aws iam attach-role-policy \
+    --role-name "$ROLE_NAME" \
+    --policy-arn "$SSM_CORE_ARN" \
+    --region "$REGION"
+  echo "[✓] AmazonSSMManagedInstanceCore attached"
+fi
+
+# ---------------------------------------------------------------------------
 # 5. Instance profile — skip if exists
 # ---------------------------------------------------------------------------
 echo "[+] Checking instance profile $PROFILE_NAME ..."
