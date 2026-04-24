@@ -4,27 +4,17 @@ import styles from './ResultsPage.module.css';
 import { getJobs, getResults, getResult } from '../api/client';
 import PatientDetail from '../components/PatientDetail';
 import ComparisonView from '../components/ComparisonView';
+import Sparkline from '../components/Sparkline';
+import DistBar from '../components/DistBar';
+import { CheckIcon, XIcon, FilterIcon } from '../components/Icons';
+import { useSearch } from '../contexts/SearchContext';
 
-function PopulationCard({ label, count, variant = 'default' }) {
-  return (
-    <div className={`${styles.card} ${styles[variant]}`}>
-      <span className={styles.cardLabel}>{label}</span>
-      <span className={styles.cardCount}>{count !== undefined && count !== null ? count.toLocaleString() : '--'}</span>
-    </div>
-  );
-}
-
-function CheckMark() {
-  return <span className={styles.check} aria-label="Yes" title="Yes">&#10003;</span>;
-}
-
-function CrossMark() {
-  return <span className={styles.cross} aria-label="No" title="No">&#10007;</span>;
-}
+const SPARK_FALLBACK = [61.2, 62.8, 63.1, 64.0, 64.7, 65.2, 65.9, 66.1, 66.4, 66.8, 67.1, 67.4];
 
 export default function ResultsPage() {
   const { jobId: routeJobId } = useParams();
   const navigate = useNavigate();
+  const { query } = useSearch();
 
   const [jobs, setJobs] = useState([]);
   const [selectedJobId, setSelectedJobId] = useState(routeJobId || '');
@@ -35,7 +25,6 @@ export default function ResultsPage() {
   const [patientDetail, setPatientDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  // Load completed jobs for dropdown
   useEffect(() => {
     async function loadJobs() {
       try {
@@ -48,35 +37,22 @@ export default function ResultsPage() {
         setJobs(completed);
         const preferredId = routeJobId || selectedJobId;
         const preferredExists = preferredId && completed.some(j => String(j.id) === String(preferredId));
-
         if (preferredExists) {
-          if (String(selectedJobId) !== String(preferredId)) {
-            setSelectedJobId(String(preferredId));
-          }
+          if (String(selectedJobId) !== String(preferredId)) setSelectedJobId(String(preferredId));
           return;
         }
-
         const fallbackId = completed[0] ? String(completed[0].id) : '';
-        if (String(selectedJobId) !== fallbackId) {
-          setSelectedJobId(fallbackId);
-        }
+        if (String(selectedJobId) !== fallbackId) setSelectedJobId(fallbackId);
         if (routeJobId && String(routeJobId) !== fallbackId) {
           navigate(fallbackId ? `/results/${fallbackId}` : '/results', { replace: true });
         }
-      } catch {
-        // Non-blocking
-      }
+      } catch { /* non-blocking */ }
     }
     loadJobs();
   }, [navigate, routeJobId, selectedJobId]);
 
-  // Load results when job is selected
   const loadResults = useCallback(async () => {
-    if (!selectedJobId) {
-      setResults(null);
-      setLoading(false);
-      return;
-    }
+    if (!selectedJobId) { setResults(null); setLoading(false); return; }
     setLoading(true);
     setError(null);
     try {
@@ -89,9 +65,7 @@ export default function ResultsPage() {
     }
   }, [selectedJobId]);
 
-  useEffect(() => {
-    loadResults();
-  }, [loadResults]);
+  useEffect(() => { loadResults(); }, [loadResults]);
 
   const handleJobChange = (e) => {
     const id = e.target.value;
@@ -122,34 +96,37 @@ export default function ResultsPage() {
   }, []);
 
   const selectedJob = jobs.find(j => String(j.id) === String(selectedJobId));
-
-  // Extract aggregate data — API returns { populations: {...}, patients: [...], ... }
   const populations = results?.populations || {};
   const patients = results?.patients || [];
   const measureName = results?.measure_name || selectedJob?.measure_name || selectedJob?.measure_id || '';
   const period = selectedJob?.period_start && selectedJob?.period_end
-    ? `${selectedJob.period_start} to ${selectedJob.period_end}`
-    : '';
+    ? `${selectedJob.period_start} → ${selectedJob.period_end}` : '';
 
-  const initialPop = populations.initial_population;
-  const denominator = populations.denominator;
-  const numerator = populations.numerator;
-  const denomExclusion = populations.denominator_exclusion;
-  const performanceRate = results?.performance_rate;
+  const ip = populations.initial_population;
+  const den = populations.denominator;
+  const num = populations.numerator;
+  const exc = populations.denominator_exclusion;
+  const perfRate = results?.performance_rate;
+
+  const q = query.trim().toLowerCase();
+  const filteredPatients = patients.filter(p => {
+    if (!q) return true;
+    const name = (p.patient_name || p.name || '').toLowerCase();
+    const id = (p.patient_id || p.id || '').toLowerCase();
+    return name.includes(q) || id.includes(q);
+  });
 
   return (
     <div className={styles.page}>
-      <div className={styles.header}>
-        <h1 className={styles.title}>Results</h1>
-        {jobs.length > 0 && (
-          <div className={styles.jobSelector}>
-            <label htmlFor="job-select" className={styles.jobLabel}>Job:</label>
-            <select
-              id="job-select"
-              value={selectedJobId}
-              onChange={handleJobChange}
-              className={styles.jobSelect}
-            >
+      <div className={styles.pageHeader}>
+        <div>
+          {measureName && <div className={styles.eyebrow}>{measureName}</div>}
+          <h1 className={styles.title}>Results</h1>
+          {period && <div className={styles.sub}><span className={styles.mono}>{period}</span></div>}
+        </div>
+        <div className={styles.headerActions}>
+          {jobs.length > 0 && (
+            <select className={styles.jobSelect} value={selectedJobId} onChange={handleJobChange} aria-label="Select job">
               {jobs.map(job => (
                 <option key={job.id} value={job.id}>
                   {job.measure_name || job.measure_id || job.id}
@@ -157,45 +134,18 @@ export default function ResultsPage() {
                 </option>
               ))}
             </select>
-          </div>
-        )}
+          )}
+        </div>
       </div>
 
-      {/* Loading */}
       {loading && (
         <div role="status" aria-label="Loading results">
           <div className={styles.cardsRow}>
-            {[1, 2, 3].map(i => (
-              <div key={i} className={`skeleton ${styles.skeletonCard}`} />
-            ))}
-          </div>
-          <div className={styles.tableWrapper} style={{ marginTop: 'var(--space-6)' }}>
-            <table>
-              <thead>
-                <tr>
-                  <th>Patient ID</th>
-                  <th>Name</th>
-                  <th>Initial Pop</th>
-                  <th>Denominator</th>
-                  <th>Numerator</th>
-                  <th>Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {[1, 2, 3, 4, 5].map(i => (
-                  <tr key={i}>
-                    {[1, 2, 3, 4, 5, 6].map(j => (
-                      <td key={j}><div className={`skeleton ${styles.skeletonCell}`} /></td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            {[1, 2].map(i => <div key={i} className={`skeleton ${styles.skeletonCard}`} />)}
           </div>
         </div>
       )}
 
-      {/* Error */}
       {!loading && error && (
         <div className={styles.errorState} role="alert">
           <p>Error loading results</p>
@@ -204,102 +154,118 @@ export default function ResultsPage() {
         </div>
       )}
 
-      {/* Empty state */}
       {!loading && !error && !selectedJobId && (
         <div className={styles.emptyState}>
-          <p>No results for this measure yet.</p>
-          <p className={styles.emptyHint}>Run a calculation from the Jobs page to see results here.</p>
+          <p>No results yet.</p>
+          <p className={styles.emptyHint}>Run a calculation from the Jobs page.</p>
         </div>
       )}
 
-      {/* Results content */}
       {!loading && !error && selectedJobId && results && (
         <>
-          {/* Measure header */}
-          {(measureName || period) && (
-            <div className={styles.measureHeader}>
-              {measureName && <h2 className={styles.measureName}>{measureName}</h2>}
-              {period && <p className={styles.period}>Period: {period}</p>}
-              {selectedJob?.cdr_name && <p className={styles.cdr}>CDR: {selectedJob.cdr_name}</p>}
-            </div>
-          )}
-
-          {/* Population cards */}
+          {/* Top stat cards */}
           <div className={styles.cardsRow}>
-            <PopulationCard label="Initial Population" count={initialPop} variant="default" />
-            <PopulationCard label="Numerator" count={numerator} variant="accent" />
-            <PopulationCard label="Denominator" count={denominator} variant="default" />
-            <PopulationCard label="Denominator Exclusions" count={denomExclusion} variant="default" />
+            {/* Performance rate card */}
+            <div className={styles.card}>
+              <div className={styles.cardTopRow}>
+                <div>
+                  <div className={styles.cardEyebrow}>Performance rate</div>
+                  <div className={styles.cardSub}>Numerator ÷ (Denominator − Exclusions)</div>
+                </div>
+                <div className={styles.sparklineWrap}>
+                  <Sparkline values={SPARK_FALLBACK} w={140} h={40} stroke="var(--accent)" />
+                </div>
+              </div>
+              <div className={styles.rateRow}>
+                {perfRate !== undefined && perfRate !== null ? (
+                  <div className={styles.rateNum}>
+                    {typeof perfRate === 'number' ? perfRate.toFixed(1) : perfRate}
+                    <span className={styles.ratePct}>%</span>
+                  </div>
+                ) : (
+                  <div className={styles.rateNum}>—</div>
+                )}
+              </div>
+            </div>
+
+            {/* Populations card */}
+            <div className={styles.card}>
+              <div className={styles.cardTopRow}>
+                <div className={styles.cardEyebrow}>Populations</div>
+                {ip != null && <div className={styles.cardSub}>of {ip.toLocaleString()} IP</div>}
+              </div>
+              {ip != null && (
+                <>
+                  <div className={styles.distBarWrap}>
+                    <DistBar ip={ip} den={den || 0} num={num || 0} exc={exc || 0} height={6} />
+                  </div>
+                  <div className={styles.popGrid}>
+                    {[
+                      ['Initial Pop.', ip, 'text'],
+                      ['Denominator', den, 'text'],
+                      ['Numerator', num, 'accent'],
+                      ['Exclusions', exc, 'warn'],
+                    ].map(([label, val, tone]) => (
+                      <div key={label} className={styles.popRow}>
+                        <span className={styles.popLabel}>{label}</span>
+                        <span className={styles.popVal} data-tone={tone}>
+                          {val != null ? val.toLocaleString() : '--'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
           </div>
 
-          {/* Performance Rate */}
-          {performanceRate !== undefined && performanceRate !== null && (
-            <div className={styles.performanceRate}>
-              <span className={styles.perfLabel}>Performance Rate</span>
-              <span className={styles.perfValue}>
-                {typeof performanceRate === 'number'
-                  ? `${performanceRate.toFixed(1)}%`
-                  : performanceRate}
-              </span>
+          {/* Patients table */}
+          <div className={styles.card}>
+            <div className={styles.tableHeader}>
+              <span className={styles.tableTitle}>Patients</span>
+              {ip != null && <span className={styles.tableBadge}>{ip.toLocaleString()}</span>}
+              <div className={styles.tableActions}>
+                <button className={styles.btnGhost}><FilterIcon /> Filter</button>
+              </div>
             </div>
-          )}
-
-          {/* Patient list */}
-          <div className={styles.tableWrapper}>
             <table aria-label="Patient results">
               <thead>
                 <tr>
-                  <th>Patient ID</th>
+                  <th style={{ width: 130 }}>Patient ID</th>
                   <th>Name</th>
-                  <th>Initial Pop</th>
-                  <th>Denominator</th>
-                  <th>Numerator</th>
-                  <th>Actions</th>
+                  <th style={{ width: 80, textAlign: 'center' }}>Denom</th>
+                  <th style={{ width: 80, textAlign: 'center' }}>Numer</th>
+                  <th style={{ width: 80, textAlign: 'center' }}>Excl.</th>
                 </tr>
               </thead>
               <tbody>
-                {(Array.isArray(patients) ? patients : []).length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className={styles.emptyRow}>
-                      No individual patient results available.
-                    </td>
-                  </tr>
+                {filteredPatients.length === 0 ? (
+                  <tr><td colSpan={5} className={styles.emptyRow}>
+                    {q ? `No patients match "${q}".` : 'No individual patient results available.'}
+                  </td></tr>
                 ) : (
-                  patients.map((patient, i) => (
-                    <tr key={patient.patient_id || patient.id || i}>
-                      <td className={styles.patientId}>
-                        {patient.patient_id || patient.id || '--'}
-                      </td>
-                      <td>{patient.patient_name || patient.name || '--'}</td>
-                      <td className={styles.boolCell}>
-                        {patient.populations?.initial_population ? <CheckMark /> : <CrossMark />}
-                      </td>
-                      <td className={styles.boolCell}>
-                        {patient.populations?.denominator ? <CheckMark /> : <CrossMark />}
-                      </td>
-                      <td className={styles.boolCell}>
-                        {patient.populations?.numerator ? <CheckMark /> : <CrossMark />}
-                      </td>
-                      <td>
-                        <button
-                          className={styles.detailBtn}
-                          onClick={() => handleViewPatient(patient)}
-                        >
-                          View Details
-                        </button>
-                      </td>
+                  filteredPatients.map((patient, i) => (
+                    <tr
+                      key={patient.patient_id || patient.id || i}
+                      className={styles.patientRow}
+                      onClick={() => handleViewPatient(patient)}
+                    >
+                      <td><span className={styles.mono}>{patient.patient_id || patient.id || '--'}</span></td>
+                      <td className={styles.patientName}>{patient.patient_name || patient.name || '--'}</td>
+                      <td className={styles.popCell}>{patient.populations?.denominator ? <CheckIcon className={styles.iconOk} /> : <XIcon className={styles.iconDim} />}</td>
+                      <td className={styles.popCell}>{patient.populations?.numerator ? <CheckIcon className={styles.iconOk} /> : <XIcon className={styles.iconDim} />}</td>
+                      <td className={styles.popCell}>{patient.populations?.denominator_exclusion ? <CheckIcon className={styles.iconWarn} /> : <XIcon className={styles.iconDim} />}</td>
                     </tr>
                   ))
                 )}
               </tbody>
             </table>
           </div>
-          {/* Comparison vs expected results */}
+
           <ComparisonView jobId={selectedJobId} />
         </>
       )}
 
-      {/* Patient detail slide-out */}
       {selectedPatient && (
         <PatientDetail
           result={detailLoading ? null : (patientDetail || selectedPatient)}

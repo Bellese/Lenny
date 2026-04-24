@@ -1,148 +1,238 @@
 .overlay {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  z-index: 200;
+  background: oklch(0 0 0 / 0.3);
   display: flex;
   justify-content: flex-end;
+  z-index: 200;
+  animation: fadeIn 0.12s ease;
 }
 
-.panel {
+.drawer {
   width: 560px;
-  max-width: 100vw;
   height: 100%;
-  background: var(--color-bg-primary);
-  overflow-y: auto;
-  box-shadow: var(--shadow-lg);
-  animation: slideIn 200ms ease;
+  background: var(--bg-elevated);
+  border-left: 1px solid var(--line);
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
-@keyframes slideIn {
-  from { transform: translateX(100%); }
-  to { transform: translateX(0); }
+/* Header */
+.drawerHeader {
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
 }
 
-.header {
+.headerTop {
   display: flex;
-  align-items: baseline;
-  gap: var(--space-3);
-  padding: var(--space-6);
-  border-bottom: 1px solid var(--color-border);
-  flex-wrap: wrap;
-}
-
-.title {
-  font-size: var(--font-size-section);
-  font-weight: var(--font-weight-semibold);
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 4px;
 }
 
 .patientId {
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
-  color: var(--color-text-tertiary);
+  font-size: 11px;
+  color: var(--text-dim);
 }
 
 .closeBtn {
-  margin-left: auto;
-  font-size: 24px;
-  width: 36px;
-  height: 36px;
   display: flex;
   align-items: center;
   justify-content: center;
+  width: 28px;
+  height: 28px;
   border-radius: var(--radius-sm);
-  color: var(--color-text-tertiary);
-  transition: background var(--transition);
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
 }
 
 .closeBtn:hover {
-  background: var(--color-bg-secondary);
-  color: var(--color-text-primary);
+  background: var(--bg-sunken);
+  color: var(--text);
+}
+
+.patientName {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  color: var(--text);
+  margin-bottom: 10px;
+}
+
+.badges {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  background: var(--line-soft);
+  color: var(--text-muted);
+}
+
+.badge_ok { background: var(--ok-wash); color: var(--ok); }
+.badge_info { background: var(--accent-wash); color: var(--accent-ink); }
+.badge_warn { background: var(--warn-wash); color: var(--warn); }
+
+/* Scrollable body */
+.drawerBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
 }
 
 .section {
-  padding: var(--space-6);
-  border-bottom: 1px solid var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 .sectionHeader {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: var(--space-4);
 }
 
 .sectionTitle {
-  font-size: var(--font-size-emphasis);
-  font-weight: var(--font-weight-semibold);
-  margin-bottom: var(--space-4);
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
 }
 
-.sectionHeader .sectionTitle {
-  margin-bottom: 0;
-}
-
-.populationList {
-  list-style: none;
+/* Population list */
+.popList {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 8px;
 }
 
-.populationItem {
+.popItem {
   display: flex;
   align-items: center;
-  gap: var(--space-3);
-  padding: var(--space-2) var(--space-3);
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--bg-sunken);
   border-radius: var(--radius-sm);
-  font-size: var(--font-size-body);
+}
+
+.iconOk { color: var(--ok); display: flex; }
+.iconNo { color: var(--text-dim); display: flex; }
+
+.popLabel {
+  flex: 1;
+  font-size: 13px;
+  color: var(--text);
 }
 
 .popStatus {
-  margin-left: auto;
-  font-size: var(--font-size-sm);
-  color: var(--color-text-tertiary);
+  font-size: 12px;
+  font-weight: 500;
 }
 
-.toggleBtn {
-  font-size: var(--font-size-sm);
-  color: var(--color-accent);
-  padding: var(--space-1) var(--space-3);
-  border: 1px solid var(--color-accent);
+.popStatusYes { color: var(--ok); }
+.popStatusNo { color: var(--text-dim); }
+
+/* Clinical facts */
+.factGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.factRow {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 12px;
+  padding: 10px 12px;
+  background: var(--bg-sunken);
   border-radius: var(--radius-sm);
-  transition: background var(--transition);
-  min-height: 32px;
+  align-items: start;
+}
+
+.factLabel {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.factValue {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.emptyMsg {
+  font-size: 13px;
+  color: var(--text-dim);
+  padding: 16px 0;
+}
+
+/* Toggle button */
+.toggleBtn {
+  font-size: 12px;
+  color: var(--accent);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
 }
 
 .toggleBtn:hover {
-  background: var(--color-accent-light);
+  color: var(--accent-ink);
 }
 
-.resourceList {
-  list-style: none;
+/* Skeleton */
+.skeletons {
   display: flex;
   flex-direction: column;
-  gap: var(--space-1);
+  gap: 8px;
 }
 
-.resourceItem {
-  padding: var(--space-2) var(--space-3);
-  font-size: var(--font-size-body);
+.skeletonRow {
+  height: 42px;
   border-radius: var(--radius-sm);
-  background: var(--color-bg-secondary);
-  line-height: 1.5;
 }
 
+/* Error */
+.errorMsg {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.retryBtn {
+  margin-top: 8px;
+  padding: 5px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-muted);
+  background: transparent;
+}
+
+/* Raw FHIR */
 .rawFhir {
   display: flex;
   flex-direction: column;
-  gap: var(--space-2);
+  gap: 8px;
 }
 
 .fhirBlock {
-  border: 1px solid var(--color-border);
+  border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   overflow: hidden;
 }
@@ -150,92 +240,35 @@
 .fhirToggle {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 8px;
   width: 100%;
-  padding: var(--space-2) var(--space-3);
+  padding: 8px 12px;
+  background: var(--bg-sunken);
+  border: none;
+  font-size: 12px;
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
-  color: var(--color-text-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
   text-align: left;
-  background: var(--color-bg-secondary);
-  min-height: 36px;
 }
 
 .fhirToggle:hover {
-  background: var(--color-border);
+  color: var(--text);
 }
 
 .fhirJson {
-  padding: var(--space-4);
+  padding: 12px;
+  background: var(--bg-sunken);
   font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: auto;
   line-height: 1.6;
-  overflow-x: auto;
-  background: var(--color-bg-primary);
-  border-top: 1px solid var(--color-border);
-  white-space: pre-wrap;
-  word-break: break-word;
+  border-top: 1px solid var(--line);
 }
 
-.fhirJson :global(.key) {
-  color: var(--color-accent);
-}
-
-.fhirJson :global(.string) {
-  color: var(--color-success);
-}
-
-.fhirJson :global(.number) {
-  color: var(--color-warning);
-}
-
-.fhirJson :global(.boolean) {
-  color: #8B5CF6;
-}
-
-.fhirJson :global(.null) {
-  color: var(--color-text-tertiary);
-}
-
-.skeletons {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-.skeletonRow {
-  height: 36px;
-  border-radius: var(--radius-sm);
-}
-
-.error {
-  padding: var(--space-4);
-  background: var(--color-error-light);
-  border-radius: var(--radius-md);
-  color: var(--color-text-primary);
-  font-size: var(--font-size-body);
-}
-
-.error p {
-  margin-bottom: var(--space-3);
-}
-
-.retryBtn {
-  padding: var(--space-2) var(--space-4);
-  background: var(--color-bg-primary);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-sm);
-  font-size: var(--font-size-sm);
-  min-height: 32px;
-}
-
-.retryBtn:hover {
-  background: var(--color-bg-secondary);
-}
-
-/* Mobile: full-screen panel */
-@media (max-width: 767px) {
-  .panel {
-    width: 100%;
-  }
-}
+.fhirJson :global(.key) { color: var(--accent-ink); }
+.fhirJson :global(.string) { color: var(--ok); }
+.fhirJson :global(.number) { color: var(--warn); }
+.fhirJson :global(.boolean) { color: var(--accent); }
+.fhirJson :global(.null) { color: var(--text-dim); }
