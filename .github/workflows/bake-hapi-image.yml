@@ -1,0 +1,57 @@
+name: Bake HAPI Seeded Images
+
+on:
+  schedule:
+    - cron: '0 5 * * 1'  # Monday 05:00 UTC weekly
+  workflow_dispatch:
+  push:
+    paths:
+      - 'seed/**'
+      - 'docker/hapi-*-seeded.Dockerfile'
+      - 'docker/seed-hapi.sh'
+      - 'docker-compose.test.yml'
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  bake:
+    name: Bake and push seeded HAPI images
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute seed hash
+        id: seed-hash
+        run: |
+          echo "hash=$(find seed/ docker/seed-hapi.sh docker-compose.test.yml docker/hapi-cdr-seeded.Dockerfile docker/hapi-measure-seeded.Dockerfile -type f 2>/dev/null | sort | xargs sha256sum | sha256sum | cut -c1-12)" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push CDR image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/hapi-cdr-seeded.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }}
+            ghcr.io/bellese/mct2-hapi-cdr:latest
+
+      - name: Build and push Measure image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/hapi-measure-seeded.Dockerfile
+          push: true
+          tags: |
+            ghcr.io/bellese/mct2-hapi-measure:${{ steps.seed-hash.outputs.hash }}
+            ghcr.io/bellese/mct2-hapi-measure:latest
