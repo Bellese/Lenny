@@ -1,33 +1,16 @@
 # hapi-measure-seeded.Dockerfile
 #
-# Extends hapiproject/hapi:v8.8.0-1 with measure + patient seed data baked into
-# the H2 database and Lucene index at image build time.  Environment matches the
-# hapi-fhir-measure service in docker-compose.test.yml.
+# Configuration-only layer on top of hapiproject/hapi:v8.8.0-1.
+# The seeded H2 database and Lucene index are baked in by the bake-hapi-image.yml
+# workflow via "docker run → seed from runner → docker stop → docker commit".
+# The base image is distroless (no shell), so RUN steps cannot be used for seeding.
 #
-# The RUN /seed-hapi.sh step starts HAPI, loads measure-bundle.json then
-# patient-bundle.json (SEED_TYPE=measure), triggers $reindex, polls ValueSet
-# pre-expansion, then stops HAPI cleanly so H2 and Lucene flush to disk.
-#
-# IMPORTANT: When running this image, do NOT mount a volume over /data/hapi — that
-# would shadow the baked H2 and Lucene index files.  Remove or rename the
-# test_measuredata volume mount in the wiring PR.
+# When running this image, do NOT mount a volume over /data/hapi — that would
+# shadow the baked H2 and Lucene files.
+# The wiring PR must remove the test_measuredata volume mount from docker-compose.test.yml.
 
 FROM hapiproject/hapi:v8.8.0-1
 
-USER root
-
-# Install runtime tools needed by seed-hapi.sh (curl, jq)
-RUN apt-get update -qq && \
-    apt-get install -y --no-install-recommends curl jq && \
-    rm -rf /var/lib/apt/lists/*
-
-# Copy seed bundles and build-time seed script
-COPY seed/measure-bundle.json /seed/measure-bundle.json
-COPY seed/patient-bundle.json /seed/patient-bundle.json
-COPY docker/seed-hapi.sh /seed-hapi.sh
-RUN chmod +x /seed-hapi.sh
-
-# Environment from docker-compose.test.yml hapi-fhir-measure service
 ENV hapi.fhir.implementationguides.qicore.name=hl7.fhir.us.qicore
 ENV hapi.fhir.implementationguides.qicore.version=6.0.0
 ENV hapi.fhir.implementationguides.uscore.name=hl7.fhir.us.core
@@ -51,8 +34,3 @@ ENV spring.jpa.properties.hibernate.search.backend.analysis.configurer=ca.uhn.fh
 ENV spring.jpa.properties.hibernate.search.backend.directory.root=/data/hapi/lucene
 ENV spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
 ENV spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100
-
-# Bake: start HAPI, load measure + patient seed data, wait for reindex and
-# ValueSet pre-expansion, then stop cleanly so H2 and Lucene flush to disk.
-ENV SEED_TYPE=measure
-RUN /seed-hapi.sh

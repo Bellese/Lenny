@@ -1,17 +1,22 @@
 #!/bin/bash
-# seed-hapi.sh — run at Docker image build time to bake seed data into H2 storage.
+# seed-hapi.sh — run from the CI workflow runner to seed a live HAPI container.
 #
-# Starts HAPI in the background, loads seed bundles, waits for reindex (and
-# optionally ValueSet pre-expansion), then sends SIGTERM so H2 flushes to disk.
+# This script runs ON THE RUNNER (not inside the container) because the base
+# hapiproject/hapi image is distroless and has no shell. The target HAPI
+# container must already be started with "docker run" before calling this script.
 #
 # Environment variables:
-#   SEED_TYPE  "cdr" (default) or "measure"
-#              cdr     → POST patient-bundle.json only
-#              measure → POST measure-bundle.json then patient-bundle.json
+#   HAPI_PORT   Port on localhost that maps to the container's 8080 (default: 8080)
+#   SEED_TYPE   "cdr" (default) or "measure"
+#               cdr     → POST patient-bundle.json only
+#               measure → POST measure-bundle.json then patient-bundle.json,
+#                         and wait for ValueSet pre-expansion
 set -euo pipefail
 
-HAPI_BASE="http://localhost:8080/fhir"
-SEED_DIR="/seed"
+HAPI_PORT="${HAPI_PORT:-8080}"
+HAPI_BASE="http://localhost:${HAPI_PORT}/fhir"
+SEED_TYPE="${SEED_TYPE:-cdr}"
+
 METADATA_TIMEOUT=300
 METADATA_POLL=2
 REINDEX_TIMEOUT=300
@@ -19,32 +24,18 @@ REINDEX_POLL=1
 VALUESET_TIMEOUT=600
 VALUESET_POLL=2
 
-SEED_TYPE="${SEED_TYPE:-cdr}"
-
 log() {
     echo "[$(date +%T)] $*"
 }
 
 # ---------------------------------------------------------------------------
-# Start HAPI in the background
-# ---------------------------------------------------------------------------
-log "Starting HAPI (SEED_TYPE=${SEED_TYPE}) ..."
-java \
-  --class-path /app/main.war \
-  "-Dloader.path=main.war!/WEB-INF/classes/,main.war!/WEB-INF/,/app/extra-classes" \
-  org.springframework.boot.loader.PropertiesLauncher &
-HAPI_PID=$!
-log "HAPI PID=${HAPI_PID}"
-
-# ---------------------------------------------------------------------------
 # Wait for /fhir/metadata
 # ---------------------------------------------------------------------------
-log "Waiting for HAPI metadata (max ${METADATA_TIMEOUT}s) ..."
+log "Waiting for HAPI at ${HAPI_BASE}/metadata (max ${METADATA_TIMEOUT}s, SEED_TYPE=${SEED_TYPE}) ..."
 deadline=$(( $(date +%s) + METADATA_TIMEOUT ))
 until curl -sf "${HAPI_BASE}/metadata" -o /dev/null; do
     if [ "$(date +%s)" -ge "${deadline}" ]; then
         log "ERROR: HAPI did not respond within ${METADATA_TIMEOUT}s"
-        kill "${HAPI_PID}" 2>/dev/null || true
         exit 1
     fi
     sleep "${METADATA_POLL}"
@@ -67,30 +58,25 @@ post_bundle() {
 }
 
 if [ "${SEED_TYPE}" = "measure" ]; then
-    post_bundle "${SEED_DIR}/measure-bundle.json" "measure-bundle.json"
+    post_bundle "seed/measure-bundle.json" "measure-bundle.json"
 fi
 
 # Both CDR and measure servers receive patient data.
 # (Measure server needs patient data because $evaluate-measure resolves
 # patient resources from its own HAPI instance.)
-post_bundle "${SEED_DIR}/patient-bundle.json" "patient-bundle.json"
+post_bundle "seed/patient-bundle.json" "patient-bundle.json"
 
 # ---------------------------------------------------------------------------
 # Extract probe IDs from patient-bundle.json (first Encounter)
 # ---------------------------------------------------------------------------
 log "Extracting probe patient/encounter IDs ..."
-PROBE_ENC_ID=$(jq -r '
-    [.entry[] | select(.resource.resourceType == "Encounter")]
-    | first | .resource.id' \
-    "${SEED_DIR}/patient-bundle.json")
-
 PROBE_PATIENT_ID=$(jq -r '
     [.entry[] | select(.resource.resourceType == "Encounter")]
     | first | .resource.subject.reference
     | ltrimstr("Patient/")' \
-    "${SEED_DIR}/patient-bundle.json")
+    seed/patient-bundle.json)
 
-log "Probe patient=${PROBE_PATIENT_ID} encounter=${PROBE_ENC_ID}"
+log "Probe patient=${PROBE_PATIENT_ID}"
 
 # ---------------------------------------------------------------------------
 # Trigger $reindex and wait for reference search params to settle
@@ -112,7 +98,6 @@ until [ "$(curl -sf "${HAPI_BASE}/Encounter?patient=${PROBE_PATIENT_ID}&_count=1
              | jq -r '.entry | length' 2>/dev/null || echo 0)" -gt 0 ]; do
     if [ "$(date +%s)" -ge "${deadline}" ]; then
         log "ERROR: reference-param indexing did not complete within ${REINDEX_TIMEOUT}s"
-        kill "${HAPI_PID}" 2>/dev/null || true
         exit 1
     fi
     sleep "${REINDEX_POLL}"
@@ -126,7 +111,6 @@ if [ "${SEED_TYPE}" = "measure" ]; then
     log "Polling ValueSet pre-expansion (max ${VALUESET_TIMEOUT}s) ..."
     deadline=$(( $(date +%s) + VALUESET_TIMEOUT ))
 
-    # Collect IDs of ValueSets with >900 compose concepts (need pre-expansion)
     large_ids=$(jq -r '
         .entry[]
         | select(.resource.resourceType == "ValueSet")
@@ -136,7 +120,7 @@ if [ "${SEED_TYPE}" = "measure" ]; then
            | add // 0) as $cnt
         | select($cnt >= 900)
         | $entry.resource.id' \
-        "${SEED_DIR}/measure-bundle.json" 2>/dev/null || true)
+        seed/measure-bundle.json 2>/dev/null || true)
 
     if [ -z "${large_ids}" ]; then
         log "No large ValueSets found — skipping pre-expansion poll."
@@ -166,10 +150,4 @@ if [ "${SEED_TYPE}" = "measure" ]; then
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# Stop HAPI cleanly so H2 flushes to disk
-# ---------------------------------------------------------------------------
-log "Sending SIGTERM to HAPI (PID=${HAPI_PID}) ..."
-kill -TERM "${HAPI_PID}"
-wait "${HAPI_PID}" || true
-log "HAPI stopped. Seed complete."
+log "Seed complete."
