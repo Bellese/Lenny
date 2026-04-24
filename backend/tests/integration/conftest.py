@@ -40,7 +40,7 @@ SKIP_MESSAGE = (
 #
 # Fix: after each bulk data load, trigger a fresh $reindex and poll until a
 # known patient's encounters appear in search results.
-_REINDEX_POLL_INTERVAL = 5  # seconds between probe checks
+_REINDEX_POLL_INTERVAL = 1  # seconds between probe checks
 _REINDEX_TIMEOUT = 300  # seconds before giving up
 
 # HAPI's in-memory ValueSet expansion is capped at 1000 codes (HAPI-0831).  ValueSets
@@ -50,7 +50,7 @@ _REINDEX_TIMEOUT = 300  # seconds before giving up
 #
 # Fix: after loading ValueSets, identify large ones (>900 compose concepts) and poll
 # $expand until HAPI's background task completes the pre-expansion.
-_VALUESET_EXPANSION_POLL_INTERVAL = 10  # seconds between probe checks
+_VALUESET_EXPANSION_POLL_INTERVAL = 2  # seconds between probe checks
 _VALUESET_EXPANSION_TIMEOUT = 600  # seconds before giving up (background task can be slow)
 
 
@@ -290,9 +290,13 @@ async def db_session(integration_session_factory) -> AsyncGenerator[AsyncSession
         yield session
 
 
-@pytest_asyncio.fixture(autouse=True)
-async def _truncate_tables(integration_session_factory):
-    """Truncate job/batch/result tables between tests (keep HAPI data loaded)."""
+@pytest_asyncio.fixture
+async def truncate_tables(integration_session_factory):
+    """Truncate job/batch/result tables between tests (keep HAPI data loaded).
+
+    Opt-in: only add this fixture to tests that write backend DB rows (jobs,
+    batches, results, etc.).  Read-only tests do not need it.
+    """
     yield
     async with integration_session_factory() as session:
         for table in (
