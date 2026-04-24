@@ -305,7 +305,12 @@ export default function JobsPage() {
                   const complete = isComplete(job.status);
                   const deleting = job.delete_requested || deletingJobIds.includes(job.id);
                   return (
-                    <tr key={job.id} className={`${styles.row} ${complete ? styles.rowClickable : ''}`}>
+                    <tr
+                      key={job.id}
+                      className={`${styles.row} ${complete ? styles.rowClickable : ''}`}
+                      onClick={() => complete && navigate(`/results/${job.id}`)}
+                      style={{ cursor: complete ? 'pointer' : 'default' }}
+                    >
                       <td>
                         <div className={styles.jobName}>{getMeasureName(job)}</div>
                         <div className={`${styles.mono} ${styles.jobId}`}>{job.id}</div>
