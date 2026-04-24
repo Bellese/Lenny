@@ -2,7 +2,7 @@
 
 **HAPI version:** v8.8.0-1
 **Target:** MADiE May 2026 Connectathon (12 measures)
-**Last updated:** 2026-04-22 (PR #112 verification — 17 Class A failures confirmed, xfail marks added, eval gate extended; EXM bundles removed, QI-Core 6 versions pending — issue #115)
+**Last updated:** 2026-04-24 (issue #140 root cause confirmed — CMS122 DE divergence is HAPI upstream CQL bug, not MCT2 defect; /jobs hardcoded sleep replaced with HAPI_SYNC_AFTER_UPLOAD gate)
 
 ---
 
@@ -186,6 +186,8 @@ Patients land in `numerator` when MADiE expects `denominator-exclusion`. The fai
 Status: Genuine HAPI vs. MADiE CQL evaluation differences — not fixable locally. All 17 marked `xfail` in `test_connectathon_measures.py::_HAPI_DE_XFAIL`. Needs HAPI upstream issue filed at hapifhir/hapi-fhir (update `_HAPI_DE_XFAIL` comment with issue number when filed).
 
 **Issue #112 verification (2026-04-22):** Fresh-container run with extended eval gate confirmed exactly 17 failures — the 69 extra failures from an earlier run were timing artifacts (IP=0 from VS expansion not complete). Root cause: the eval gate only probed CMS122 patient `9cba6cfa`; CMS125/CMS130 VSes take longer to expand on slower machines. Fix: added eval gate probes for CMS122 numerator path + CMS125 + CMS130 in `_load_connectathon_bundles_to_hapi`.
+
+**Issue #140 root cause (2026-04-24):** Separate investigation confirmed the CMS122 `denominator-exclusion` gap is a HAPI upstream CQL bug, not a MCT2 defect. Evidence: (1) the count of 19 actual vs. 25 expected exactly matches the 6 `_HAPI_DE_XFAIL` frailty patients; (2) Phase 3 testing showed adding `trigger_reindex_and_wait` to the `/jobs` path improved overall CMS122 accuracy (49/56 → 50/56) but left `denominator-exclusion` at 19 → 19, ruling out reference-index timing. The `/jobs` path hardcoded `asyncio.sleep(5.0)` was replaced with the `HAPI_SYNC_AFTER_UPLOAD` + `trigger_reindex_and_wait` gate (same pattern as the validation path) to fix the broader accuracy gap for other patients. See issue #140 for full findings.
 
 ### Class B: CMS71 — MADiE bundle export bug (strict=false)
 
