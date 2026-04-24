@@ -1,5 +1,6 @@
 """Tests for validation service — bundle triage, population extraction, comparison."""
 
+import asyncio
 import base64
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -985,6 +986,11 @@ class TestRunValidation:
             patch("app.services.validation.push_resources", new_callable=AsyncMock),
             patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
             patch(
+                "app.services.validation.reload_support_resources_for_measure",
+                new_callable=AsyncMock,
+                return_value={"skipped": False, "counts": {"measures": 1}},
+            ),
+            patch(
                 "app.services.validation.evaluate_measure",
                 new_callable=AsyncMock,
                 return_value={
@@ -1017,10 +1023,14 @@ class TestRunValidation:
             hapi_sync_after_upload=True,
         )
 
-        mock_to_thread.assert_awaited_once()
-        assert mock_to_thread.await_args.args[0].__name__ == "trigger_reindex_and_wait_for_patients"
-        assert mock_to_thread.await_args.args[1] == "http://measure/fhir"
-        assert mock_to_thread.await_args.args[2] == ["patient-1"]
+        # Phase 1 (general) + Phase 2 per-measure = 2 reindex calls
+        assert mock_to_thread.await_count == 2
+        assert mock_to_thread.call_args_list[0].args[0].__name__ == "trigger_reindex_and_wait_for_patients"
+        assert mock_to_thread.call_args_list[0].args[1] == "http://measure/fhir"
+        assert mock_to_thread.call_args_list[0].args[2] == ["patient-1"]
+        assert mock_to_thread.call_args_list[1].args[0].__name__ == "trigger_reindex_and_wait_for_patients"
+        assert mock_to_thread.call_args_list[1].args[1] == "http://measure/fhir"
+        assert mock_to_thread.call_args_list[1].args[2] == ["patient-1"]
         mock_sleep.assert_not_awaited()
 
     async def test_hapi_sync_disabled_uses_sleep_fallback(self, test_session, monkeypatch):
@@ -1030,8 +1040,11 @@ class TestRunValidation:
             hapi_sync_after_upload=False,
         )
 
+        # Phase 1 + Phase 2 per-measure both sleep (no to_thread calls when sync disabled)
         mock_to_thread.assert_not_awaited()
-        mock_sleep.assert_awaited_once_with(7)
+        assert mock_sleep.await_count == 2
+        assert mock_sleep.call_args_list[0].args == (7,)
+        assert mock_sleep.call_args_list[1].args == (7,)
 
     async def test_reindex_failure_logs_warning_and_uses_sleep_fallback(self, test_session, monkeypatch, caplog):
         caplog.set_level("WARNING", logger="app.services.validation")
@@ -1043,9 +1056,12 @@ class TestRunValidation:
             to_thread_side_effect=RuntimeError("unreachable"),
         )
 
-        mock_to_thread.assert_awaited_once()
+        # Phase 1 failure + Phase 2 per-measure failure = 2 to_thread calls
+        assert mock_to_thread.await_count == 2
+        # Only Phase 1 falls back to sleep
         mock_sleep.assert_awaited_once_with(7)
         assert "HAPI reindex failed during validation" in caplog.text
+        assert "Per-measure HAPI reindex failed" in caplog.text
 
     async def test_missing_measure_creates_error_results_and_resolved_measure_still_runs(self, test_session):
         run = ValidationRun(status=ValidationStatus.queued)
@@ -1100,24 +1116,29 @@ class TestRunValidation:
                                 new_callable=AsyncMock,
                             ) as mock_wipe:
                                 with patch(
-                                    "app.services.validation.evaluate_measure",
+                                    "app.services.validation.reload_support_resources_for_measure",
                                     new_callable=AsyncMock,
-                                    return_value={
-                                        "group": [
-                                            {
-                                                "population": [
-                                                    {
-                                                        "code": {"coding": [{"code": "numerator"}]},
-                                                        "count": 1,
-                                                    }
-                                                ]
-                                            }
-                                        ],
-                                        "evaluatedResource": [],
-                                    },
-                                ) as mock_evaluate:
-                                    with patch("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0):
-                                        await run_validation(run.id)
+                                    return_value={"skipped": False, "counts": {"measures": 1}},
+                                ):
+                                    with patch(
+                                        "app.services.validation.evaluate_measure",
+                                        new_callable=AsyncMock,
+                                        return_value={
+                                            "group": [
+                                                {
+                                                    "population": [
+                                                        {
+                                                            "code": {"coding": [{"code": "numerator"}]},
+                                                            "count": 1,
+                                                        }
+                                                    ]
+                                                }
+                                            ],
+                                            "evaluatedResource": [],
+                                        },
+                                    ) as mock_evaluate:
+                                        with patch("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0):
+                                            await run_validation(run.id)
 
         await test_session.refresh(run)
         rows = (
@@ -1144,8 +1165,9 @@ class TestRunValidation:
         assert rows[1].status == "error"
         assert "Measure not found on engine after reload attempt" in rows[1].error_message
         mock_wipe.assert_awaited_once()
-        mock_push.assert_awaited_once()
-        # Warmup burst adds 1 call per measure + 1 main eval = 2 total
+        # Phase 1 (1 patient from resolved measure) + Phase 2 per-measure for resolved (re-push 1 patient) = 2 calls
+        assert mock_push.await_count == 2
+        # Warmup burst adds 1 call per measure + 1 main eval for resolved = 2 total
         assert mock_evaluate.await_count == 2
 
     async def test_warmup_burst_runs_one_eval_per_measure_serially(self, test_session, monkeypatch):
@@ -1236,15 +1258,20 @@ class TestRunValidation:
                         with patch("app.services.validation.push_resources", new_callable=AsyncMock):
                             with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock):
                                 with patch(
-                                    "app.services.validation.evaluate_measure",
+                                    "app.services.validation.reload_support_resources_for_measure",
                                     new_callable=AsyncMock,
-                                    return_value=measure_report,
-                                ) as mock_evaluate:
+                                    return_value={"skipped": False, "counts": {"measures": 1}},
+                                ):
                                     with patch(
-                                        "app.services.validation.asyncio.to_thread",
+                                        "app.services.validation.evaluate_measure",
                                         new_callable=AsyncMock,
-                                    ):
-                                        await run_validation(run.id)
+                                        return_value=measure_report,
+                                    ) as mock_evaluate:
+                                        with patch(
+                                            "app.services.validation.asyncio.to_thread",
+                                            new_callable=AsyncMock,
+                                        ):
+                                            await run_validation(run.id)
 
         await test_session.refresh(run)
 
@@ -1333,14 +1360,19 @@ class TestRunValidation:
                         with patch("app.services.validation.push_resources", new_callable=AsyncMock):
                             with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock):
                                 with patch(
-                                    "app.services.validation.evaluate_measure",
-                                    side_effect=evaluate_measure_side_effect,
+                                    "app.services.validation.reload_support_resources_for_measure",
+                                    new_callable=AsyncMock,
+                                    return_value={"skipped": False, "counts": {"measures": 1}},
                                 ):
                                     with patch(
-                                        "app.services.validation.asyncio.to_thread",
-                                        new_callable=AsyncMock,
+                                        "app.services.validation.evaluate_measure",
+                                        side_effect=evaluate_measure_side_effect,
                                     ):
-                                        await run_validation(run.id)
+                                        with patch(
+                                            "app.services.validation.asyncio.to_thread",
+                                            new_callable=AsyncMock,
+                                        ):
+                                            await run_validation(run.id)
 
         await test_session.refresh(run)
         rows = (
@@ -1862,24 +1894,191 @@ class TestMissingValueSetStubs:
 # ---------------------------------------------------------------------------
 
 
-class TestRunValidationReload:
-    @pytest.mark.asyncio
-    async def test_run_validation_has_push_patients_for_measure_helper(self):
-        """Test that validation service has the _push_patients_for_measure helper."""
-        from app.services.validation import _push_patients_for_measure
+@pytest.mark.asyncio
+async def test_run_validation_reloads_per_measure_when_flag_enabled(test_session):
+    """Test that run_validation calls reload_support_resources_for_measure per measure when flag is enabled."""
+    run = ValidationRun(status=ValidationStatus.queued)
+    test_session.add(run)
+    test_session.add_all(
+        [
+            ExpectedResult(
+                measure_url="https://example.com/Measure/A",
+                patient_ref="patient-1",
+                test_description="test A",
+                expected_populations={"numerator": 1},
+                period_start="2026-01-01",
+                period_end="2026-12-31",
+                source_bundle="a.json",
+            ),
+            ExpectedResult(
+                measure_url="https://example.com/Measure/B",
+                patient_ref="patient-2",
+                test_description="test B",
+                expected_populations={"numerator": 1},
+                period_start="2026-01-01",
+                period_end="2026-12-31",
+                source_bundle="b.json",
+            ),
+        ]
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
 
-        assert callable(_push_patients_for_measure)
+    def make_ctx():
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=test_session)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return ctx
 
-    @pytest.mark.asyncio
-    async def test_run_validation_imports_measure_engine_lock(self):
-        """Test that validation imports the shared measure engine lock."""
-        from app.services.validation import _measure_engine_lock
+    strategy = MagicMock()
+    strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p"}])
 
-        assert _measure_engine_lock is not None
+    with (
+        patch("app.services.validation.settings.RELOAD_SUPPORT_PER_MEASURE", True),
+        patch("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0),
+        patch("app.services.validation.async_session", side_effect=lambda: make_ctx()),
+        patch(
+            "app.services.validation._resolve_measure_id",
+            new_callable=AsyncMock,
+            side_effect=lambda url: "m1" if "A" in url else "m2",
+        ),
+        patch("app.services.validation._reload_measures_from_seed_bundles", new_callable=AsyncMock),
+        patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.validation.reload_support_resources_for_measure", new_callable=AsyncMock) as mock_reload,
+        patch("app.services.validation.evaluate_measure", new_callable=AsyncMock, return_value={"group": []}),
+    ):
+        await run_validation(run.id)
 
-    @pytest.mark.asyncio
-    async def test_run_validation_imports_reload_support_resources_for_measure(self):
-        """Test that validation imports the reload helper."""
-        from app.services.validation import reload_support_resources_for_measure
+    # Should call reload once per measure (2 measures = 2 calls)
+    assert mock_reload.await_count == 2
+    assert mock_reload.call_args_list[0].args[0] == "https://example.com/Measure/A"
+    assert mock_reload.call_args_list[1].args[0] == "https://example.com/Measure/B"
 
-        assert callable(reload_support_resources_for_measure)
+
+@pytest.mark.asyncio
+async def test_run_validation_serializes_measures_across_lock(test_session):
+    """Test that phase 2 per-measure loop uses the measure engine lock."""
+    run = ValidationRun(status=ValidationStatus.queued)
+    test_session.add(run)
+    # Add 2 measures to test per-measure serialization
+    test_session.add_all(
+        [
+            ExpectedResult(
+                measure_url="https://example.com/Measure/A",
+                patient_ref="patient-1",
+                test_description="test A",
+                expected_populations={"numerator": 1},
+                period_start="2026-01-01",
+                period_end="2026-12-31",
+                source_bundle="a.json",
+            ),
+            ExpectedResult(
+                measure_url="https://example.com/Measure/B",
+                patient_ref="patient-2",
+                test_description="test B",
+                expected_populations={"numerator": 1},
+                period_start="2026-01-01",
+                period_end="2026-12-31",
+                source_bundle="b.json",
+            ),
+        ]
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    def make_ctx():
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=test_session)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return ctx
+
+    strategy = MagicMock()
+    strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p"}])
+
+    # Track lock context manager usage
+    lock_contexts = []
+
+    original_lock_enter = asyncio.Lock.__aenter__
+    original_lock_exit = asyncio.Lock.__aexit__
+
+    async def tracked_enter(self):
+        lock_contexts.append("enter")
+        return await original_lock_enter(self)
+
+    async def tracked_exit(self, *args):
+        lock_contexts.append("exit")
+        return await original_lock_exit(self, *args)
+
+    with (
+        patch("app.services.validation.settings.RELOAD_SUPPORT_PER_MEASURE", True),
+        patch("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0),
+        patch("app.services.validation.async_session", side_effect=lambda: make_ctx()),
+        patch(
+            "app.services.validation._resolve_measure_id",
+            new_callable=AsyncMock,
+            side_effect=lambda url: "m1" if "A" in url else "m2",
+        ),
+        patch("app.services.validation._reload_measures_from_seed_bundles", new_callable=AsyncMock),
+        patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.validation.reload_support_resources_for_measure", new_callable=AsyncMock),
+        patch("app.services.validation.evaluate_measure", new_callable=AsyncMock, return_value={"group": []}),
+        patch.object(asyncio.Lock, "__aenter__", tracked_enter),
+        patch.object(asyncio.Lock, "__aexit__", tracked_exit),
+    ):
+        await run_validation(run.id)
+
+    # Lock should be entered/exited per measure (2 measures = 2 enter/exit pairs minimum)
+    assert len([x for x in lock_contexts if x == "enter"]) >= 2
+
+
+@pytest.mark.asyncio
+async def test_run_validation_skips_reload_when_flag_disabled(test_session):
+    """Test that per-measure reload is skipped when RELOAD_SUPPORT_PER_MEASURE is False."""
+    run = ValidationRun(status=ValidationStatus.queued)
+    test_session.add(run)
+    test_session.add(
+        ExpectedResult(
+            measure_url="https://example.com/Measure/test",
+            patient_ref="patient-1",
+            test_description="test",
+            expected_populations={"numerator": 1},
+            period_start="2026-01-01",
+            period_end="2026-12-31",
+            source_bundle="test.json",
+        )
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    def make_ctx():
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=test_session)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        return ctx
+
+    strategy = MagicMock()
+    strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p"}])
+
+    with (
+        patch("app.services.validation.settings.RELOAD_SUPPORT_PER_MEASURE", False),
+        patch("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0),
+        patch("app.services.validation.async_session", side_effect=lambda: make_ctx()),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
+        patch("app.services.validation._reload_measures_from_seed_bundles", new_callable=AsyncMock),
+        patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.validation.reload_support_resources_for_measure", new_callable=AsyncMock) as mock_reload,
+        patch("app.services.validation.evaluate_measure", new_callable=AsyncMock, return_value={"group": []}),
+    ):
+        await run_validation(run.id)
+
+    # Should not call reload when flag is disabled
+    mock_reload.assert_not_awaited()

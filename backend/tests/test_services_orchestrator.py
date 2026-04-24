@@ -143,6 +143,11 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
         ),
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
         patch(
+            "app.services.orchestrator.reload_support_resources_for_measure",
+            new_callable=AsyncMock,
+            return_value={"skipped": False, "counts": {"measures": 1}},
+        ),
+        patch(
             "app.services.orchestrator.evaluate_measure",
             new_callable=AsyncMock,
             return_value=mock_measure_report,
@@ -180,6 +185,11 @@ async def test_run_job_no_patients(test_session, session_factory):
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch(
+            "app.services.orchestrator.reload_support_resources_for_measure",
+            new_callable=AsyncMock,
+            return_value={"skipped": False, "counts": {"measures": 1}},
+        ),
         patch.object(
             __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
             "gather_patients",
@@ -201,6 +211,11 @@ async def test_run_job_wipe_failure(test_session, session_factory):
 
     with (
         _make_session_factory_patch(session_factory),
+        patch(
+            "app.services.orchestrator.reload_support_resources_for_measure",
+            new_callable=AsyncMock,
+            return_value={"skipped": False, "counts": {"measures": 1}},
+        ),
         patch(
             "app.services.orchestrator.wipe_patient_data",
             new_callable=AsyncMock,
@@ -224,6 +239,11 @@ async def test_run_job_cdr_unreachable(test_session, session_factory):
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch(
+            "app.services.orchestrator.reload_support_resources_for_measure",
+            new_callable=AsyncMock,
+            return_value={"skipped": False, "counts": {"measures": 1}},
+        ),
         patch.object(
             __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
             "gather_patients",
@@ -263,6 +283,11 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch(
+            "app.services.orchestrator.reload_support_resources_for_measure",
+            new_callable=AsyncMock,
+            return_value={"skipped": False, "counts": {"measures": 1}},
+        ),
         patch.object(
             __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
             "gather_patients",
@@ -329,6 +354,7 @@ async def test_run_job_all_patient_failures_marks_job_failed(test_session, sessi
             new_callable=AsyncMock,
             return_value=[{"resourceType": "Patient", "id": "p1"}],
         ),
+        patch("app.services.orchestrator.reload_support_resources_for_measure", new_callable=AsyncMock, return_value={"skipped": False, "counts": {"measures": 1}}),
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
         patch(
             "app.services.orchestrator.evaluate_measure",
@@ -626,24 +652,22 @@ async def test_process_batch_hapi_sync_calls_trigger_reindex(test_session, sessi
 # ---------------------------------------------------------------------------
 
 
-class TestRunJobReload:
-    @pytest.mark.asyncio
-    async def test_run_job_has_run_job_inner_function(self):
-        """Test that _run_job_inner function exists for lock wrapping."""
-        from app.services.orchestrator import _run_job_inner
+@pytest.mark.asyncio
+async def test_run_job_errors_when_reload_returns_skipped(test_session, session_factory, monkeypatch):
+    """Test that run_job marks job as failed when reload_support_resources_for_measure is skipped."""
+    monkeypatch.setattr("app.services.orchestrator.settings.RELOAD_SUPPORT_PER_MEASURE", True)
 
-        assert callable(_run_job_inner)
+    job_id = await _setup_job(test_session)
 
-    @pytest.mark.asyncio
-    async def test_run_job_imports_measure_engine_lock(self):
-        """Test that orchestrator imports the shared measure engine lock."""
-        from app.services.orchestrator import _measure_engine_lock
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.reload_support_resources_for_measure", new_callable=AsyncMock) as mock_reload,
+    ):
+        # Set reload to return skipped
+        mock_reload.return_value = {"skipped": True, "reason": "No bundle found"}
+        await run_job(job_id)
 
-        assert _measure_engine_lock is not None
-
-    @pytest.mark.asyncio
-    async def test_run_job_imports_reload_support_resources_for_measure(self):
-        """Test that orchestrator imports the reload helper."""
-        from app.services.orchestrator import reload_support_resources_for_measure
-
-        assert callable(reload_support_resources_for_measure)
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        assert job.status == JobStatus.failed
+        assert "Reload skipped" in job.error_message
