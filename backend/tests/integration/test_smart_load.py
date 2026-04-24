@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import pathlib
 from unittest.mock import patch
 
@@ -136,8 +137,6 @@ async def loader_result(integration_session_factory):
     Re-uploading them here would add 10-15 minutes to every PR gate run.  Skip
     these tests instead; they run nightly via the connectathon-measures workflow.
     """
-    import os
-
     if os.environ.get("HAPI_PREBAKED") == "1":
         pytest.skip("Bundle-loader tests skipped in pre-baked mode — run nightly")
 
