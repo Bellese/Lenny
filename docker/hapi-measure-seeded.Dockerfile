@@ -30,7 +30,7 @@ ENV spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
 ENV spring.datasource.driverClassName=org.h2.Driver
 ENV spring.jpa.properties.hibernate.search.enabled=true
 ENV spring.jpa.properties.hibernate.search.backend.type=lucene
-ENV spring.jpa.properties.hibernate.search.backend.analysis.configurer=ca.uhn.fhir.jpa.search.HapiHSearchAnalysisConfigurers$$HapiLuceneAnalysisConfigurer
+ENV spring.jpa.properties.hibernate.search.backend.analysis.configurer=ca.uhn.fhir.jpa.search.HapiHSearchAnalysisConfigurers\$HapiLuceneAnalysisConfigurer
 ENV spring.jpa.properties.hibernate.search.backend.directory.root=/data/hapi/lucene
 ENV spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
 ENV spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100
