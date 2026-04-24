@@ -1,0 +1,4 @@
+# /etc/tmpfiles.d/leonard.conf
+# Creates /run/leonard on boot before systemd services start.
+# The directory lives on tmpfs (/run) and is cleared on every reboot.
+d /run/leonard 0700 root root -

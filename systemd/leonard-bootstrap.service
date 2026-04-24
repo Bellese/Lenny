@@ -1,0 +1,17 @@
+[Unit]
+Description=Leonard prod secrets bootstrap
+Documentation=https://github.com/Bellese/mct2
+After=network-online.target
+Wants=network-online.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/opt/leonard/scripts/fetch-prod-secrets.sh
+ExecStartPost=/bin/sh -c "grep -E '^POSTGRES_PASSWORD=' /run/leonard/env | cut -d= -f2- | install -o root -g root -m 0600 /dev/stdin /run/leonard/POSTGRES_PASSWORD"
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
