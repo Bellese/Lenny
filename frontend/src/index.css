@@ -1,37 +1,61 @@
-@import '@fontsource/ibm-plex-sans/400.css';
-@import '@fontsource/ibm-plex-sans/600.css';
-@import '@fontsource/ibm-plex-mono/400.css';
+@import '@fontsource/inter-tight/400.css';
+@import '@fontsource/inter-tight/500.css';
+@import '@fontsource/inter-tight/600.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/500.css';
 
+/* Direction A — Calm Clinical design tokens */
 :root {
-  /* Colors */
-  --color-bg-primary: #FFFFFF;
-  --color-bg-secondary: #F8F9FA;
-  --color-text-primary: #1A1A2E;
-  --color-text-secondary: #4A4A68;
-  --color-text-tertiary: #7A7A94;
-  --color-accent: #0066CC;
-  --color-accent-hover: #0052A3;
-  --color-accent-light: #E8F0FE;
-  --color-success: #0D7A3E;
-  --color-success-light: #E6F4EC;
-  --color-warning: #B95000;
-  --color-warning-light: #FFF3E0;
-  --color-error: #C41E3A;
-  --color-error-light: #FDE8EC;
-  --color-border: #E2E4E8;
+  --bg: oklch(0.985 0.006 75);
+  --bg-sunken: oklch(0.965 0.008 75);
+  --bg-elevated: oklch(1 0 0);
+  --line: oklch(0.915 0.008 75);
+  --line-soft: oklch(0.945 0.006 75);
+  --text: oklch(0.25 0.012 275);
+  --text-muted: oklch(0.48 0.012 275);
+  --text-dim: oklch(0.62 0.010 275);
+  --accent: oklch(0.52 0.17 265);
+  --accent-ink: oklch(0.36 0.14 265);
+  --accent-wash: oklch(0.96 0.02 265);
+  --ok: oklch(0.58 0.12 155);
+  --ok-wash: oklch(0.95 0.03 155);
+  --warn: oklch(0.66 0.14 70);
+  --warn-wash: oklch(0.96 0.04 70);
+  --err: oklch(0.58 0.18 22);
+  --err-wash: oklch(0.96 0.03 22);
+  --font-ui: 'Inter Tight', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+  --radius-sm: 4px;
+  --radius: 8px;
+  --radius-lg: 12px;
+  --shadow-card: 0 1px 0 oklch(0.92 0.008 75), 0 1px 2px oklch(0.9 0.008 75 / 0.4);
+  --sidebar-width: 232px;
+  --topbar-height: 52px;
 
-  /* Typography */
-  --font-sans: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
-  --font-mono: 'IBM Plex Mono', monospace;
+  /* Legacy aliases used by components not yet re-skinned */
+  --color-bg-primary: var(--bg-elevated);
+  --color-bg-secondary: var(--bg-sunken);
+  --color-text-primary: var(--text);
+  --color-text-secondary: var(--text-muted);
+  --color-text-tertiary: var(--text-dim);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-ink);
+  --color-accent-light: var(--accent-wash);
+  --color-success: var(--ok);
+  --color-success-light: var(--ok-wash);
+  --color-warning: var(--warn);
+  --color-warning-light: var(--warn-wash);
+  --color-error: var(--err);
+  --color-error-light: var(--err-wash);
+  --color-border: var(--line);
+  --font-sans: var(--font-ui);
   --font-size-sm: 12px;
-  --font-size-body: 14px;
-  --font-size-emphasis: 16px;
-  --font-size-section: 20px;
+  --font-size-body: 13px;
+  --font-size-emphasis: 14px;
+  --font-size-section: 18px;
   --font-size-page: 28px;
   --font-weight-regular: 400;
   --font-weight-semibold: 600;
-
-  /* Spacing */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
@@ -40,19 +64,34 @@
   --space-6: 24px;
   --space-8: 32px;
   --space-12: 48px;
+  --radius-md: var(--radius);
+  --radius-lg: 12px;
+  --shadow-sm: var(--shadow-card);
+  --shadow-md: 0 4px 12px oklch(0 0 0 / 0.08);
+  --shadow-lg: 0 8px 24px oklch(0 0 0 / 0.12);
+  --transition: 120ms ease;
+}
 
-  /* Layout */
-  --sidebar-width: 240px;
-  --topbar-height: 56px;
-
-  /* Misc */
-  --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 8px;
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
-  --shadow-md: 0 2px 8px rgba(0, 0, 0, 0.1);
-  --shadow-lg: 0 4px 16px rgba(0, 0, 0, 0.12);
-  --transition: 150ms ease;
+/* Dark mode */
+:root.dark {
+  --bg: oklch(0.18 0.008 275);
+  --bg-sunken: oklch(0.14 0.008 275);
+  --bg-elevated: oklch(0.22 0.010 275);
+  --line: oklch(0.28 0.010 275);
+  --line-soft: oklch(0.24 0.008 275);
+  --text: oklch(0.95 0.008 75);
+  --text-muted: oklch(0.72 0.010 275);
+  --text-dim: oklch(0.55 0.010 275);
+  --accent: oklch(0.72 0.16 265);
+  --accent-ink: oklch(0.82 0.14 265);
+  --accent-wash: oklch(0.28 0.08 265);
+  --ok: oklch(0.70 0.12 155);
+  --ok-wash: oklch(0.22 0.06 155);
+  --warn: oklch(0.76 0.14 70);
+  --warn-wash: oklch(0.22 0.06 70);
+  --err: oklch(0.70 0.18 22);
+  --err-wash: oklch(0.22 0.08 22);
+  --shadow-card: 0 0 0 1px oklch(0.28 0.010 275), 0 1px 2px oklch(0 0 0 / 0.4);
 }
 
 /* Reset */
@@ -66,31 +105,43 @@ html {
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  background: var(--bg);
+  color: var(--text);
 }
 
 body {
-  font-family: var(--font-sans);
-  font-weight: var(--font-weight-regular);
-  color: var(--color-text-primary);
-  background: var(--color-bg-primary);
+  font-family: var(--font-ui);
+  font-weight: 400;
+  color: var(--text);
+  background: var(--bg);
   line-height: 1.5;
+}
+
+/* Pulse animation for PulseDot */
+@keyframes pulse {
+  0% { transform: scale(1); opacity: 0.5; }
+  80% { transform: scale(2.4); opacity: 0; }
+  100% { transform: scale(2.4); opacity: 0; }
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 /* Focus ring */
 *:focus-visible {
-  outline: 2px solid var(--color-accent);
+  outline: 2px solid var(--accent);
   outline-offset: 2px;
   border-radius: var(--radius-sm);
 }
 
-/* Remove default focus outline */
 *:focus:not(:focus-visible) {
   outline: none;
 }
 
-/* Links */
 a {
-  color: var(--color-accent);
+  color: var(--accent);
   text-decoration: none;
 }
 
@@ -98,7 +149,6 @@ a:hover {
   text-decoration: underline;
 }
 
-/* Tables */
 table {
   width: 100%;
   border-collapse: collapse;
@@ -106,48 +156,48 @@ table {
 
 th {
   text-align: left;
-  font-weight: var(--font-weight-semibold);
-  color: var(--color-text-secondary);
-  font-size: var(--font-size-sm);
+  font-weight: 500;
+  color: var(--text-dim);
+  font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 2px solid var(--color-border);
+  letter-spacing: 0.06em;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line);
 }
 
 td {
-  padding: var(--space-3) var(--space-4);
-  border-bottom: 1px solid var(--color-border);
-  font-size: var(--font-size-body);
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--line-soft);
+  font-size: 13px;
+  color: var(--text);
 }
 
-tr:nth-child(even) {
-  background: var(--color-bg-secondary);
+tr:last-child td {
+  border-bottom: none;
 }
 
-/* Buttons */
 button {
-  font-family: var(--font-sans);
+  font-family: var(--font-ui);
   cursor: pointer;
   border: none;
   background: none;
-  font-size: var(--font-size-body);
+  font-size: 13px;
 }
 
-/* Inputs */
 input, select, textarea {
-  font-family: var(--font-sans);
-  font-size: var(--font-size-body);
-  border: 1px solid var(--color-border);
-  border-radius: var(--radius-md);
-  padding: var(--space-2) var(--space-3);
-  color: var(--color-text-primary);
-  background: var(--color-bg-primary);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 7px 10px;
+  color: var(--text);
+  background: var(--bg-elevated);
   transition: border-color var(--transition);
 }
 
 input:focus, select:focus, textarea:focus {
-  border-color: var(--color-accent);
+  border-color: var(--accent);
+  outline: none;
 }
 
 /* Utility */
@@ -163,7 +213,6 @@ input:focus, select:focus, textarea:focus {
   border: 0;
 }
 
-/* Skeleton animation */
 @keyframes skeleton {
   0% { opacity: 0.6; }
   50% { opacity: 1; }
@@ -171,7 +220,7 @@ input:focus, select:focus, textarea:focus {
 }
 
 .skeleton {
-  background: var(--color-bg-secondary);
+  background: var(--line-soft);
   border-radius: var(--radius-sm);
   animation: skeleton 1.5s ease-in-out infinite;
 }

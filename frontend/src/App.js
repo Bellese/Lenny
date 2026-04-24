@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Routes, Route, NavLink, Link, Navigate, useLocation } from 'react-router-dom';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import styles from './App.module.css';
 import MeasuresPage from './pages/MeasuresPage';
 import JobsPage from './pages/JobsPage';
@@ -7,89 +7,64 @@ import ResultsPage from './pages/ResultsPage';
 import SettingsPage from './pages/SettingsPage';
 import ValidationPage from './pages/ValidationPage';
 import { getHealth } from './api/client';
-
-function GearIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="10" cy="10" r="3" />
-      <path d="M10 1.5a1 1 0 011 1v.74a1 1 0 00.67.95l.12.04a1 1 0 001.06-.2l.52-.53a1 1 0 011.42 0l.7.7a1 1 0 010 1.42l-.52.52a1 1 0 00-.2 1.06l.04.12a1 1 0 00.95.67h.74a1 1 0 011 1v1a1 1 0 01-1 1h-.74a1 1 0 00-.95.67l-.04.12a1 1 0 00.2 1.06l.52.52a1 1 0 010 1.42l-.7.7a1 1 0 01-1.42 0l-.52-.52a1 1 0 00-1.06-.2l-.12.04a1 1 0 00-.67.95v.74a1 1 0 01-1 1H9a1 1 0 01-1-1v-.74a1 1 0 00-.67-.95l-.12-.04a1 1 0 00-1.06.2l-.52.53a1 1 0 01-1.42 0l-.7-.7a1 1 0 010-1.42l.52-.52a1 1 0 00.2-1.06l-.04-.12a1 1 0 00-.95-.67H2.5a1 1 0 01-1-1V9a1 1 0 011-1h.74a1 1 0 00.95-.67l.04-.12a1 1 0 00-.2-1.06l-.53-.52a1 1 0 010-1.42l.7-.7a1 1 0 011.42 0l.52.52a1 1 0 001.06.2l.12-.04a1 1 0 00.67-.95V2.5a1 1 0 011-1z" />
-    </svg>
-  );
-}
-
-function MeasuresIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 3h14v14H3z" />
-      <path d="M7 7h6M7 10h6M7 13h4" />
-    </svg>
-  );
-}
-
-function JobsIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="10" cy="10" r="7" />
-      <path d="M10 6v4l2.5 2.5" />
-    </svg>
-  );
-}
-
-function ResultsIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M3 17V9h3v8H3zM8.5 17V5h3v12h-3zM14 17V1h3v16h-3z" />
-    </svg>
-  );
-}
-
-function ValidationIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M10 2l6 3v5c0 4-3 7-6 8-3-1-6-4-6-8V5l6-3z" />
-      <path d="M7 10l2 2 4-4" />
-    </svg>
-  );
-}
-
-function HamburgerIcon() {
-  return (
-    <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-      <path d="M3 5h14M3 10h14M3 15h14" />
-    </svg>
-  );
-}
+import {
+  MeasuresIcon, JobsIcon, ResultsIcon, ValidateIcon,
+  SettingsIcon, SearchIcon, XIcon, SunIcon, MoonIcon,
+} from './components/Icons';
+import SearchContext from './contexts/SearchContext';
 
 const NAV_ITEMS = [
-  { path: '/measures', label: 'Measures', icon: MeasuresIcon },
-  { path: '/jobs', label: 'Jobs', icon: JobsIcon },
-  { path: '/results', label: 'Results', icon: ResultsIcon },
-  { path: '/validation', label: 'Validation', icon: ValidationIcon },
+  { path: '/measures',   label: 'Measures',   Icon: MeasuresIcon,  kbd: 'M' },
+  { path: '/jobs',       label: 'Jobs',        Icon: JobsIcon,      kbd: 'J' },
+  { path: '/results',    label: 'Results',     Icon: ResultsIcon,   kbd: 'E' },
+  { path: '/validation', label: 'Validation',  Icon: ValidateIcon,  kbd: 'V' },
 ];
 
+const PAGE_TITLE = {
+  '/measures': 'Measures',
+  '/jobs': 'Jobs',
+  '/results': 'Results',
+  '/validation': 'Validation',
+  '/settings': 'Settings',
+};
+
+const SEARCH_PLACEHOLDER = {
+  '/measures': 'Search measures…',
+  '/jobs': 'Search jobs…',
+  '/results': 'Search patients…',
+  '/validation': 'Search validation runs…',
+  '/settings': 'Search…',
+};
+
 export default function App() {
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const location = useLocation();
+  const navigate = useNavigate();
   const [cdrStatus, setCdrStatus] = useState('unknown');
   const [cdrName, setCdrName] = useState('');
-  const [cdrReadOnly, setCdrReadOnly] = useState(false);
-  const location = useLocation();
+  const [theme, setTheme] = useState(() => localStorage.getItem('mct2-theme') || 'light');
+  const [query, setQuery] = useState('');
+  const searchRef = useRef(null);
 
-  // Close sidebar on navigation
+  // Apply dark class to html element
   useEffect(() => {
-    setSidebarOpen(false);
+    document.documentElement.classList.toggle('dark', theme === 'dark');
+    localStorage.setItem('mct2-theme', theme);
+  }, [theme]);
+
+  // Clear search on navigation
+  useEffect(() => {
+    setQuery('');
   }, [location.pathname]);
 
-  // Check CDR health on mount
+  // CDR health check
   const checkHealth = useCallback(async () => {
     try {
       const health = await getHealth();
       setCdrStatus(health?.cdr?.status ?? 'unknown');
       setCdrName(health?.cdr?.name ?? '');
-      setCdrReadOnly(health?.cdr?.is_read_only ?? false);
     } catch {
       setCdrStatus('unknown');
       setCdrName('');
-      setCdrReadOnly(false);
     }
   }, []);
 
@@ -99,74 +74,124 @@ export default function App() {
     return () => clearInterval(interval);
   }, [checkHealth]);
 
-  const toggleSidebar = useCallback(() => {
-    setSidebarOpen(prev => !prev);
-  }, []);
+  // Keyboard shortcuts
+  useEffect(() => {
+    const h = (e) => {
+      const active = document.activeElement;
+      const isInput = active.tagName === 'INPUT' || active.tagName === 'SELECT' || active.tagName === 'TEXTAREA' || active.isContentEditable;
 
-  const closeSidebar = useCallback(() => {
-    setSidebarOpen(false);
-  }, []);
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        searchRef.current?.focus();
+        return;
+      }
+      if (e.key === 'Escape' && document.activeElement === searchRef.current) {
+        searchRef.current.blur();
+        setQuery('');
+        return;
+      }
+      if (!isInput && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
+        if (e.key === 'm' || e.key === 'M') navigate('/measures');
+        else if (e.key === 'j' || e.key === 'J') navigate('/jobs');
+        else if (e.key === 'e' || e.key === 'E') navigate('/results');
+        else if (e.key === 'v' || e.key === 'V') navigate('/validation');
+      }
+    };
+    window.addEventListener('keydown', h);
+    return () => window.removeEventListener('keydown', h);
+  }, [navigate]);
+
+  const basePath = '/' + location.pathname.split('/')[1];
+  const pageTitle = PAGE_TITLE[basePath] || 'MCT2';
+  const searchPlaceholder = SEARCH_PLACEHOLDER[basePath] || 'Search…';
+  const cdrOk = cdrStatus === 'connected' || cdrStatus === 'healthy';
 
   return (
-    <div className={styles.layout}>
-      {/* Top bar */}
-      <header className={styles.topbar} role="banner">
-        <button
-          className={styles.hamburger}
-          onClick={toggleSidebar}
-          aria-label={sidebarOpen ? 'Close navigation' : 'Open navigation'}
-          aria-expanded={sidebarOpen}
-        >
-          <HamburgerIcon />
-        </button>
-        <Link to="/measures" className={styles.logo}>MCT2</Link>
-        <div className={styles.topbarRight}>
-          <div className={styles.cdrIndicator} aria-label={`CDR: ${cdrName || 'Local CDR'}${cdrReadOnly ? ' (read-only)' : ''}, status: ${cdrStatus}`}>
-            <span className={styles.cdrDot} data-status={cdrStatus} aria-hidden="true" />
-            <span>CDR: {cdrName || 'Local CDR'}{cdrReadOnly ? ' (read-only)' : ''}</span>
+    <SearchContext.Provider value={{ query, setQuery }}>
+      <div className={styles.screen}>
+        {/* Brand */}
+        <div className={styles.brand}>
+          <div className={styles.brandMark}>M</div>
+          <span className={styles.brandName}>MCT2</span>
+        </div>
+
+        {/* Topbar */}
+        <header className={styles.topbar}>
+          <span className={styles.crumb}>{pageTitle}</span>
+          <div className={styles.spacer} />
+          <div className={styles.topbarRight}>
+            <div className={styles.cdrChip} title={cdrName || 'Local CDR'}>
+              <span className={`${styles.cdrDot} ${cdrOk ? styles.cdrDotOk : styles.cdrDotErr}`} />
+              {cdrName || 'Local CDR'}
+            </div>
+            <div className={styles.searchWrap}>
+              <SearchIcon className={styles.searchIcon} />
+              <input
+                ref={searchRef}
+                className={styles.searchInput}
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder={searchPlaceholder}
+                aria-label="Search"
+              />
+              {query
+                ? <button className={styles.searchClear} onClick={() => setQuery('')} aria-label="Clear search"><XIcon /></button>
+                : <kbd className={styles.kbdInline}>⌘K</kbd>
+              }
+            </div>
+            <button
+              className={styles.themeBtn}
+              onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')}
+              aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+              title={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`}
+            >
+              {theme === 'light' ? <MoonIcon /> : <SunIcon />}
+            </button>
           </div>
+        </header>
+
+        {/* Sidebar nav */}
+        <nav className={styles.nav} aria-label="Main navigation">
+          <div className={styles.navGroupLabel}>Workspace</div>
+          {NAV_ITEMS.map(({ path, label, Icon, kbd }) => (
+            <NavLink
+              key={path}
+              to={path}
+              className={({ isActive }) => `${styles.navItem} ${isActive ? styles.navItemActive : ''}`}
+            >
+              <Icon className={styles.navIcon} />
+              <span className={styles.navLabel}>{label}</span>
+              <span className={styles.navKbd}>{kbd}</span>
+            </NavLink>
+          ))}
+
+          <div className={styles.navGroupLabel} style={{ marginTop: 16 }}>Data source</div>
+          <div className={styles.navItem} style={{ cursor: 'default' }}>
+            <span className={styles.navIcon}>
+              <span className={`${styles.smallDot} ${cdrOk ? styles.smallDotOk : styles.smallDotErr}`} />
+            </span>
+            <span className={styles.navLabel}>{cdrName || 'Local CDR'}</span>
+          </div>
+
           <NavLink
             to="/settings"
-            className={styles.settingsLink}
-            aria-label="Settings"
+            className={({ isActive }) => `${styles.navItem} ${styles.navItemSettings} ${isActive ? styles.navItemActive : ''}`}
           >
-            <GearIcon />
+            <SettingsIcon className={styles.navIcon} />
+            <span className={styles.navLabel}>Settings</span>
           </NavLink>
-        </div>
-      </header>
 
-      <div className={styles.body}>
-        {/* Sidebar overlay for tablet */}
-        <div
-          className={`${styles.overlay} ${sidebarOpen ? styles.overlayVisible : ''}`}
-          onClick={closeSidebar}
-          aria-hidden="true"
-        />
-
-        {/* Sidebar */}
-        <nav
-          className={`${styles.sidebar} ${sidebarOpen ? styles.sidebarOpen : ''}`}
-          role="navigation"
-          aria-label="Main navigation"
-        >
-          <ul className={styles.navList} role="list">
-            {NAV_ITEMS.map(({ path, label, icon: Icon }) => (
-              <li key={path} className={styles.navItem}>
-                <NavLink
-                  to={path}
-                  className={styles.navLink}
-                  aria-current={location.pathname.startsWith(path) ? 'page' : undefined}
-                >
-                  <span className={styles.navIcon}><Icon /></span>
-                  {label}
-                </NavLink>
-              </li>
-            ))}
-          </ul>
+          <div className={styles.statusFooter}>
+            <div className={styles.statusRow}>
+              <span className={`${styles.statusDot} ${cdrOk ? styles.statusDotOk : ''}`} />
+              {cdrOk ? 'All services healthy' : 'CDR unavailable'}
+            </div>
+            <div className={styles.statusVersion}>MCT2 · v0.0.3</div>
+          </div>
         </nav>
 
         {/* Main content */}
-        <main className={styles.main} role="main" aria-label="Main content">
+        <main className={styles.main} role="main">
           <Routes>
             <Route path="/" element={<Navigate to="/measures" replace />} />
             <Route path="/measures" element={<MeasuresPage />} />
@@ -178,24 +203,6 @@ export default function App() {
           </Routes>
         </main>
       </div>
-
-      {/* Bottom tabs (mobile) */}
-      <nav className={styles.bottomTabs} role="navigation" aria-label="Mobile navigation">
-        <ul className={styles.bottomTabList}>
-          {NAV_ITEMS.map(({ path, label, icon: Icon }) => (
-            <li key={path}>
-              <NavLink
-                to={path}
-                className={styles.bottomTabLink}
-                aria-current={location.pathname.startsWith(path) ? 'page' : undefined}
-              >
-                <Icon />
-                <span>{label}</span>
-              </NavLink>
-            </li>
-          ))}
-        </ul>
-      </nav>
-    </div>
+    </SearchContext.Provider>
   );
 }

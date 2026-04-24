@@ -2,6 +2,10 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import styles from './MeasuresPage.module.css';
 import { deleteMeasure, getMeasures, uploadMeasure } from '../api/client';
 import { useToast } from '../components/Toast';
+import KebabMenu from '../components/KebabMenu';
+import ConfirmDialog from '../components/ConfirmDialog';
+import { TrashIcon, PlusIcon, CheckIcon } from '../components/Icons';
+import { useSearch } from '../contexts/SearchContext';
 
 function getMeasureDisplayName(measure) {
   let name;
@@ -10,8 +14,6 @@ function getMeasureDisplayName(measure) {
   else if (measure.title) name = measure.title;
   else if (measure.name) name = measure.name;
   else name = measure.id || 'Unknown Measure';
-
-  // Remove trailing " FHIR"
   return name.replace(/\s+FHIR\s*$/, '');
 }
 
@@ -25,26 +27,20 @@ function getMeasureStatus(measure) {
 
 function StatusBadge({ status }) {
   const normalized = (status || '').toLowerCase();
-  let variant = 'default';
-  let label = status;
-
   if (normalized === 'active' || normalized === 'ready') {
-    variant = 'success';
-    label = 'Active';
-  } else if (normalized === 'draft') {
-    variant = 'warning';
-    label = 'Draft';
-  } else if (normalized === 'retired') {
-    variant = 'error';
-    label = 'Retired';
+    return (
+      <span className={`${styles.badge} ${styles.badgeOk}`}>
+        <CheckIcon className={styles.badgeIcon} /> Active
+      </span>
+    );
   }
-
-  return (
-    <span className={`${styles.badge} ${styles[variant]}`} aria-label={`Status: ${label}`}>
-      <span className={styles.badgeDot} aria-hidden="true" />
-      {label}
-    </span>
-  );
+  if (normalized === 'draft') {
+    return <span className={`${styles.badge} ${styles.badgeDraft}`}>Draft</span>;
+  }
+  if (normalized === 'retired') {
+    return <span className={`${styles.badge} ${styles.badgeRetired}`}>Retired</span>;
+  }
+  return <span className={styles.badge}>{status}</span>;
 }
 
 export default function MeasuresPage() {
@@ -52,9 +48,10 @@ export default function MeasuresPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
-  const [deletingMeasureId, setDeletingMeasureId] = useState(null);
+  const [confirm, setConfirm] = useState(null);
   const fileInputRef = useRef(null);
   const toast = useToast();
+  const { query } = useSearch();
 
   const loadMeasures = useCallback(async () => {
     setLoading(true);
@@ -69,94 +66,89 @@ export default function MeasuresPage() {
     }
   }, []);
 
-  useEffect(() => {
-    loadMeasures();
-  }, [loadMeasures]);
+  useEffect(() => { loadMeasures(); }, [loadMeasures]);
 
-  const handleUploadClick = () => {
-    fileInputRef.current?.click();
-  };
+  const handleUploadClick = () => fileInputRef.current?.click();
 
   const handleFileChange = async (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    // Reset file input so the same file can be re-selected
     e.target.value = '';
-
     setUploading(true);
     try {
       await uploadMeasure(file);
       toast.success('Measure loaded successfully');
       loadMeasures();
     } catch (err) {
-      const message = err.message || 'Failed to upload measure';
-      toast.error(`Upload failed: ${message}`);
+      toast.error(`Upload failed: ${err.message || 'Failed to upload measure'}`);
     } finally {
       setUploading(false);
     }
   };
 
-  const handleDeleteMeasure = async (measure) => {
-    if (!measure.id) return;
-    const measureName = getMeasureDisplayName(measure);
-    if (!window.confirm(`Delete measure "${measureName}"?`)) return;
+  const confirmDelete = (measure) => setConfirm(measure);
 
-    setDeletingMeasureId(measure.id);
+  const handleDeleteConfirmed = async () => {
+    if (!confirm?.id) return;
+    const measureName = getMeasureDisplayName(confirm);
+    const id = confirm.id;
+    setConfirm(null);
     try {
-      await deleteMeasure(measure.id);
+      await deleteMeasure(id);
       toast.success(`Deleted ${measureName}`);
       await loadMeasures();
     } catch (err) {
       toast.error(`Delete failed: ${err.message || 'Failed to delete measure'}`);
-    } finally {
-      setDeletingMeasureId(null);
     }
   };
 
+  const q = query.trim().toLowerCase();
+  const visible = measures.filter(m => {
+    if (!q) return true;
+    const name = getMeasureDisplayName(m).toLowerCase();
+    const id = (m.id || '').toLowerCase();
+    return name.includes(q) || id.includes(q);
+  });
+
   return (
     <div className={styles.page}>
-      <div className={styles.header}>
-        <h1 className={styles.title}>Measures</h1>
-        <button
-          className={styles.uploadBtn}
-          onClick={handleUploadClick}
-          disabled={uploading}
-          aria-busy={uploading}
-        >
-          {uploading ? 'Uploading...' : 'Upload Measure'}
-        </button>
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".json,application/json"
-          onChange={handleFileChange}
-          className="sr-only"
-          aria-label="Select measure bundle file"
-        />
+      <div className={styles.pageHeader}>
+        <div>
+          <div className={styles.eyebrow}>Library</div>
+          <h1 className={styles.title}>Measures</h1>
+          {!loading && !error && (
+            <div className={styles.sub}>{visible.length} measure{visible.length !== 1 ? 's' : ''}</div>
+          )}
+        </div>
+        <div className={styles.headerActions}>
+          <button className={styles.btnPrimary} onClick={handleUploadClick} disabled={uploading} aria-busy={uploading}>
+            <PlusIcon /> {uploading ? 'Uploading…' : 'Upload bundle'}
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json,application/json"
+            onChange={handleFileChange}
+            className="sr-only"
+            aria-label="Select measure bundle file"
+          />
+        </div>
       </div>
 
-      {/* Loading state: skeleton rows */}
       {loading && (
-        <div className={styles.tableWrapper} role="status" aria-label="Loading measures">
+        <div className={styles.card} role="status" aria-label="Loading measures">
           <table>
             <thead>
               <tr>
-                <th>Measure Name</th>
-                <th>Measure ID</th>
-                <th>Version</th>
-                <th>Status</th>
-                <th>Actions</th>
+                <th>ID</th><th>Measure</th><th>Version</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {[1, 2, 3].map(i => (
                 <tr key={i}>
-                  <td><div className={`skeleton ${styles.skeletonCell}`} style={{ width: '60%' }} /></td>
-                  <td><div className={`skeleton ${styles.skeletonCell}`} style={{ width: '50px' }} /></td>
-                  <td><div className={`skeleton ${styles.skeletonCell}`} style={{ width: '40px' }} /></td>
-                  <td><div className={`skeleton ${styles.skeletonCell}`} style={{ width: '60px' }} /></td>
-                  <td><div className={`skeleton ${styles.skeletonCell}`} style={{ width: '80px' }} /></td>
+                  {[90, 200, 60, 80, 100].map((w, j) => (
+                    <td key={j}><div className="skeleton" style={{ height: 14, width: w }} /></td>
+                  ))}
                 </tr>
               ))}
             </tbody>
@@ -164,7 +156,6 @@ export default function MeasuresPage() {
         </div>
       )}
 
-      {/* Error state */}
       {!loading && error && (
         <div className={styles.errorState} role="alert">
           <p className={styles.errorMessage}>Cannot reach measure engine</p>
@@ -173,44 +164,45 @@ export default function MeasuresPage() {
         </div>
       )}
 
-      {/* Data state */}
       {!loading && !error && (
-        <div className={styles.tableWrapper}>
+        <div className={styles.card}>
           <table aria-label="Loaded measures">
             <thead>
               <tr>
-                <th>Measure Name</th>
-                <th>Measure ID</th>
-                <th>Version</th>
-                <th>Status</th>
-                <th>Actions</th>
+                <th style={{ width: 120 }}>ID</th>
+                <th>Measure</th>
+                <th style={{ width: 90 }}>Version</th>
+                <th style={{ width: 100 }}>Status</th>
+                <th style={{ width: 100, textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
-              {measures.length === 0 ? (
+              {visible.length === 0 ? (
                 <tr>
                   <td colSpan={5} className={styles.emptyRow}>
-                    No measures loaded. Upload a measure bundle to get started.
+                    {q ? `No measures match "${q}".` : 'No measures loaded. Upload a measure bundle to get started.'}
                   </td>
                 </tr>
               ) : (
-                measures.map((measure, i) => (
-                  <tr key={measure.id || i}>
+                visible.map((measure, i) => (
+                  <tr key={measure.id || i} className={styles.row}>
+                    <td><span className={styles.mono}>{measure.id || '--'}</span></td>
                     <td className={styles.measureName}>{getMeasureDisplayName(measure)}</td>
-                    <td className={styles.measureId}>{measure.id || '--'}</td>
-                    <td className={styles.version}>{getMeasureVersion(measure)}</td>
+                    <td className={styles.mono} style={{ color: 'var(--text-muted)' }}>{getMeasureVersion(measure)}</td>
                     <td><StatusBadge status={getMeasureStatus(measure)} /></td>
                     <td>
                       <div className={styles.actionGroup}>
-                        <a href="/jobs" className={styles.actionLink}>Calculate</a>
-                        <button
-                          type="button"
-                          className={styles.deleteBtn}
-                          onClick={() => handleDeleteMeasure(measure)}
-                          disabled={deletingMeasureId === measure.id || !measure.id}
-                        >
-                          {deletingMeasureId === measure.id ? 'Deleting...' : 'Delete'}
-                        </button>
+                        <a href="/jobs" className={styles.calcBtn}>Calculate</a>
+                        <KebabMenu items={[
+                          { divider: true },
+                          {
+                            label: 'Delete permanently',
+                            icon: <TrashIcon />,
+                            tone: 'destructive',
+                            disabled: !measure.id,
+                            onClick: () => confirmDelete(measure),
+                          },
+                        ]} />
                       </div>
                     </td>
                   </tr>
@@ -221,13 +213,15 @@ export default function MeasuresPage() {
         </div>
       )}
 
-      <p className={styles.hint}>
-        Need measure bundles? Visit the{' '}
-        <a href="https://ecqi.healthit.gov/" target="_blank" rel="noopener noreferrer">
-          CMS eCQI Resource Center
-        </a>
-        .
-      </p>
+      <ConfirmDialog
+        open={!!confirm}
+        title={`Delete ${confirm?.id}?`}
+        body={<>This removes <strong>{confirm ? getMeasureDisplayName(confirm) : ''}</strong> from MCT2. Existing job results are preserved, but you won't be able to re-run without re-uploading the bundle.</>}
+        confirmLabel="Delete permanently"
+        tone="destructive"
+        onCancel={() => setConfirm(null)}
+        onConfirm={handleDeleteConfirmed}
+      />
     </div>
   );
 }

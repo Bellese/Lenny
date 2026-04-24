@@ -1,0 +1,87 @@
+.root {
+  position: relative;
+  display: inline-block;
+}
+
+.trigger {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  transition: background 100ms ease, color 100ms ease;
+}
+
+.trigger:hover {
+  background: var(--bg-sunken);
+  color: var(--text);
+}
+
+.popover {
+  position: fixed;
+  min-width: 200px;
+  padding: 4px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 30px -10px oklch(0 0 0 / 0.2), 0 0 0 1px var(--line);
+  z-index: 9999;
+  animation: fadeIn 0.1s ease;
+}
+
+.divider {
+  height: 1px;
+  background: var(--line-soft);
+  margin: 4px 0;
+}
+
+.item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 10px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: background 80ms ease;
+}
+
+.item:hover:not(:disabled) {
+  background: var(--bg-sunken);
+}
+
+.itemDestructive {
+  color: var(--err);
+}
+
+.itemDisabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.itemIcon {
+  width: 14px;
+  display: inline-flex;
+  color: inherit;
+  flex-shrink: 0;
+}
+
+.itemLabel {
+  flex: 1;
+}
+
+.itemHint {
+  font-size: 11px;
+  color: var(--text-dim);
+}
