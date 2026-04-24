@@ -49,8 +49,12 @@ jobs:
       - name: Run nightly source-of-truth integration suite
         run: >-
           ./scripts/run-integration-tests.sh
+          tests/integration/test_smart_load.py
           tests/integration/test_golden_measures.py
           tests/integration/test_connectathon_measures.py
+        # test_smart_load includes the bundle-loader tests (load_connectathon_bundles),
+        # which are skipped on the PR gate when HAPI_PREBAKED=1 to avoid re-uploading
+        # 12 CMS bundles on every PR.  Nightly runs vanilla HAPI so they execute in full.
 
   full-workflow:
     name: Full Workflow (clean nightly run)
