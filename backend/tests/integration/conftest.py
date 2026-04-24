@@ -226,6 +226,28 @@ def _load_seed_data(_require_infrastructure):
                     f"HAPI_PREBAKED=1 but {label} HAPI at {base_url} has no Patient resources. "
                     f"The pre-baked image may be corrupt or the wrong image was pulled."
                 )
+
+        # HAPI's /fhir/metadata responds before Hibernate Search finishes opening
+        # its Lucene index for writes.  Resources written too early (e.g. in
+        # test_upload_and_list_measure) won't appear in search results.  Trigger
+        # an explicit $reindex and wait for it to settle — the same stabilization
+        # the non-prebaked path gets from _trigger_reindex_and_wait after seeding.
+        probe_patient_id = None
+        probe_encounter_id = None
+        try:
+            enc_resp = _httpx.get(f"{TEST_CDR_URL}/Encounter?_count=1", timeout=15)
+            if enc_resp.status_code == 200:
+                entries = enc_resp.json().get("entry", [])
+                if entries:
+                    enc = entries[0]["resource"]
+                    probe_encounter_id = enc.get("id")
+                    probe_patient_id = enc.get("subject", {}).get("reference", "").removeprefix("Patient/")
+        except Exception:
+            pass
+
+        if probe_patient_id and probe_encounter_id:
+            for target in (TEST_CDR_URL, TEST_MEASURE_URL):
+                _trigger_reindex_and_wait(target, probe_patient_id, probe_encounter_id)
         return
 
     measure_bundle_path = SEED_DIR / "measure-bundle.json"
