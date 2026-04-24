@@ -93,7 +93,7 @@ export default function App() {
       if (!isInput && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
         if (e.key === 'm' || e.key === 'M') navigate('/measures');
         else if (e.key === 'j' || e.key === 'J') navigate('/jobs');
-        else if (e.key === 'r' || e.key === 'R') navigate('/results');
+        else if (e.key === 'e' || e.key === 'E') navigate('/results');
         else if (e.key === 'v' || e.key === 'V') navigate('/validation');
       }
     };
