@@ -15,6 +15,7 @@ from app.services.fhir_client import (
     push_resources,
     resolve_evaluated_resource,
     trigger_reindex_and_wait,
+    trigger_reindex_and_wait_for_patients,
     upload_measure_bundle,
     wait_for_valueset_expansion,
     wipe_patient_data,
@@ -1262,6 +1263,31 @@ def test_trigger_reindex_and_wait_posts_202_and_polls_success(monkeypatch, caplo
     assert client.get_calls == [
         "http://hapi/fhir/Patient?_count=1",
         "http://hapi/fhir/Encounter?patient=p1&_count=1",
+    ]
+    assert "HAPI reindex complete" in caplog.text
+
+
+def test_trigger_reindex_and_wait_for_patients_polls_until_all_patients_index(monkeypatch, caplog):
+    client = FakeSyncClient(
+        get_responses=[
+            FakeSyncResponse(200, {"entry": [{"resource": {"id": "e1"}}]}),
+            FakeSyncResponse(200, {"entry": []}),
+            FakeSyncResponse(200, {"entry": [{"resource": {"id": "e2"}}]}),
+        ],
+        post_responses=[FakeSyncResponse(202)],
+    )
+
+    monkeypatch.setattr("app.services.fhir_client.httpx.Client", lambda **kwargs: client)
+    monkeypatch.setattr("app.services.fhir_client.time.sleep", lambda seconds: None)
+
+    with caplog.at_level("INFO"):
+        trigger_reindex_and_wait_for_patients("http://hapi/fhir", ["Patient/p1", "p2"])
+
+    assert client.post_calls[0][0] == "http://hapi/fhir/$reindex"
+    assert client.get_calls == [
+        "http://hapi/fhir/Encounter?patient=p1&_count=1",
+        "http://hapi/fhir/Encounter?patient=p2&_count=1",
+        "http://hapi/fhir/Encounter?patient=p2&_count=1",
     ]
     assert "HAPI reindex complete" in caplog.text
 
