@@ -182,14 +182,26 @@ done
 printf '[+] Reconciling DB password...\n'
 LEONARD_DIR="$LEONARD_DIR" "$RECONCILE_SCRIPT"
 
-# ── step 7: build and bring up remaining services ────────────────────────────
+# ── step 7: pull pre-built images from registries ─────────────────────────────
+# Without an explicit pull, `up --build` uses any locally-cached image even when
+# `:latest` upstream has been republished. This bit us when the bake workflow
+# (which republishes ghcr.io/bellese/mct2-hapi-{cdr,measure}:latest) finished
+# AFTER the deploy workflow started — deploy used the stale cached image and
+# never picked up the new bake. `docker compose pull` here is best-effort
+# (--ignore-pull-failures lets us continue if a registry hiccups; the next
+# step's `--build` still uses the cached image as fallback).
+printf '[+] Pulling latest pre-built images...\n'
+"${COMPOSE[@]}" pull --ignore-pull-failures || true
+
+# ── step 8: build and bring up remaining services ────────────────────────────
 # --build ensures locally-built images (backend, frontend, seed) are rebuilt
 # from the current Dockerfile so the new entrypoint and code are picked up.
-# Services using pre-built images (hapi, postgres, caddy) are unaffected.
+# Services using pre-built images (hapi, postgres, caddy) come from the pull
+# above (or local cache if pull failed).
 printf '[+] Building and starting remaining services...\n'
 "${COMPOSE[@]}" up -d --build
 
-# ── step 8: health check ──────────────────────────────────────────────────────
+# ── step 9: health check ──────────────────────────────────────────────────────
 printf '[+] Waiting for API health check...\n'
 for i in $(seq 1 24); do
     if curl -fsS "$HEALTH_URL" >/dev/null 2>&1; then
