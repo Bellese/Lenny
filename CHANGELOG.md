@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.6.8] - 2026-04-25
+
+### Added
+- **Year picker for reporting period** — the job creation form now defaults to the current calendar year (Jan 1 – Dec 31) with a dropdown showing the last 5 years, so you can say "2026" instead of typing both dates. A "Enter custom dates" toggle is available for non-calendar-year ranges; clicking "← Back to year select" restores the year dropdown. Closes #79.
+
+### Changed
+- **Docker frontend build uses `npm install --omit=dev`** — replaced `npm ci` in the frontend Dockerfile to allow devDependencies in `package.json` without requiring them in the lock file. Production builds are unaffected; only test libraries are excluded.
+
 ## [0.0.7.7] - 2026-04-24
 
 ### Fixed
