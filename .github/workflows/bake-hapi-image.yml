@@ -107,8 +107,13 @@ jobs:
           docker run -d --name hapi-measure -p 8181:8080 --user root mct2-hapi-measure-config
 
       - name: Seed Measure container
+        # SEED_TYPE=igs bakes ONLY the IGs (qicore/uscore/cql) into the image —
+        # no measure-bundle.json, no patient-bundle.json. Per-measure isolation
+        # (PR #167) requires that reset+reload gives an empty HAPI with just
+        # IGs; baking in CMS122 + seed patients would defeat isolation because
+        # they'd persist across container recreate and contaminate every measure.
         run: |
-          HAPI_PORT=8181 SEED_TYPE=measure bash docker/seed-hapi.sh
+          HAPI_PORT=8181 SEED_TYPE=igs bash docker/seed-hapi.sh
 
       - name: Dump Measure container state on failure
         if: failure()
