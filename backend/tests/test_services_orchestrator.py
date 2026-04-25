@@ -663,15 +663,20 @@ async def test_run_job_errors_when_reload_returns_skipped(test_session, session_
 
     job_id = await _setup_job(test_session)
 
+    async def mock_reload(*args, **kwargs):
+        return {"skipped": True, "reason": "No bundle found"}
+
     with (
         _make_session_factory_patch(session_factory),
-        patch("app.services.orchestrator.reload_support_resources_for_measure", new_callable=AsyncMock) as mock_reload,
+        patch(
+            "app.services.orchestrator.reload_support_resources_for_measure",
+            new_callable=AsyncMock,
+            side_effect=mock_reload,
+        ),
     ):
-        # Set reload to return skipped
-        mock_reload.return_value = {"skipped": True, "reason": "No bundle found"}
         await run_job(job_id)
 
     async with session_factory() as session:
         job = await session.get(Job, job_id)
         assert job.status == JobStatus.failed
-        assert "Reload skipped" in job.error_message
+        assert "Reload skipped: No bundle found" in job.error_message

@@ -1047,6 +1047,7 @@ class TestRunValidation:
 
     async def test_reindex_failure_logs_warning_and_uses_sleep_fallback(self, test_session, monkeypatch, caplog):
         caplog.set_level("WARNING", logger="app.services.validation")
+        monkeypatch.setattr("app.services.validation.settings.RELOAD_SUPPORT_PER_MEASURE", False)
 
         _, mock_to_thread, mock_sleep = await self._run_one_patient_validation(
             test_session,
@@ -1055,12 +1056,10 @@ class TestRunValidation:
             to_thread_side_effect=RuntimeError("unreachable"),
         )
 
-        # Phase 1 failure + Phase 2 per-measure failure = 2 to_thread calls
-        assert mock_to_thread.await_count == 2
-        # Only Phase 1 falls back to sleep
+        # Legacy path: Phase 1 reindex fails and falls back to sleep
+        mock_to_thread.assert_awaited_once()
         mock_sleep.assert_awaited_once_with(7)
         assert "HAPI reindex failed during validation" in caplog.text
-        assert "Per-measure HAPI reindex failed — will continue without waiting" in caplog.text
 
     async def test_missing_measure_creates_error_results_and_resolved_measure_still_runs(self, test_session):
         run = ValidationRun(status=ValidationStatus.queued)

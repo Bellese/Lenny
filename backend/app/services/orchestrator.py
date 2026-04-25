@@ -134,9 +134,34 @@ async def run_job(job_id: int) -> None:
         async with _measure_engine_lock:
             logger.info(
                 "Reloading support resources for job measure",
-                extra={"job_id": job_id, "measure_id": job.measure_id if job else None},
+                extra={"job_id": job_id, "measure_id": job.measure_id},
             )
-            await reload_support_resources_for_measure(job.measure_id if job else "")
+            try:
+                reload_result = await reload_support_resources_for_measure(job.measure_id)
+            except Exception as exc:
+                logger.warning(
+                    "Reload failed, marking job as failed",
+                    extra={"job_id": job_id, "error": sanitize_error(exc)},
+                )
+                async with async_session() as session:
+                    job_to_fail = await session.get(Job, job_id)
+                    if job_to_fail:
+                        job_to_fail.status = JobStatus.failed
+                        job_to_fail.error_message = f"Failed to reload support resources: {str(exc)[:200]}"
+                        await session.commit()
+                return
+            if reload_result.get("skipped"):
+                logger.warning(
+                    "Reload skipped, marking job as failed",
+                    extra={"job_id": job_id, "reason": reload_result.get("reason")},
+                )
+                async with async_session() as session:
+                    job_to_fail = await session.get(Job, job_id)
+                    if job_to_fail:
+                        job_to_fail.status = JobStatus.failed
+                        job_to_fail.error_message = f"Reload skipped: {reload_result.get('reason', 'unknown')}"
+                        await session.commit()
+                return
             await _run_job_inner(job_id)
     else:
         await _run_job_inner(job_id)
@@ -175,11 +200,10 @@ async def _run_job_inner(job_id: int) -> None:
                 return
             async with async_session() as session:
                 job = await session.get(Job, job_id)
-                if job:
-                    job.status = JobStatus.complete
-                    job.total_patients = 0
-                    job.completed_at = datetime.now(timezone.utc)
-                    await session.commit()
+                job.status = JobStatus.complete
+                job.total_patients = 0
+                job.completed_at = datetime.now(timezone.utc)
+                await session.commit()
             logger.info("No patients found, job complete", extra={"job_id": job_id})
             return
 
@@ -233,8 +257,6 @@ async def _run_job_inner(job_id: int) -> None:
             return
         async with async_session() as session:
             job = await session.get(Job, job_id)
-            if not job:
-                return
             if job.status == JobStatus.cancelled:
                 return
             if job.total_patients and job.processed_patients == 0 and job.failed_patients > 0:
@@ -253,11 +275,10 @@ async def _run_job_inner(job_id: int) -> None:
             return
         async with async_session() as session:
             job = await session.get(Job, job_id)
-            if job:
-                job.status = JobStatus.failed
-                job.error_message = str(exc)[:2000]
-                job.completed_at = datetime.now(timezone.utc)
-                await session.commit()
+            job.status = JobStatus.failed
+            job.error_message = str(exc)[:2000]
+            job.completed_at = datetime.now(timezone.utc)
+            await session.commit()
 
 
 async def _get_cdr_auth_headers(job_id: int) -> dict[str, str]:
@@ -269,7 +290,7 @@ async def _get_cdr_auth_headers(job_id: int) -> dict[str, str]:
     """
     async with async_session() as session:
         job = await session.get(Job, job_id)
-        if job and job.cdr_auth_type:
+        if job.cdr_auth_type:
             return await _build_auth_headers(job.cdr_auth_type, job.cdr_auth_credentials)
     return {}
 
@@ -278,9 +299,7 @@ async def _get_cdr_url(job_id: int) -> str:
     """Resolve the CDR URL for a job."""
     async with async_session() as session:
         job = await session.get(Job, job_id)
-        if job:
-            return job.cdr_url
-    return settings.DEFAULT_CDR_URL
+        return job.cdr_url or settings.DEFAULT_CDR_URL
 
 
 async def _process_single_batch(
