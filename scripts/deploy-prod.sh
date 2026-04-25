@@ -39,11 +39,7 @@ export LEONARD_DIR
 
 COMPOSE_BASE="${LEONARD_DIR}/docker-compose.yml"
 COMPOSE_PROD="${LEONARD_DIR}/docker-compose.prod.yml"
-# Pre-baked HAPI images: IGs + seed data baked into image layer (no /data/hapi
-# volume needed). Required by per-measure reset architecture — recreating the
-# container without baked data would re-fetch IGs from the internet (60-120s).
-COMPOSE_PREBAKED="${LEONARD_DIR}/docker-compose.prebaked.yml"
-COMPOSE=( docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_PROD" -f "$COMPOSE_PREBAKED" )
+COMPOSE=( docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_PROD" )
 
 readonly ENV_DIR="/run/leonard"
 readonly ENV_FILE="${ENV_DIR}/env"

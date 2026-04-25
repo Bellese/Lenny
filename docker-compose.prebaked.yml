@@ -1,29 +1,12 @@
-# docker-compose.prebaked.yml — override to use pre-baked HAPI images.
+# docker-compose.prebaked.yml — override when using pre-baked HAPI images.
 #
-# Pre-baked images (built by .github/workflows/bake-hapi-image.yml) ship with:
-#   - QI-Core / US-Core / CQL implementation guides already loaded
-#   - Seed Measure/Library/ValueSet data baked into the H2 database
-#   - Lucene indexes pre-warmed
-#
-# Without these, cold HAPI startup fetches IG packages from the internet on
-# first boot (60-120s startup, network-dependent). Pre-baked → ~5-10s.
-#
-# Volume mounts at /data/hapi would shadow the baked H2/Lucene data, so this
-# overlay also strips the named volume.
-#
-# Usage (local dev):
-#   docker compose -f docker-compose.yml -f docker-compose.prebaked.yml up -d
-#
-# Usage (prod): wired into scripts/deploy-prod.sh.
-#
-# Usage (integration tests):
+# Volume mounts at /data/hapi would shadow the baked H2/Lucene data, so
+# this overlay removes them.  Use with:
 #   docker compose -f docker-compose.test.yml -f docker-compose.prebaked.yml up -d
 
 services:
   hapi-fhir-cdr:
-    image: ghcr.io/bellese/mct2-hapi-cdr:latest
     volumes: []
 
   hapi-fhir-measure:
-    image: ghcr.io/bellese/mct2-hapi-measure:latest
     volumes: []
