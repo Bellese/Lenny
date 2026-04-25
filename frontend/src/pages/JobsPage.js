@@ -8,6 +8,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import PulseDot from '../components/PulseDot';
 import { TrashIcon, ViewIcon, SparkIcon, PlusIcon, XIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
+import PeriodPicker from '../components/PeriodPicker';
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '--';
@@ -115,6 +116,12 @@ export default function JobsPage() {
     }
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [jobs, loadJobs]);
+
+  useEffect(() => {
+    if (!showModal) return;
+    const y = new Date().getFullYear();
+    setFormData(p => ({ ...p, period_start: `${y}-01-01`, period_end: `${y}-12-31` }));
+  }, [showModal]);
 
   const handleCreateJob = async (e) => {
     e.preventDefault();
@@ -405,18 +412,11 @@ export default function JobsPage() {
                   {groups.map(g => <option key={g.id} value={g.id}>{g.name || g.id} ({g.member_count} patients)</option>)}
                 </select>
               </div>
-              <div className={styles.fieldRow}>
-                <div className={styles.field}>
-                  <label className={styles.label} htmlFor="period-start">Period start</label>
-                  <input id="period-start" type="date" className={styles.input} value={formData.period_start}
-                    onChange={e => setFormData(p => ({ ...p, period_start: e.target.value }))} />
-                </div>
-                <div className={styles.field}>
-                  <label className={styles.label} htmlFor="period-end">Period end</label>
-                  <input id="period-end" type="date" className={styles.input} value={formData.period_end}
-                    onChange={e => setFormData(p => ({ ...p, period_end: e.target.value }))} />
-                </div>
-              </div>
+              <PeriodPicker
+                periodStart={formData.period_start}
+                periodEnd={formData.period_end}
+                onChange={(start, end) => setFormData(p => ({ ...p, period_start: start, period_end: end }))}
+              />
             </form>
             <div className={styles.sheetFooter}>
               <button type="button" className={styles.btnGhost} onClick={() => setShowModal(false)}>Cancel</button>
