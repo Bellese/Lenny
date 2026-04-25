@@ -249,6 +249,53 @@ async def test_push_resources_empty():
     mock_ctx.post.assert_not_called()
 
 
+async def test_push_resources_sorts_patients_first():
+    """push_resources MUST place Patient entries before any resource that
+    references them. HAPI's bundle import skips writing reference index
+    entries for forward-references, so an Encounter appearing in the bundle
+    before its referenced Patient persists the Encounter but never indexes
+    `Encounter.subject → Patient/{id}`. `Encounter?patient=` then returns 0
+    forever. Verified empirically 2026-04-25 (issue #177): same bundle,
+    original order = 20/33 indexed; Patients-first = 33/33 at t=0.
+
+    This test pins the sort behavior so we don't regress.
+    """
+    # Caller passes resources in a "bad" order: Encounter before Patient.
+    resources = [
+        {"resourceType": "Encounter", "id": "e1", "subject": {"reference": "Patient/p1"}},
+        {"resourceType": "Condition", "id": "c1", "subject": {"reference": "Patient/p1"}},
+        {"resourceType": "Patient", "id": "p1"},
+        {"resourceType": "Encounter", "id": "e2", "subject": {"reference": "Patient/p2"}},
+        {"resourceType": "Patient", "id": "p2"},
+    ]
+    mock_response = _make_response(200, {"resourceType": "Bundle"})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.post = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await push_resources(resources)
+
+    posted_bundle = mock_ctx.post.call_args.kwargs.get("json") or mock_ctx.post.call_args[1].get("json")
+    types_in_order = [e["resource"]["resourceType"] for e in posted_bundle["entry"]]
+
+    # All Patients come first.
+    first_non_patient_idx = next(i for i, t in enumerate(types_in_order) if t != "Patient")
+    assert all(t == "Patient" for t in types_in_order[:first_non_patient_idx]), (
+        f"Patients must lead; got order: {types_in_order}"
+    )
+    assert "Patient" not in types_in_order[first_non_patient_idx:], (
+        f"No Patient may appear after a non-Patient; got order: {types_in_order}"
+    )
+    # Stable order is preserved within each group.
+    non_patient_types = [t for t in types_in_order if t != "Patient"]
+    assert non_patient_types == ["Encounter", "Condition", "Encounter"], (
+        f"Non-Patient relative order should be preserved; got: {non_patient_types}"
+    )
+
+
 async def test_push_resources_with_auth_headers():
     """push_resources forwards auth_headers alongside Content-Type."""
     resources = [{"resourceType": "Patient", "id": "p1"}]

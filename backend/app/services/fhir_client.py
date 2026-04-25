@@ -547,8 +547,21 @@ async def push_resources(
     Uses batch (not transaction) so HAPI does not validate cross-references
     between entries — avoids HAPI-2001 when clinical subjects are absent from
     the measure engine.
+
+    Patient resources are placed first in the batch. HAPI's bundle import
+    skips writing reference index entries for forward-references (e.g. an
+    Encounter whose `subject` points at a Patient that hasn't been written
+    yet in the same bundle). The Encounter is durably persisted but
+    `Encounter?patient=Patient/{id}` returns 0 forever afterwards. Sorting
+    Patients-first makes every Patient reference resolvable at index time.
+    Verified empirically 2026-04-25: same bundle, original order = 20/33
+    indexed; Patients-first = 33/33 at t=0. See issue #177.
     """
     base = target_url or settings.MEASURE_ENGINE_URL
+    valid = [r for r in resources if "resourceType" in r and "id" in r]
+    ordered = [r for r in valid if r.get("resourceType") == "Patient"] + [
+        r for r in valid if r.get("resourceType") != "Patient"
+    ]
     bundle = {
         "resourceType": "Bundle",
         "type": "batch",
@@ -560,8 +573,7 @@ async def push_resources(
                     "url": f"{r['resourceType']}/{r['id']}",
                 },
             }
-            for r in resources
-            if "resourceType" in r and "id" in r
+            for r in ordered
         ],
     }
     if not bundle["entry"]:
