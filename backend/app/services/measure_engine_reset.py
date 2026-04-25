@@ -122,48 +122,33 @@ def _reset_measure_engine_sync(timeout_s: int) -> ResetTimings:
     remove_ms = (time.monotonic() - t_remove_start) * 1000.0
 
     t_create_start = time.monotonic()
-
-    # Set network + aliases atomically at create time via the low-level API.
-    # Earlier attempt used `network_mode="none"` + post-create `network.connect()`,
-    # but Docker rejects connecting an additional network to a container in
-    # "none" mode (400: "container cannot be connected to multiple networks
-    # with one of the networks in private (none) mode"). The networking_config
-    # path is the canonical pattern for create-with-aliases.
-    networking_config = None
-    if primary_network:
-        endpoint_config = client.api.create_endpoint_config(aliases=primary_aliases or [])
-        networking_config = client.api.create_networking_config({primary_network: endpoint_config})
-
-    host_config_kwargs: dict = {}
-    if mem_limit:
-        host_config_kwargs["mem_limit"] = mem_limit
-    if nano_cpus:
-        host_config_kwargs["nano_cpus"] = nano_cpus
-    if restart_policy:
-        host_config_kwargs["restart_policy"] = restart_policy
-    host_config = client.api.create_host_config(**host_config_kwargs) if host_config_kwargs else None
-
-    create_kwargs = dict(
-        image=image,
-        name=name or None,
-        environment=env,
-        labels=labels,
-        user=user,
-    )
-    if host_config is not None:
-        create_kwargs["host_config"] = host_config
-    if networking_config is not None:
-        create_kwargs["networking_config"] = networking_config
-
     try:
-        resp = client.api.create_container(**create_kwargs)
-        new_container = client.containers.get(resp["Id"])
+        # Use create+connect+start (not run) so we can pass network aliases,
+        # which Docker only accepts at network-attach time, not at run().
+        new_container = client.containers.create(
+            image=image,
+            name=name or None,
+            environment=env,
+            labels=labels,
+            user=user,
+            mem_limit=mem_limit if mem_limit else None,
+            nano_cpus=nano_cpus if nano_cpus else None,
+            restart_policy=restart_policy or None,
+            # Don't auto-attach to the default bridge — we'll connect to the
+            # captured network with aliases below.
+            network_mode="none" if primary_network else None,
+            detach=True,
+        )
     except docker.errors.APIError as exc:
         raise MeasureEngineResetError(f"Failed to recreate measure-engine container: {exc}") from exc
 
-    # Start happens AFTER create. If start fails, the just-created container
-    # holds the original name and would 409 the next reset; force-remove first.
+    # Connect + start happen AFTER create. If either fails, the just-created
+    # container holds the original name — leaving it stranded would 409 the
+    # next reset. Force-remove on failure before re-raising.
     try:
+        if primary_network:
+            net = client.networks.get(primary_network)
+            net.connect(new_container, aliases=primary_aliases or None)
         new_container.start()
     except docker.errors.APIError as exc:
         try:
