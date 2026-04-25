@@ -4,13 +4,21 @@ These tests exercise the full API contract: create jobs, run the orchestrator
 pipeline, and verify results are stored and retrievable.
 """
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
+from app.services.measure_engine_reset import BundleLoadTimings, ResetTimings
 from app.services.orchestrator import run_job
 from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL
+
+# Per-measure HAPI reset is unit-tested in test_services_measure_engine_reset.py.
+# Integration tests reach the host docker socket, so leaving reset un-mocked here
+# would actually destroy the test compose's hapi-fhir-measure container and wipe
+# the session-scoped seed bundle that subsequent tests depend on.
+_FAKE_RESET = ResetTimings(container_found=True, remove_ms=0.0, create_ms=0.0, health_ms=0.0, total_ms=0.0)
+_FAKE_LOAD = BundleLoadTimings(bundle_load_ms=0.0, reindex_ms=0.0)
 
 pytestmark = pytest.mark.integration
 
@@ -73,6 +81,12 @@ async def test_create_and_run_job(integration_client, db_session, integration_se
         patch("app.services.orchestrator.settings.MAX_RETRIES", 1),
         patch("app.services.orchestrator.settings.BATCH_SIZE", 100),
         patch("app.services.orchestrator.async_session", integration_session_factory),
+        patch("app.services.orchestrator.reset_measure_engine", new_callable=AsyncMock, return_value=_FAKE_RESET),
+        patch(
+            "app.services.orchestrator.load_measure_support_to_engine",
+            new_callable=AsyncMock,
+            return_value=_FAKE_LOAD,
+        ),
     ):
         await run_job(job_id)
 
@@ -127,6 +141,12 @@ async def test_results_aggregate_populations(integration_client, db_session, int
         patch("app.services.orchestrator.settings.MAX_RETRIES", 1),
         patch("app.services.orchestrator.settings.BATCH_SIZE", 100),
         patch("app.services.orchestrator.async_session", integration_session_factory),
+        patch("app.services.orchestrator.reset_measure_engine", new_callable=AsyncMock, return_value=_FAKE_RESET),
+        patch(
+            "app.services.orchestrator.load_measure_support_to_engine",
+            new_callable=AsyncMock,
+            return_value=_FAKE_LOAD,
+        ),
     ):
         await run_job(job_id)
 

@@ -140,6 +140,32 @@ def test_reset_recreate_failure_wraps_api_error():
             _reset_measure_engine_sync(timeout_s=10)
 
 
+def test_reset_connect_failure_removes_stranded_container():
+    """If create() succeeds but network.connect() fails, the just-created
+    container would otherwise hold the original name and 409 the next reset.
+    Force-remove + re-raise is required to keep reset retries idempotent."""
+    container = _fake_container()
+    fake_client, new_container, network = _fake_client_with_network(container)
+    network.connect.side_effect = docker.errors.APIError("network busy")
+
+    with patch.object(measure_engine_reset.docker, "from_env", return_value=fake_client):
+        with pytest.raises(MeasureEngineResetError, match="Failed to recreate"):
+            _reset_measure_engine_sync(timeout_s=10)
+    new_container.remove.assert_called_once_with(force=True)
+
+
+def test_reset_start_failure_removes_stranded_container():
+    """Same contract as connect failure — start() failure must clean up."""
+    container = _fake_container()
+    fake_client, new_container, network = _fake_client_with_network(container)
+    new_container.start.side_effect = docker.errors.APIError("OOM at start")
+
+    with patch.object(measure_engine_reset.docker, "from_env", return_value=fake_client):
+        with pytest.raises(MeasureEngineResetError, match="Failed to recreate"):
+            _reset_measure_engine_sync(timeout_s=10)
+    new_container.remove.assert_called_once_with(force=True)
+
+
 def test_reset_health_timeout_raises():
     container = _fake_container()
     fake_client, _, _ = _fake_client_with_network(container)
@@ -189,6 +215,17 @@ async def test_load_measure_support_missing_bundle_raises(tmp_path, monkeypatch)
     monkeypatch.setattr(measure_engine_reset, "SEED_BUNDLES_DIR", tmp_path)
     with pytest.raises(FileNotFoundError, match="No connectathon bundle found"):
         await load_measure_support_to_engine("CMS124FHIRDoesNotExist")
+
+
+@pytest.mark.asyncio
+async def test_load_measure_support_rejects_path_traversal(tmp_path, monkeypatch):
+    """Defense-in-depth: even if route-level validation is bypassed,
+    measure_id values that resolve outside SEED_BUNDLES_DIR must be rejected
+    before any disk read. The route validator is the primary gate; this is the
+    second wall."""
+    monkeypatch.setattr(measure_engine_reset, "SEED_BUNDLES_DIR", tmp_path)
+    with pytest.raises(ValueError, match="resolves outside seed bundles directory"):
+        await load_measure_support_to_engine("../../../etc/passwd")
 
 
 @pytest.mark.asyncio

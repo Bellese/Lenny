@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import pathlib
 import time
 from dataclasses import dataclass
@@ -36,7 +37,8 @@ SERVICE_LABEL = "com.docker.compose.service"
 HAPI_MEASURE_SERVICE = "hapi-fhir-measure"
 DEFAULT_RESET_TIMEOUT_S = 300
 HEALTH_POLL_INTERVAL_S = 1.0
-SEED_BUNDLES_DIR = pathlib.Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles"
+_DEFAULT_SEED_DIR = pathlib.Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles"
+SEED_BUNDLES_DIR = pathlib.Path(os.getenv("CONNECTATHON_BUNDLES_DIR", str(_DEFAULT_SEED_DIR)))
 
 
 @dataclass
@@ -137,11 +139,22 @@ def _reset_measure_engine_sync(timeout_s: int) -> ResetTimings:
             network_mode="none" if primary_network else None,
             detach=True,
         )
+    except docker.errors.APIError as exc:
+        raise MeasureEngineResetError(f"Failed to recreate measure-engine container: {exc}") from exc
+
+    # Connect + start happen AFTER create. If either fails, the just-created
+    # container holds the original name — leaving it stranded would 409 the
+    # next reset. Force-remove on failure before re-raising.
+    try:
         if primary_network:
             net = client.networks.get(primary_network)
             net.connect(new_container, aliases=primary_aliases or None)
         new_container.start()
     except docker.errors.APIError as exc:
+        try:
+            new_container.remove(force=True)
+        except docker.errors.APIError:
+            logger.warning("Failed to clean up stranded container after recreate failure", exc_info=True)
         raise MeasureEngineResetError(f"Failed to recreate measure-engine container: {exc}") from exc
     create_ms = (time.monotonic() - t_create_start) * 1000.0
 
@@ -213,11 +226,16 @@ async def load_measure_support_to_engine(measure_id: str) -> BundleLoadTimings:
 
     Raises FileNotFoundError if the bundle file does not exist.
     """
-    bundle_path = SEED_BUNDLES_DIR / f"{measure_id}-bundle.json"
+    # Defense-in-depth path containment: route validators reject `/`, `..`, etc.,
+    # but resolve and check parentage before reading from disk anyway.
+    seed_root = SEED_BUNDLES_DIR.resolve()
+    bundle_path = (SEED_BUNDLES_DIR / f"{measure_id}-bundle.json").resolve()
+    if seed_root not in bundle_path.parents:
+        raise ValueError(f"measure_id resolves outside seed bundles directory: {measure_id!r}")
     if not bundle_path.exists():
         raise FileNotFoundError(
-            f"No connectathon bundle found for measure_id={measure_id} at {bundle_path}. "
-            "Phase 1 only supports measures shipped in seed/connectathon-bundles/."
+            f"No connectathon bundle found for measure_id={measure_id!r}. "
+            "This deployment only loads measures shipped in seed/connectathon-bundles/."
         )
 
     t_load_start = time.monotonic()

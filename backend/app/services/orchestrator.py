@@ -266,7 +266,7 @@ async def run_job(job_id: int) -> None:
             job = await session.get(Job, job_id)
             if job:
                 job.status = JobStatus.failed
-                job.error_message = str(exc)[:2000]
+                job.error_message = sanitize_error(exc)[:2000]
                 job.completed_at = datetime.now(timezone.utc)
                 await session.commit()
 

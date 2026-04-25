@@ -246,6 +246,36 @@ async def test_run_job_reset_failure(test_session, session_factory):
         assert "Measure engine reset failed" in job.error_message
 
 
+async def test_run_job_bundle_load_failure(test_session, session_factory):
+    """run_job: load_measure_support_to_engine failure (e.g. missing bundle) fails the job
+    and routes the error message through sanitize_error so resolved filesystem paths and
+    internal hostnames don't leak via GET /jobs/{id}."""
+    job_id = await _setup_job(test_session)
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch(
+            "app.services.orchestrator.reset_measure_engine",
+            new_callable=AsyncMock,
+            return_value=_fake_reset_timings(),
+        ),
+        patch(
+            "app.services.orchestrator.load_measure_support_to_engine",
+            new_callable=AsyncMock,
+            side_effect=FileNotFoundError("No connectathon bundle found for measure_id='measure-1'"),
+        ),
+    ):
+        await run_job(job_id)
+
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        assert job.status == JobStatus.failed
+        assert job.error_message is not None
+        # Whatever message survives must NOT contain raw internal hostnames.
+        assert "hapi-fhir-measure" not in job.error_message
+        assert "8080" not in job.error_message
+
+
 async def test_run_job_cdr_unreachable(test_session, session_factory):
     """run_job: CDR unreachable when gathering patients fails the job."""
     job_id = await _setup_job(test_session)
