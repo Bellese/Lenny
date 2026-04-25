@@ -120,6 +120,29 @@ grep -E '^POSTGRES_PASSWORD=' "$ENV_FILE" \
     | cut -d= -f2- \
     | install -o root -g root -m 0600 /dev/stdin "$SECRET_FILE"
 
+# ── docker login to GHCR (if token was staged by the deploy workflow) ─────────
+# The deploy workflow writes GITHUB_TOKEN to /leonard/prod/GHCR_TOKEN as a
+# SecureString just before invoking this script and deletes it after. Manual
+# runs without that staging step skip login and will fail loudly at compose
+# pull time if the prebaked overlay references private GHCR images.
+if grep -qE '^GHCR_TOKEN=' "$ENV_FILE"; then
+    printf '[+] Logging in to GHCR for pre-baked HAPI image pulls...\n'
+    GHCR_TOKEN_VALUE=$(grep -E '^GHCR_TOKEN=' "$ENV_FILE" | cut -d= -f2- | tr -d '\r\n')
+    # Username can be any non-empty string when the password is a GitHub token;
+    # GHCR ignores it. Use a label that's recognizable in `docker logout` output.
+    if ! printf '%s' "$GHCR_TOKEN_VALUE" \
+        | docker login ghcr.io --username leonard-deploy --password-stdin >/dev/null 2>&1; then
+        unset GHCR_TOKEN_VALUE
+        die 1 "docker login ghcr.io failed — check workflow packages:read scope"
+    fi
+    unset GHCR_TOKEN_VALUE
+    printf '[+] GHCR login OK\n'
+else
+    printf '[!] GHCR_TOKEN not in %s — skipping ghcr.io login.\n' "$ENV_FILE"
+    printf '    Manual deploys cannot pull the private pre-baked HAPI images.\n'
+    printf '    Trigger via the deploy workflow or omit docker-compose.prebaked.yml.\n'
+fi
+
 # ── shared preflight done; branch on mode ─────────────────────────────────────
 if [[ "$POST_DB_RESTART" -eq 1 ]]; then
     # ── --post-db-restart: reconcile only, no compose operations ──────────────
