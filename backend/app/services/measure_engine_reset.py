@@ -16,7 +16,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import pathlib
 import time
 from dataclasses import dataclass
@@ -37,8 +36,11 @@ SERVICE_LABEL = "com.docker.compose.service"
 HAPI_MEASURE_SERVICE = "hapi-fhir-measure"
 DEFAULT_RESET_TIMEOUT_S = 300
 HEALTH_POLL_INTERVAL_S = 1.0
-_DEFAULT_SEED_DIR = pathlib.Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles"
-SEED_BUNDLES_DIR = pathlib.Path(os.getenv("CONNECTATHON_BUNDLES_DIR", str(_DEFAULT_SEED_DIR)))
+# Resolves to /seed/connectathon-bundles in the backend container (bind-mounted
+# from ./seed/connectathon-bundles on the host). NOT CONNECTATHON_BUNDLES_DIR —
+# that env var is the operator-facing toggle to skip startup bundle replay in
+# bundle_loader.py and points at a non-existent path in prod.
+SEED_BUNDLES_DIR = pathlib.Path(__file__).resolve().parents[3] / "seed" / "connectathon-bundles"
 
 
 @dataclass
