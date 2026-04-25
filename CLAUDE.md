@@ -25,6 +25,19 @@ See `docs/testing.md` for the full testing strategy.
 
 5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`.
 
+The backend resets the `hapi-fhir-measure` container between measure evaluations to defeat cross-bundle terminology / CodeSystem / library-cache contamination (see `backend/app/services/measure_engine_reset.py`). This requires `/var/run/docker.sock` mounted into the backend container — already wired in `docker-compose.yml` and `docker-compose.prod.yml`.
+
+## Pre-baked HAPI images
+
+`docker-compose.prebaked.yml` overrides the HAPI services with pre-baked images from GHCR (`ghcr.io/bellese/mct2-hapi-{cdr,measure}:latest`) that ship with QI-Core/US-Core/CQL IGs and seed data already loaded. Required by per-measure reset — recreating a non-prebaked container would re-fetch IGs from the internet on cold start (60-120s).
+
+```bash
+# Local dev with prebaked images (recommended for measure-engine work)
+docker compose -f docker-compose.yml -f docker-compose.prebaked.yml up -d
+```
+
+Prod (`scripts/deploy-prod.sh`) and integration tests already use prebaked. The bake workflow runs weekly and on `seed/**` changes (`.github/workflows/bake-hapi-image.yml`).
+
 ## Code Conventions
 
 - **Commits:** conventional commits (`feat:`, `fix:`, `chore:`, `docs:`, `test:`)

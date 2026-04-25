@@ -6,6 +6,7 @@ evaluates the measure, and stores results.
 
 import asyncio
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -20,7 +21,10 @@ from app.services.fhir_client import (
     get_group_members,
     push_resources,
     trigger_reindex_and_wait,
-    wipe_patient_data,
+)
+from app.services.measure_engine_reset import (
+    load_measure_support_to_engine,
+    reset_measure_engine,
 )
 from app.services.validation import sanitize_error
 
@@ -124,9 +128,24 @@ async def run_job(job_id: int) -> None:
         await session.commit()
 
     try:
-        # Step 1: Wipe patient data from measure engine (cleanup from prior job)
-        logger.info("Wiping prior patient data from measure engine", extra={"job_id": job_id})
-        await wipe_patient_data(strict=False)
+        # Step 1: Reset measure engine + reload only this measure's support resources.
+        # Defeats cross-bundle terminology / CodeSystem-stub / library-cache contamination
+        # by destroying and recreating the hapi-fhir-measure container.
+        async with async_session() as session:
+            job_for_measure = await session.get(Job, job_id)
+            measure_id_for_reset = job_for_measure.measure_id if job_for_measure else None
+        if not measure_id_for_reset:
+            raise RuntimeError(f"Job {job_id} has no measure_id")
+
+        logger.info(
+            "Resetting measure engine for isolated evaluation",
+            extra={"job_id": job_id, "measure_id": measure_id_for_reset},
+        )
+        reset_timings = await reset_measure_engine()
+        if await _stop_or_delete_job(job_id):
+            return
+
+        load_timings = await load_measure_support_to_engine(measure_id_for_reset)
         if await _stop_or_delete_job(job_id):
             return
 
@@ -205,7 +224,20 @@ async def run_job(job_id: int) -> None:
         if await _stop_or_delete_job(job_id):
             return
 
+        eval_start = time.monotonic()
         await asyncio.gather(*[process_batch(bid) for bid in batch_ids])
+        eval_ms = (time.monotonic() - eval_start) * 1000.0
+        logger.info(
+            "Job per-stage timings",
+            extra={
+                "job_id": job_id,
+                "measure_id": measure_id_for_reset,
+                "reset_ms": round(reset_timings.total_ms, 1),
+                "bundle_load_ms": round(load_timings.bundle_load_ms, 1),
+                "reindex_ms": round(load_timings.reindex_ms, 1),
+                "eval_ms": round(eval_ms, 1),
+            },
+        )
 
         # Step 6: Finalize job
         if await _stop_or_delete_job(job_id):
@@ -234,7 +266,7 @@ async def run_job(job_id: int) -> None:
             job = await session.get(Job, job_id)
             if job:
                 job.status = JobStatus.failed
-                job.error_message = str(exc)[:2000]
+                job.error_message = sanitize_error(exc)[:2000]
                 job.completed_at = datetime.now(timezone.utc)
                 await session.commit()
 

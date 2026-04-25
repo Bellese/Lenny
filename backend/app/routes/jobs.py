@@ -30,6 +30,7 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
 _GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,256}$")
+_MEASURE_ID_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,256}$")
 
 
 class JobCreate(BaseModel):
@@ -39,6 +40,16 @@ class JobCreate(BaseModel):
     period_end: str
     cdr_url: Optional[str] = None  # if omitted, use active CDR config or default
     group_id: Optional[str] = None  # if set, only evaluate patients in this FHIR Group
+
+    @field_validator("measure_id")
+    @classmethod
+    def validate_measure_id(cls, v: str) -> str:
+        # measure_id is interpolated into a filesystem path
+        # (seed/connectathon-bundles/{measure_id}-bundle.json) and into HAPI URLs.
+        # Reject anything that could traverse paths or rewrite URLs.
+        if not _MEASURE_ID_RE.match(v):
+            raise ValueError("measure_id must be alphanumeric with hyphens, underscores, or dots only")
+        return v
 
     @field_validator("group_id")
     @classmethod
