@@ -1034,17 +1034,16 @@ class TestRunValidation:
         mock_sleep.assert_not_awaited()
 
     async def test_hapi_sync_disabled_uses_sleep_fallback(self, test_session, monkeypatch):
+        monkeypatch.setattr("app.services.validation.settings.RELOAD_SUPPORT_PER_MEASURE", False)
         _, mock_to_thread, mock_sleep = await self._run_one_patient_validation(
             test_session,
             monkeypatch,
             hapi_sync_after_upload=False,
         )
 
-        # Phase 1 + Phase 2 per-measure both sleep (no to_thread calls when sync disabled)
+        # Legacy path (RELOAD_SUPPORT_PER_MEASURE=False): only Phase 1 sleep
         mock_to_thread.assert_not_awaited()
-        assert mock_sleep.await_count == 2
-        assert mock_sleep.call_args_list[0].args == (7,)
-        assert mock_sleep.call_args_list[1].args == (7,)
+        mock_sleep.assert_awaited_once_with(7)
 
     async def test_reindex_failure_logs_warning_and_uses_sleep_fallback(self, test_session, monkeypatch, caplog):
         caplog.set_level("WARNING", logger="app.services.validation")
@@ -1061,7 +1060,7 @@ class TestRunValidation:
         # Only Phase 1 falls back to sleep
         mock_sleep.assert_awaited_once_with(7)
         assert "HAPI reindex failed during validation" in caplog.text
-        assert "Per-measure HAPI reindex failed" in caplog.text
+        assert "Per-measure HAPI reindex failed — will continue without waiting" in caplog.text
 
     async def test_missing_measure_creates_error_results_and_resolved_measure_still_runs(self, test_session):
         run = ValidationRun(status=ValidationStatus.queued)
