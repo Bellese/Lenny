@@ -13,6 +13,9 @@ services:
     ports: ["8000:8000"]
     volumes:
       - ./seed/connectathon-bundles:/seed/connectathon-bundles:ro
+      # Required for per-measure HAPI reset (see app/services/measure_engine_reset.py).
+      # Backend resets the hapi-fhir-measure container between measure evaluations.
+      - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       db:
         condition: service_healthy

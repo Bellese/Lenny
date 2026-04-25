@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.job import Job, JobStatus, MeasureResult
+from app.services.measure_engine_reset import BundleLoadTimings, ResetTimings
 from app.services.orchestrator import (
     _error_measure_report,
     _extract_patient_name,
@@ -14,6 +15,31 @@ from app.services.orchestrator import (
     _get_cdr_auth_headers,
     run_job,
 )
+
+
+def _fake_reset_timings() -> ResetTimings:
+    return ResetTimings(container_found=True, remove_ms=1.0, create_ms=1.0, health_ms=1.0, total_ms=3.0)
+
+
+def _fake_load_timings() -> BundleLoadTimings:
+    return BundleLoadTimings(bundle_load_ms=1.0, reindex_ms=1.0)
+
+
+def _patch_engine_lifecycle():
+    """Patch reset + bundle-load so run_job can run without docker / HAPI."""
+    return (
+        patch(
+            "app.services.orchestrator.reset_measure_engine",
+            new_callable=AsyncMock,
+            return_value=_fake_reset_timings(),
+        ),
+        patch(
+            "app.services.orchestrator.load_measure_support_to_engine",
+            new_callable=AsyncMock,
+            return_value=_fake_load_timings(),
+        ),
+    )
+
 
 pytestmark = pytest.mark.asyncio
 
@@ -119,9 +145,11 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
         {"resourceType": "Patient", "id": "p1", "name": [{"given": ["Alice"], "family": "Test"}]},
     ]
 
+    reset_patch, load_patch = _patch_engine_lifecycle()
     with (
         _make_session_factory_patch(session_factory),
-        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+        reset_patch as mock_reset,
+        load_patch as mock_load,
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch(
             "app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr.example.com/fhir"
@@ -168,16 +196,19 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
         assert results[0].patient_id == "p1"
         assert results[0].patient_name == "Alice Test"
 
-    mock_wipe.assert_awaited_once_with(strict=False)
+    mock_reset.assert_awaited_once()
+    mock_load.assert_awaited_once_with("measure-1")
 
 
 async def test_run_job_no_patients(test_session, session_factory):
     """run_job: when no patients found, job completes with zero counts."""
     job_id = await _setup_job(test_session)
 
+    reset_patch, load_patch = _patch_engine_lifecycle()
     with (
         _make_session_factory_patch(session_factory),
-        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        reset_patch,
+        load_patch,
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -195,16 +226,16 @@ async def test_run_job_no_patients(test_session, session_factory):
         assert job.total_patients == 0
 
 
-async def test_run_job_wipe_failure(test_session, session_factory):
-    """run_job: wipe failure at start fails the job."""
+async def test_run_job_reset_failure(test_session, session_factory):
+    """run_job: measure-engine reset failure at start fails the job."""
     job_id = await _setup_job(test_session)
 
     with (
         _make_session_factory_patch(session_factory),
         patch(
-            "app.services.orchestrator.wipe_patient_data",
+            "app.services.orchestrator.reset_measure_engine",
             new_callable=AsyncMock,
-            side_effect=Exception("Measure engine down"),
+            side_effect=Exception("Measure engine reset failed"),
         ),
     ):
         await run_job(job_id)
@@ -212,16 +243,18 @@ async def test_run_job_wipe_failure(test_session, session_factory):
     async with session_factory() as session:
         job = await session.get(Job, job_id)
         assert job.status == JobStatus.failed
-        assert "Measure engine down" in job.error_message
+        assert "Measure engine reset failed" in job.error_message
 
 
 async def test_run_job_cdr_unreachable(test_session, session_factory):
     """run_job: CDR unreachable when gathering patients fails the job."""
     job_id = await _setup_job(test_session)
 
+    reset_patch, load_patch = _patch_engine_lifecycle()
     with (
         _make_session_factory_patch(session_factory),
-        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        reset_patch,
+        load_patch,
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -258,9 +291,11 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
             raise Exception("Evaluation failed for p2")
         return mock_measure_report
 
+    reset_patch, load_patch = _patch_engine_lifecycle()
     with (
         _make_session_factory_patch(session_factory),
-        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        reset_patch,
+        load_patch,
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -312,9 +347,11 @@ async def test_run_job_all_patient_failures_marks_job_failed(test_session, sessi
         {"resourceType": "Patient", "id": "p2", "name": [{"given": ["Bob"], "family": "Bad"}]},
     ]
 
+    reset_patch, load_patch = _patch_engine_lifecycle()
     with (
         _make_session_factory_patch(session_factory),
-        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        reset_patch,
+        load_patch,
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -466,7 +503,6 @@ async def test_process_batch_uses_everything_strategy(test_session, session_fact
                 ],
             },
         ),
-        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
     ):
         mock_strategy = MagicMock()
         mock_strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p1"}])

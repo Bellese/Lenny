@@ -18,6 +18,8 @@ services:
         hard: 0
     volumes:
       - ./seed/connectathon-bundles:/seed/connectathon-bundles:ro
+      # Required for per-measure HAPI reset (see app/services/measure_engine_reset.py).
+      - /var/run/docker.sock:/var/run/docker.sock
 
   db:
     restart: unless-stopped
