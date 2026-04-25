@@ -1,8 +1,8 @@
 name: Connectathon Measures
 
-# Non-blocking: runs nightly and on manual trigger.
+# Non-blocking: runs weekly and on manual trigger.
 # The source-of-truth integration suite is too slow for the PR gate, so it runs
-# once nightly here and can be triggered manually for large changes.
+# once a week here and can be triggered manually for large changes.
 #
 # Job split:
 #   - source-of-truth: golden isolation plus full-bundle connectathon coverage.
@@ -10,11 +10,11 @@ name: Connectathon Measures
 #     does not inherit the connectathon-loaded CDR state.
 #
 # When STRICT_STU6 flips to "1" the source-of-truth job will hard-fail on
-# population mismatches, giving a daily signal of connectathon readiness.
+# population mismatches, giving a weekly signal of connectathon readiness.
 
 on:
   schedule:
-    - cron: "0 3 * * *"   # 03:00 UTC nightly
+    - cron: "0 3 * * 1"   # 03:00 UTC Monday weekly
   workflow_dispatch:
     inputs:
       strict_stu6:
@@ -46,7 +46,7 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt -r requirements-test.txt
 
-      - name: Run nightly source-of-truth integration suite
+      - name: Run weekly source-of-truth integration suite
         run: >-
           ./scripts/run-integration-tests.sh
           tests/integration/test_smart_load.py
@@ -73,5 +73,5 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt -r requirements-test.txt
 
-      - name: Run full workflow integration test in isolation
+      - name: Run weekly full workflow integration test in isolation
         run: ./scripts/run-integration-tests.sh tests/integration/test_full_workflow.py
