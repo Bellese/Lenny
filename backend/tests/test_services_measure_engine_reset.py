@@ -59,11 +59,15 @@ def _fake_container(
 
 
 def _fake_client_with_network(target_container: MagicMock) -> tuple[MagicMock, MagicMock, MagicMock]:
-    """Wire a fake docker client where create→connect→start is observable."""
+    """Wire a fake docker client where api.create_container → containers.get → start is observable."""
     fake_client = MagicMock()
     fake_client.containers.list.return_value = [target_container]
+    fake_client.api.create_container.return_value = {"Id": "newcontainerid"}
+    fake_client.api.create_endpoint_config.side_effect = lambda **kw: {"_endpoint": kw}
+    fake_client.api.create_networking_config.side_effect = lambda mapping: {"_net": mapping}
+    fake_client.api.create_host_config.side_effect = lambda **kw: {"_host": kw}
     new_container = MagicMock()
-    fake_client.containers.create.return_value = new_container
+    fake_client.containers.get.return_value = new_container
     network = MagicMock()
     fake_client.networks.get.return_value = network
     return fake_client, new_container, network
@@ -96,17 +100,19 @@ def test_reset_happy_path_recreates_container_with_network_aliases():
     )
     container.remove.assert_called_once_with(force=True, v=True)
 
-    create_kwargs = fake_client.containers.create.call_args.kwargs
+    # Aliases must be set at create time via networking_config — Docker rejects
+    # post-create connect on a "none"-mode container.
+    endpoint_call = fake_client.api.create_endpoint_config.call_args
+    assert endpoint_call.kwargs["aliases"] == ["hapi-fhir-measure", "9b8c7d6e5f4a"]
+    netcfg_call = fake_client.api.create_networking_config.call_args
+    assert "mct2_default" in netcfg_call.args[0]
+
+    create_kwargs = fake_client.api.create_container.call_args.kwargs
     assert create_kwargs["image"] == "ghcr.io/bellese/mct2-hapi-measure:latest"
     assert create_kwargs["name"] == "mct2-hapi-fhir-measure-1"
-    # Must NOT auto-attach to default bridge — we attach with aliases below.
-    assert create_kwargs["network_mode"] == "none"
+    assert "networking_config" in create_kwargs
+    assert "host_config" in create_kwargs
 
-    fake_client.networks.get.assert_called_once_with("mct2_default")
-    connect_kwargs = network.connect.call_args.kwargs
-    # CRITICAL: the service-name alias ("hapi-fhir-measure") must be forwarded
-    # so http://hapi-fhir-measure:8080/fhir keeps resolving from the backend.
-    assert connect_kwargs["aliases"] == ["hapi-fhir-measure", "9b8c7d6e5f4a"]
     new_container.start.assert_called_once()
 
 
@@ -133,31 +139,19 @@ def test_reset_remove_failure_wraps_api_error():
 def test_reset_recreate_failure_wraps_api_error():
     container = _fake_container()
     fake_client, _, _ = _fake_client_with_network(container)
-    fake_client.containers.create.side_effect = docker.errors.APIError("can't bind port")
+    fake_client.api.create_container.side_effect = docker.errors.APIError("can't bind port")
 
     with patch.object(measure_engine_reset.docker, "from_env", return_value=fake_client):
         with pytest.raises(MeasureEngineResetError, match="Failed to recreate"):
             _reset_measure_engine_sync(timeout_s=10)
-
-
-def test_reset_connect_failure_removes_stranded_container():
-    """If create() succeeds but network.connect() fails, the just-created
-    container would otherwise hold the original name and 409 the next reset.
-    Force-remove + re-raise is required to keep reset retries idempotent."""
-    container = _fake_container()
-    fake_client, new_container, network = _fake_client_with_network(container)
-    network.connect.side_effect = docker.errors.APIError("network busy")
-
-    with patch.object(measure_engine_reset.docker, "from_env", return_value=fake_client):
-        with pytest.raises(MeasureEngineResetError, match="Failed to recreate"):
-            _reset_measure_engine_sync(timeout_s=10)
-    new_container.remove.assert_called_once_with(force=True)
 
 
 def test_reset_start_failure_removes_stranded_container():
-    """Same contract as connect failure — start() failure must clean up."""
+    """If create() succeeds but start() fails, the just-created container holds
+    the original name and would 409 the next reset; force-remove + re-raise
+    keeps the reset retry idempotent."""
     container = _fake_container()
-    fake_client, new_container, network = _fake_client_with_network(container)
+    fake_client, new_container, _ = _fake_client_with_network(container)
     new_container.start.side_effect = docker.errors.APIError("OOM at start")
 
     with patch.object(measure_engine_reset.docker, "from_env", return_value=fake_client):
