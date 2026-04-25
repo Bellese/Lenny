@@ -1140,6 +1140,11 @@ async def run_validation(validation_run_id: int) -> None:
                 return_exceptions=True,
             )
             failed_gathers = sum(1 for r in gather_results if isinstance(r, BaseException))
+            failed_patient_refs: dict[str, str] = {
+                pr: sanitize_error(r) if isinstance(r, Exception) else repr(r)
+                for pr, r in zip(all_patient_refs, gather_results)
+                if isinstance(r, BaseException)
+            }
             reindex_probe_patient_ids = sorted(
                 {
                     patient_id
@@ -1227,6 +1232,18 @@ async def run_validation(validation_run_id: int) -> None:
 
             # Phase 2: Evaluate and compare (shared client avoids N connection pools)
             async def evaluate_and_compare(er: ExpectedResult, http_client: httpx.AsyncClient) -> ValidationResult:
+                if er.patient_ref in failed_patient_refs:
+                    return ValidationResult(
+                        validation_run_id=validation_run_id,
+                        measure_url=er.measure_url,
+                        patient_ref=er.patient_ref,
+                        patient_name=None,
+                        expected_populations=er.expected_populations,
+                        actual_populations=None,
+                        status="error",
+                        error_message=f"Patient data gather failed: {failed_patient_refs[er.patient_ref]}",
+                        mismatches=[],
+                    )
                 info = measure_info[er.measure_url]
                 try:
                     if await _stop_or_delete_validation_run(validation_run_id):

@@ -1265,6 +1265,97 @@ class TestRunValidation:
         # Concurrent batch should have 2x measure-1, 1x measure-2 (3 patients total)
         assert sorted(concurrent_measure_ids) == ["measure-1", "measure-1", "measure-2"]
 
+    async def test_cdr_gather_failure_records_error_not_fail(self, test_session):
+        """CDR gather exception → status='error', evaluation skipped; other patients unaffected."""
+        run = ValidationRun(status=ValidationStatus.queued)
+        test_session.add(run)
+        test_session.add_all(
+            [
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/CMS124",
+                    patient_ref="patient-1",
+                    test_description="gather succeeds",
+                    expected_populations={"numerator": 1},
+                    period_start="2026-01-01",
+                    period_end="2026-12-31",
+                    source_bundle="cms124.json",
+                ),
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/CMS124",
+                    patient_ref="patient-2",
+                    test_description="gather fails",
+                    expected_populations={"numerator": 1},
+                    period_start="2026-01-01",
+                    period_end="2026-12-31",
+                    source_bundle="cms124.json",
+                ),
+            ]
+        )
+        await test_session.commit()
+        await test_session.refresh(run)
+
+        async def gather_side_effect(cdr_url, patient_ref, auth_headers):
+            if patient_ref == "patient-2":
+                raise RuntimeError("CDR connection refused")
+            return [{"resourceType": "Patient", "id": patient_ref}]
+
+        strategy = MagicMock()
+        strategy.gather_patient_data = AsyncMock(side_effect=gather_side_effect)
+
+        def make_ctx():
+            return self._make_session_ctx(test_session)
+
+        with (
+            patch("app.services.validation.async_session", side_effect=lambda: make_ctx()),
+            patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="measure-1"),
+            patch(
+                "app.services.validation._reload_measures_from_seed_bundles",
+                new_callable=AsyncMock,
+                return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
+            ),
+            patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
+            patch("app.services.validation.push_resources", new_callable=AsyncMock),
+            patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+            patch(
+                "app.services.validation.evaluate_measure",
+                new_callable=AsyncMock,
+                return_value={
+                    "group": [{"population": [{"code": {"coding": [{"code": "numerator"}]}, "count": 1}]}],
+                    "evaluatedResource": [],
+                },
+            ) as mock_evaluate,
+            patch("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0),
+        ):
+            await run_validation(run.id)
+
+        await test_session.refresh(run)
+        rows = (
+            (
+                await test_session.execute(
+                    select(ValidationResult)
+                    .where(ValidationResult.validation_run_id == run.id)
+                    .order_by(ValidationResult.patient_ref)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+        assert run.status == ValidationStatus.complete
+        assert len(rows) == 2
+
+        p1 = next(r for r in rows if r.patient_ref == "patient-1")
+        assert p1.status == "pass"
+
+        p2 = next(r for r in rows if r.patient_ref == "patient-2")
+        assert p2.status == "error"
+        assert "Patient data gather failed" in p2.error_message
+        assert "CDR connection refused" in p2.error_message
+
+        # Warmup (patient-1) + main eval (patient-1) = 2 calls; patient-2 skipped.
+        called_patient_refs = [call.args[1] for call in mock_evaluate.call_args_list]
+        assert "patient-2" not in called_patient_refs
+
     async def test_warmup_failure_does_not_stop_main_evaluation(self, test_session, monkeypatch):
         """Even if warmup fails (e.g., 409 CONFLICT), main evaluation should continue."""
         run = ValidationRun(status=ValidationStatus.queued)
