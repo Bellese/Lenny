@@ -183,7 +183,11 @@ Patients land in `numerator` when MADiE expects `denominator-exclusion`. The fai
 - **Dementia medications** during MP (CMS125 `0ced1e0c`, CMS130 `f9ef1fd1`)
 - **Mastectomy date boundary** — bilateral mastectomy or two unilateral mastectomies with period.end on 12/31 of MP (CMS125 `4cf81a94`, `857fec09`); HAPI appears to treat period.end as exclusive
 
-Status: Genuine HAPI vs. MADiE CQL evaluation differences — not fixable locally. All 17 marked `xfail` in `test_connectathon_measures.py::_HAPI_DE_XFAIL`. Needs HAPI upstream issue filed at hapifhir/hapi-fhir (update `_HAPI_DE_XFAIL` comment with issue number when filed).
+Status: Genuine HAPI vs. MADiE CQL evaluation differences — **not fixable in MCT2**. All 17 marked `xfail` in `test_connectathon_measures.py::_HAPI_DE_XFAIL`. Needs HAPI upstream issue filed at hapifhir/hapi-fhir (update `_HAPI_DE_XFAIL` comment with issue number when filed).
+
+**Related issues (both closed):**
+- Issue #99 (CMS122/CMS125/CMS130 frailty exclusion mismatch) — closed 2026-04-25. MCT2 component (H1: missing ValueSet compose fix in production path) was already fixed when `_fix_valueset_compose_for_hapi` was moved into `validation.py:_prepare_measure_support_resources`. Remaining 17 failures are this HAPI upstream divergence.
+- Issue #140 (CMS122 denominator_exclusion not firing through /jobs) — closed 2026-04-24. Confirmed same HAPI CQL divergence; MCT2-side fix (wire `HAPI_SYNC_AFTER_UPLOAD` into `/jobs` path) shipped in same PR.
 
 **Issue #112 verification (2026-04-22):** Fresh-container run with extended eval gate confirmed exactly 17 failures — the 69 extra failures from an earlier run were timing artifacts (IP=0 from VS expansion not complete). Root cause: the eval gate only probed CMS122 patient `9cba6cfa`; CMS125/CMS130 VSes take longer to expand on slower machines. Fix: added eval gate probes for CMS122 numerator path + CMS125 + CMS130 in `_load_connectathon_bundles_to_hapi`.
 
