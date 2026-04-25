@@ -7,12 +7,10 @@
 #
 # Environment variables:
 #   HAPI_PORT   Port on localhost that maps to the container's 8080 (default: 8080)
-#   SEED_TYPE   "cdr" (default), "measure", or "igs"
-#               cdr     → POST patient-bundle.json only, $reindex, no ValueSet expansion poll
-#               measure → POST measure-bundle.json + patient-bundle.json, $reindex, ValueSet expansion poll
-#               igs     → wait for IGs to install via Spring env vars; no bundle posts, no $reindex.
-#                         Use for the per-measure-isolation HAPI image (no measure or patient
-#                         data baked in, so reset gives a truly empty engine).
+#   SEED_TYPE   "cdr" (default) or "measure"
+#               cdr     → POST patient-bundle.json only
+#               measure → POST measure-bundle.json then patient-bundle.json,
+#                         and wait for ValueSet pre-expansion
 set -euo pipefail
 
 HAPI_PORT="${HAPI_PORT:-8080}"
@@ -43,18 +41,6 @@ until curl -sf "${HAPI_BASE}/metadata" -o /dev/null; do
     sleep "${METADATA_POLL}"
 done
 log "HAPI is up."
-
-# ---------------------------------------------------------------------------
-# IGs-only short-circuit
-# ---------------------------------------------------------------------------
-# Spring auto-installs IGs from the env vars set in the image's Dockerfile
-# during HAPI startup. The /metadata 200 above means startup completed and
-# IGs are loaded. No data to seed, no reindex needed (no Encounters).
-if [ "${SEED_TYPE}" = "igs" ]; then
-    log "SEED_TYPE=igs: IGs installed by HAPI on startup. No bundles posted, no \$reindex."
-    log "Seed complete."
-    exit 0
-fi
 
 # ---------------------------------------------------------------------------
 # Load seed bundles
