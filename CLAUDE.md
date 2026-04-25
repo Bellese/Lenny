@@ -25,18 +25,29 @@ See `docs/testing.md` for the full testing strategy.
 
 5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`.
 
-The backend resets the `hapi-fhir-measure` container between measure evaluations to defeat cross-bundle terminology / CodeSystem / library-cache contamination (see `backend/app/services/measure_engine_reset.py`). This requires `/var/run/docker.sock` mounted into the backend container — already wired in `docker-compose.yml` and `docker-compose.prod.yml`.
+## Recurring bug: HAPI async-indexing race
 
-## Pre-baked HAPI images
+**Read this before chasing any "wrong populations" or "validation pass-rate" symptom.**
 
-`docker-compose.prebaked.yml` overrides the HAPI services with pre-baked images from GHCR (`ghcr.io/bellese/mct2-hapi-{cdr,measure}:latest`) that ship with QI-Core/US-Core/CQL IGs and seed data already loaded. Required by per-measure reset — recreating a non-prebaked container would re-fetch IGs from the internet on cold start (60-120s).
+PRs #142, #155, #159, #161, #167+ have all patched a different slice of the same disease: HAPI's writes are async-indexed by default; reads against that data race the indexing. Symptoms include `/jobs` returning 0 errors but populations zero or way off, `$everything` returning only the Patient (no clinical resources), `Encounter?patient=` returning 0 for a patient that's clearly in the database, and same-input evaluations producing different results across runs.
 
-```bash
-# Local dev with prebaked images (recommended for measure-engine work)
-docker compose -f docker-compose.yml -f docker-compose.prebaked.yml up -d
-```
+**Quick triage rule:** for any of those symptoms, suspect indexing latency BEFORE suspecting CQL bugs, terminology contamination, or reset architecture. Verify by reading the resource directly via `/{Type}/{id}` (works regardless of index) and comparing to what search returns.
 
-Prod (`scripts/deploy-prod.sh`) and integration tests already use prebaked. The bake workflow runs weekly and on `seed/**` changes (`.github/workflows/bake-hapi-image.yml`).
+**HAPI's actual behavior** (verified empirically 2026-04-25): PUT/POST 200 means the resource is durable. Search consistency is async, governed by `hibernate.search.backend.io.refresh_interval` (we have 100ms). Hibernate Search 6's default strategy commits to disk but does NOT request an index refresh — searches see stale snapshots until the next refresh tick, OR forever if the refresh somehow stalls. The structural fix is `hibernate.search.indexing.plan.synchronization.strategy=sync` on both HAPI services' Spring config (write throughput hit, but the bug class becomes impossible).
+
+**Pitfalls to avoid:**
+- `trigger_reindex_and_wait(base_url)` in `backend/app/services/fhir_client.py` without a probe_patient_id falls back to `Patient?_count=1` and silent-skips with a warning when the index isn't ready (exactly when waits matter most). Always use `trigger_reindex_and_wait_for_patients(base_url, [pids], timeout)` and pass the actual just-pushed patient IDs.
+- Reindex calls that target only `Encounter` — measures also query Condition/Observation/Procedure/MedicationRequest/MedicationAdministration. Reindex all relevant types.
+- `/validation/upload-bundle` currently returns 200 before CDR is fully indexed; subsequent `/jobs` runs race the index. There is no CDR-side wait.
+- `$everything` is a victim of this same async-index, not a cause. Don't propose replacing it — it's a key FHIR-standard operation. Fix the index, not the call.
+
+Design doc with full evidence and option analysis: `~/.gstack/projects/Bellese-mct2/2026-04-25-hapi-consistency-model.md`.
+
+## Local-first iteration
+
+For any non-trivial fix touching the data flow, orchestrator, or HAPI behavior: **reproduce the bug on the local stack FIRST, fix and re-test locally, only then push to prod**. Prod is not a debugger. The local stack catches the same bugs in minutes.
+
+Quick local stack: `docker compose -f docker-compose.yml -f docker-compose.prebaked.yml up -d` (use the `mct2-local-validate` worktree pattern with overrides if the prebaked GHCR pull fails locally — fall back CDR to public `hapiproject/hapi:v8.8.0-1`).
 
 ## Code Conventions
 
