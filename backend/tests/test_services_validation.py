@@ -741,6 +741,75 @@ class TestTriageTestBundle:
         assert result["expected_results_loaded"] == 1
         assert refreshed_count == 1
 
+    async def test_reupload_different_filename_replaces_stale_expected_results(
+        self, test_session, mock_test_bundle_with_expected
+    ):
+        """Re-uploading a different filename that covers the same measure clears stale rows (issue #64).
+
+        If bundle_v1.json loaded patients A, B, C for CMS124 and bundle_v2.json
+        loads only patients A, B for the same measure, C must not survive.
+        """
+        test_session.add_all(
+            [
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/CMS124",
+                    patient_ref="stale-patient-from-v1",
+                    test_description="v1 patient no longer in new bundle",
+                    expected_populations={"numerator": 0},
+                    period_start="2026-01-01",
+                    period_end="2026-12-31",
+                    source_bundle="bundle_v1.json",
+                ),
+                ExpectedResult(
+                    measure_url="https://example.com/Measure/OTHER",
+                    patient_ref="other-measure-patient",
+                    test_description="different measure — must survive",
+                    expected_populations={"numerator": 1},
+                    period_start="2026-01-01",
+                    period_end="2026-12-31",
+                    source_bundle="bundle_v1.json",
+                ),
+            ]
+        )
+        await test_session.commit()
+
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+            await triage_test_bundle(mock_test_bundle_with_expected, "bundle_v2.json", test_session)
+
+        all_rows = (
+            (await test_session.execute(select(ExpectedResult).order_by(ExpectedResult.patient_ref))).scalars().all()
+        )
+        patient_refs = [r.patient_ref for r in all_rows]
+
+        assert "stale-patient-from-v1" not in patient_refs, "stale v1 patient for CMS124 must be evicted"
+        assert "test-patient-1" in patient_refs, "new bundle's patient must be present"
+        assert "other-measure-patient" in patient_refs, "unrelated measure's patient must be untouched"
+
+    async def test_clinical_push_failure_rolls_back_expected_results(
+        self, test_session, mock_test_bundle_with_expected
+    ):
+        """If clinical data push fails, expected results must not be committed to DB (issue #65).
+
+        The DB delete + insert happen in the same transaction as the clinical push.
+        When push_resources raises, process_bundle_upload's session context manager
+        rolls back the transaction.  This test mimics that rollback explicitly.
+        """
+
+        async def fail_on_clinical(resources, *, target_url=None, auth_headers=None):
+            if target_url is not None:
+                raise ValueError("CDR unreachable — simulated failure")
+
+        with patch("app.services.validation.push_resources", side_effect=fail_on_clinical):
+            with pytest.raises(ValueError, match="CDR unreachable"):
+                await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+
+        # Roll back the session — this is what process_bundle_upload's `async with async_session()`
+        # block does when triage_test_bundle raises.
+        await test_session.rollback()
+
+        row_count = await test_session.scalar(select(func.count()).select_from(ExpectedResult))
+        assert row_count == 0, "expected results must not be committed when clinical push fails"
+
     async def test_hapi_sync_after_upload_calls_reindex_and_valueset_wait(
         self, test_session, mock_test_bundle_with_expected, monkeypatch
     ):
