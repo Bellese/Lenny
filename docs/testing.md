@@ -2,9 +2,26 @@
 
 ## Overview
 
-MCT2 has two test layers: **unit tests** (fast, mocked, run on every PR) and **integration tests** (real HAPI FHIR + PostgreSQL, run via Docker).
+MCT2 has three test layers: **frontend component tests** (React Testing Library, run on every PR), **backend unit tests** (fast, mocked, run on every PR), and **integration tests** (real HAPI FHIR + PostgreSQL, run via Docker).
 
 Coverage floor: **70%** (enforced by CI). `app/main.py` and `app/services/worker.py` are excluded (startup/lifecycle code not suited for unit testing).
+
+---
+
+## Frontend Component Tests
+
+Run from `frontend/`:
+
+```bash
+cd frontend && npm test
+```
+
+Uses React Testing Library (`@testing-library/react`, `@testing-library/user-event`, `@testing-library/jest-dom`) via `react-scripts test`. Tests exercise rendered component behavior — clicks, input changes, conditional rendering — not implementation details.
+
+**Test files:**
+| File | What it covers |
+|------|----------------|
+| `src/components/PeriodPicker.test.js` | Year dropdown, custom date toggle, onChange wiring |
 
 ---
 
