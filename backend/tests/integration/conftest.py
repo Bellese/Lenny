@@ -214,18 +214,32 @@ def _load_seed_data(_require_infrastructure):
 
     if os.environ.get("HAPI_PREBAKED") == "1":
         # Images are pre-seeded; skip loading + reindex + ValueSet expansion.
-        # Smoke probe: if Patient count is 0 the baked image is corrupt — fail fast.
-        for base_url, label in [(TEST_CDR_URL, "CDR"), (TEST_MEASURE_URL, "measure")]:
-            try:
-                resp = _httpx.get(f"{base_url}/Patient?_summary=count", timeout=15)
-                total = resp.json().get("total", 0) if resp.status_code == 200 else 0
-            except Exception:
-                total = 0
-            if total == 0:
-                raise RuntimeError(
-                    f"HAPI_PREBAKED=1 but {label} HAPI at {base_url} has no Patient resources. "
-                    f"The pre-baked image may be corrupt or the wrong image was pulled."
-                )
+        # Smoke probe per image:
+        #   CDR — has seed patient bundle baked in; expect Patient count > 0.
+        #   measure — IGs-only (PR #172 removed measure-bundle.json + patient-bundle.json
+        #             from the bake to enable per-measure isolation). Patient count is
+        #             expected to be 0; instead probe /metadata to confirm IGs loaded.
+        try:
+            resp = _httpx.get(f"{TEST_CDR_URL}/Patient?_summary=count", timeout=15)
+            cdr_patients = resp.json().get("total", 0) if resp.status_code == 200 else 0
+        except Exception:
+            cdr_patients = 0
+        if cdr_patients == 0:
+            raise RuntimeError(
+                f"HAPI_PREBAKED=1 but CDR HAPI at {TEST_CDR_URL} has no Patient resources. "
+                f"The pre-baked CDR image may be corrupt or the wrong image was pulled."
+            )
+
+        try:
+            mresp = _httpx.get(f"{TEST_MEASURE_URL}/metadata", timeout=15)
+            measure_alive = mresp.status_code == 200
+        except Exception:
+            measure_alive = False
+        if not measure_alive:
+            raise RuntimeError(
+                f"HAPI_PREBAKED=1 but measure HAPI at {TEST_MEASURE_URL} did not return /metadata. "
+                f"The pre-baked measure image may be corrupt or the wrong image was pulled."
+            )
 
         # HAPI's /fhir/metadata responds before Hibernate Search finishes opening
         # its Lucene index for writes.  Resources written too early (e.g. in
