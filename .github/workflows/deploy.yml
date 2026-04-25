@@ -1,4 +1,4 @@
-name: Test and Deploy
+name: Deploy
 
 on:
   push:
@@ -21,22 +21,11 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
 
-      - name: Set up Python
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
-        with:
-          python-version: "3.10"
-
-      - name: Run backend unit tests
-        working-directory: backend
-        run: |
-          pip install -r requirements.txt -r requirements-test.txt
-          python -m pytest tests/ --ignore=tests/integration --cov=app --cov-fail-under=70 -v
-
-      - name: Check frontend build
-        working-directory: frontend
-        run: |
-          npm ci
-          npm run build
+      # Tests + frontend build run on every PR via .github/workflows/pr-checks.yml.
+      # Branch protection requires "branch up-to-date with main" before merge, so
+      # the squashed commit on main is byte-identical to the PR tip and re-running
+      # the same tests here adds ~5 min and zero marginal safety. The post-deploy
+      # `Health check` step is the real production smoke test.
 
       # Break-glass: SSH secrets (EC2_HOST, EC2_USER, EC2_SSH_KEY) retained for
       # manual access — not used in automated deploy.
