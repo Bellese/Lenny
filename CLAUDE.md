@@ -43,11 +43,29 @@ PRs #142, #155, #159, #161, #167+ have all patched a different slice of the same
 
 Design doc with full evidence and option analysis: `~/.gstack/projects/Bellese-mct2/2026-04-25-hapi-consistency-model.md`.
 
-## Local-first iteration
+## Local-first iteration — MANDATORY pre-push checklist
 
-For any non-trivial fix touching the data flow, orchestrator, or HAPI behavior: **reproduce the bug on the local stack FIRST, fix and re-test locally, only then push to prod**. Prod is not a debugger. The local stack catches the same bugs in minutes.
+> **DO NOT `git push` ANY PR until ALL of the checks below have run successfully on your machine.**
+> "Validate locally" does NOT mean "ran unit tests." It means EVERY check below.
+> CI is not a debugger. Prod is not a debugger. Sutton's time is not a debugger.
 
-Quick local stack: `docker compose -f docker-compose.yml -f docker-compose.prebaked.yml up -d` (use the `mct2-local-validate` worktree pattern with overrides if the prebaked GHCR pull fails locally — fall back CDR to public `hapiproject/hapi:v8.8.0-1`).
+**Required local checks before `git push` of ANY PR (no exceptions for "small" or "obvious" fixes):**
+
+1. `cd backend && ruff check app/ tests/ && ruff format --check app/ tests/` — lint clean
+2. `cd backend && python3 -m pytest tests/ --ignore=tests/integration -q` — unit suite passes
+3. `./scripts/run-integration-tests.sh` — **integration suite passes against real HAPI containers.** This is the suite that fails most often in CI; it MUST pass locally first. Takes ~3-5 min.
+4. End-to-end smoke against a local stack (`docker compose -f docker-compose.yml -f docker-compose.prebaked.yml up -d`, fall back to `hapiproject/hapi:v8.8.0-1` for CDR if GHCR pull fails) for any change touching:
+   - The data flow (`fhir_client.py`, `validation.py`, `orchestrator.py`)
+   - HAPI behavior or configuration
+   - Bundle import / `$everything` / `$evaluate-measure` paths
+5. The "ship-or-not" gate: if step 1, 2, 3, or 4 didn't run successfully, **do not push**. Tell Sutton what's blocking instead.
+
+If the change is documentation-only (`*.md`, no code), steps 1–4 are not required, but step 5 still applies — confirm in the PR description that no code changed.
+
+**Reproduce the bug on the local stack FIRST** when investigating any "wrong populations" / "validation pass-rate" / "404 from HAPI" / "$everything returns only Patient" symptom. Don't propose code changes until you have a local repro that fails the same way as prod. The local stack catches the same bugs in minutes; running blind in prod has cost multi-hour iteration loops on this codebase already.
+
+**Track record this rule responds to** (kept here so a future agent doesn't repeat the cycle):
+- 2026-04-25 session: ~6 hours of iteration on PRs #167 → #178 chasing /jobs CMS124 wrong populations. Multiple PRs were pushed without running the integration suite locally; CI surfaced breakages that local would have caught in minutes. The actual root cause (HAPI bundle-import forward-reference index miss) was not isolated until the full local A/B/C empirical experiment was run. Don't repeat the pattern.
 
 ## Code Conventions
 
