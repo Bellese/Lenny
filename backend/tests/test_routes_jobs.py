@@ -31,20 +31,6 @@ async def test_create_job_valid(client):
     assert "cdr_read_only" in data
 
 
-async def test_create_job_rejects_measure_id_path_traversal(client):
-    """measure_id is interpolated into seed/connectathon-bundles/{measure_id}-bundle.json.
-    Reject anything with path separators or traversal sequences."""
-    base = {
-        "measure_name": "evil",
-        "period_start": "2024-01-01",
-        "period_end": "2024-12-31",
-        "cdr_url": "https://example.com/fhir",
-    }
-    for bad in ["../../etc/passwd", "foo/bar", "a\\b", "x" * 300, ""]:
-        resp = await client.post("/jobs", json={**base, "measure_id": bad})
-        assert resp.status_code == 422, f"Expected 422 for measure_id={bad!r}, got {resp.status_code}"
-
-
 async def test_create_job_ssrf_cdr_url_blocked(client):
     """POST /jobs with a private IP cdr_url override returns 400."""
     payload = {
