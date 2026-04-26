@@ -105,3 +105,50 @@ async def test_load_connectathon_bundles_includes_patients_loaded(tmp_path):
     assert summary["failed"] == 0
     loaded_detail = summary["details"][0]
     assert loaded_detail["patients_loaded"] == 5
+
+
+async def test_load_connectathon_bundles_commits_after_triage(tmp_path):
+    """load_connectathon_bundles commits the session after triage_test_bundle returns (#65).
+
+    triage_test_bundle no longer calls session.commit() internally (deferred to caller
+    for atomicity). bundle_loader must call commit() or ExpectedResult rows are silently
+    discarded when the session closes.
+    """
+    from app.services.bundle_loader import load_connectathon_bundles
+
+    (tmp_path / "bundle.json").write_text(json.dumps({"resourceType": "Bundle", "entry": []}))
+
+    with patch("app.services.bundle_loader.triage_test_bundle") as mock_triage:
+        mock_triage.return_value = {"measures_loaded": 0, "patients_loaded": 0, "expected_results_loaded": 0}
+        mock_session = AsyncMock()
+        mock_session_factory = MagicMock()
+        mock_session_factory.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.bundle_loader.async_session", mock_session_factory):
+            await load_connectathon_bundles(directory=tmp_path)
+
+    mock_session.commit.assert_called_once()
+
+
+async def test_load_connectathon_bundles_no_commit_on_triage_error(tmp_path):
+    """load_connectathon_bundles does not commit when triage_test_bundle raises (#65).
+
+    Errors are caught, logged, and counted as failures — not committed.
+    """
+    from app.services.bundle_loader import load_connectathon_bundles
+
+    (tmp_path / "bundle.json").write_text(json.dumps({"resourceType": "Bundle", "entry": []}))
+
+    with patch("app.services.bundle_loader.triage_test_bundle") as mock_triage:
+        mock_triage.side_effect = RuntimeError("triage failed")
+        mock_session = AsyncMock()
+        mock_session_factory = MagicMock()
+        mock_session_factory.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session_factory.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("app.services.bundle_loader.async_session", mock_session_factory):
+            summary = await load_connectathon_bundles(directory=tmp_path)
+
+    assert summary["failed"] == 1
+    mock_session.commit.assert_not_called()
