@@ -7,6 +7,11 @@ name: Bake HAPI Seeded Images
 # We cannot use Dockerfile RUN steps because hapiproject/hapi is distroless
 # (no shell inside the container). Instead, seed-hapi.sh runs on the runner
 # and targets the container's exposed port.
+#
+# Phase 2: After the base seed, both containers are restarted from their
+# locally-committed base images, all 12 connectathon bundles are loaded via
+# load_connectathon_bundles.py, and the final images are pushed with :${seed-hash}.
+# :latest is NOT pushed here — that is gated on Phase 4 (verify-bake).
 
 on:
   schedule:
@@ -15,6 +20,7 @@ on:
   push:
     paths:
       - 'seed/**'
+      - 'seed/connectathon-bundles/**'
       - 'docker/hapi-*-seeded.Dockerfile'
       - 'docker/seed-hapi.sh'
       - 'docker-compose.test.yml'
@@ -42,7 +48,7 @@ jobs:
       - name: Compute seed hash
         id: seed-hash
         run: |
-          echo "hash=$(find seed/ docker/seed-hapi.sh docker-compose.test.yml \
+          echo "hash=$(find seed/ seed/connectathon-bundles/ docker/seed-hapi.sh docker-compose.test.yml \
             docker/hapi-cdr-seeded.Dockerfile docker/hapi-measure-seeded.Dockerfile \
             -type f 2>/dev/null | sort | xargs sha256sum | sha256sum | cut -c1-12)" \
             >> "$GITHUB_OUTPUT"
@@ -67,7 +73,8 @@ jobs:
             .
 
       # -----------------------------------------------------------------------
-      # Bake CDR image: run → seed from runner → stop → commit → push
+      # Bake CDR base image: run → seed from runner → stop → commit locally
+      # (No push yet — connectathon bundles are loaded in Phase 2 below)
       # -----------------------------------------------------------------------
       - name: Start CDR container
         run: |
@@ -87,20 +94,16 @@ jobs:
           echo "=== docker logs hapi-cdr (last 300 lines) ==="
           docker logs --tail 300 hapi-cdr 2>&1 || true
 
-      - name: Commit and push CDR image
+      - name: Commit CDR base image locally
         run: |
           docker stop hapi-cdr
-          docker commit hapi-cdr ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }}
-          docker tag \
-            ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }} \
-            ghcr.io/bellese/mct2-hapi-cdr:latest
-          docker push ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }}
-          docker push ghcr.io/bellese/mct2-hapi-cdr:latest
+          docker commit hapi-cdr mct2-hapi-cdr-base
           # Free runner memory before starting the Measure container
           docker rm hapi-cdr
 
       # -----------------------------------------------------------------------
-      # Bake Measure image: run → seed from runner → stop → commit → push
+      # Bake Measure base image: run → seed from runner → stop → commit locally
+      # (No push yet — connectathon bundles are loaded in Phase 2 below)
       # -----------------------------------------------------------------------
       - name: Start Measure container
         run: |
@@ -120,12 +123,81 @@ jobs:
           echo "=== docker logs hapi-measure (last 300 lines) ==="
           docker logs --tail 300 hapi-measure 2>&1 || true
 
-      - name: Commit and push Measure image
+      - name: Commit Measure base image locally
         run: |
           docker stop hapi-measure
-          docker commit hapi-measure ghcr.io/bellese/mct2-hapi-measure:${{ steps.seed-hash.outputs.hash }}
-          docker tag \
-            ghcr.io/bellese/mct2-hapi-measure:${{ steps.seed-hash.outputs.hash }} \
-            ghcr.io/bellese/mct2-hapi-measure:latest
+          docker commit hapi-measure mct2-hapi-measure-base
+          docker rm hapi-measure
+
+      # -----------------------------------------------------------------------
+      # Phase 2: Load connectathon bundles into both base images simultaneously
+      # Both containers start from their locally-committed base images (IGs and
+      # ValueSets already expanded, so startup is fast and memory is settled).
+      # -----------------------------------------------------------------------
+      - name: Start CDR container for connectathon seed
+        run: |
+          docker run -d --name hapi-cdr-conn -p 8180:8080 --user root mct2-hapi-cdr-base
+
+      - name: Start Measure container for connectathon seed
+        run: |
+          docker run -d --name hapi-measure-conn -p 8181:8080 --user root mct2-hapi-measure-base
+
+      - name: Wait for CDR and Measure containers to be healthy
+        run: |
+          echo "Waiting for CDR (port 8180) and Measure (port 8181)..."
+          CDR_OK=false
+          MEASURE_OK=false
+          DEADLINE=$((SECONDS + 300))
+          while [ $SECONDS -lt $DEADLINE ]; do
+            if [ "$CDR_OK" = "false" ] && curl -sf http://localhost:8180/fhir/metadata > /dev/null 2>&1; then
+              echo "CDR is healthy"
+              CDR_OK=true
+            fi
+            if [ "$MEASURE_OK" = "false" ] && curl -sf http://localhost:8181/fhir/metadata > /dev/null 2>&1; then
+              echo "Measure is healthy"
+              MEASURE_OK=true
+            fi
+            if [ "$CDR_OK" = "true" ] && [ "$MEASURE_OK" = "true" ]; then
+              echo "Both containers healthy"
+              break
+            fi
+            sleep 5
+          done
+          if [ "$CDR_OK" = "false" ]; then
+            echo "ERROR: CDR container did not become healthy within 300s"
+            exit 1
+          fi
+          if [ "$MEASURE_OK" = "false" ]; then
+            echo "ERROR: Measure container did not become healthy within 300s"
+            exit 1
+          fi
+
+      - name: Install httpx for connectathon bundle loader
+        run: pip install httpx
+
+      - name: Load connectathon bundles into both HAPI instances
+        run: |
+          MEASURE_FHIR_URL=http://localhost:8181/fhir \
+          CDR_FHIR_URL=http://localhost:8180/fhir \
+          CONNECTATHON_BUNDLES_DIR=seed/connectathon-bundles \
+          python3 scripts/load_connectathon_bundles.py
+
+      - name: Dump connectathon container state on failure
+        if: failure()
+        run: |
+          docker logs --tail 300 hapi-cdr-conn 2>&1 || true
+          docker logs --tail 300 hapi-measure-conn 2>&1 || true
+
+      - name: Commit and push CDR image (with connectathon bundles)
+        run: |
+          docker stop hapi-cdr-conn
+          docker commit hapi-cdr-conn ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }}
+          docker push ghcr.io/bellese/mct2-hapi-cdr:${{ steps.seed-hash.outputs.hash }}
+          docker rm hapi-cdr-conn
+
+      - name: Commit and push Measure image (with connectathon bundles)
+        run: |
+          docker stop hapi-measure-conn
+          docker commit hapi-measure-conn ghcr.io/bellese/mct2-hapi-measure:${{ steps.seed-hash.outputs.hash }}
           docker push ghcr.io/bellese/mct2-hapi-measure:${{ steps.seed-hash.outputs.hash }}
-          docker push ghcr.io/bellese/mct2-hapi-measure:latest
+          docker rm hapi-measure-conn
