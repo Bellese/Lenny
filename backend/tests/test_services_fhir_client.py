@@ -388,11 +388,13 @@ async def test_evaluate_measure_does_not_retry_4xx():
 
 async def test_wipe_patient_data():
     """wipe_patient_data sends DELETE requests for all clinical resource types."""
-    mock_response = _make_response(200, {})
+    mock_delete_response = _make_response(200, {})
+    mock_count_response = _make_response(200, {"resourceType": "Bundle", "total": 0})
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
         mock_ctx = AsyncMock()
-        mock_ctx.delete = AsyncMock(return_value=mock_response)
+        mock_ctx.delete = AsyncMock(return_value=mock_delete_response)
+        mock_ctx.get = AsyncMock(return_value=mock_count_response)
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -404,7 +406,8 @@ async def test_wipe_patient_data():
 
 async def test_wipe_patient_data_includes_qi_core_types():
     """wipe_patient_data includes QI-Core clinical types added for STU6 bundles."""
-    mock_response = _make_response(200, {})
+    mock_delete_response = _make_response(200, {})
+    mock_count_response = _make_response(200, {"resourceType": "Bundle", "total": 0})
     deleted_urls: list[str] = []
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
@@ -412,9 +415,10 @@ async def test_wipe_patient_data_includes_qi_core_types():
 
         async def capture_delete(url, **kwargs):
             deleted_urls.append(url)
-            return mock_response
+            return mock_delete_response
 
         mock_ctx.delete = AsyncMock(side_effect=capture_delete)
+        mock_ctx.get = AsyncMock(return_value=mock_count_response)
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -447,16 +451,39 @@ async def test_wipe_patient_data_strict_raises_after_consecutive_failures():
     assert mock_ctx.delete.call_count == 3
 
 
-async def test_wipe_patient_data_non_strict_stops_after_consecutive_failures():
+async def test_wipe_patient_data_non_strict_raises_after_consecutive_failures():
+    """non-strict mode now raises after 3 failures (silent return caused the race condition)."""
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
         mock_ctx = AsyncMock()
         mock_ctx.delete = AsyncMock(side_effect=httpx.TimeoutException("slow delete"))
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        await wipe_patient_data(strict=False)
+        with pytest.raises(RuntimeError, match="Measure engine unreachable"):
+            await wipe_patient_data(strict=False)
 
     assert mock_ctx.delete.call_count == 3
+
+
+async def test_wipe_patient_data_raises_when_verify_times_out():
+    """_verify_wiped raises if count never reaches 0 within the deadline."""
+    mock_delete_response = _make_response(200, {})
+    # Count probe always returns nonzero — simulates HAPI delete stalled
+    mock_count_response = _make_response(200, {"resourceType": "Bundle", "total": 5})
+
+    with (
+        patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx,
+        patch("app.services.fhir_client._WIPE_VERIFY_TIMEOUT_S", 0.1),
+        patch("app.services.fhir_client._WIPE_VERIFY_POLL_INTERVAL", 0.05),
+    ):
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=mock_delete_response)
+        mock_ctx.get = AsyncMock(return_value=mock_count_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(RuntimeError, match="Wipe verification timed out"):
+            await wipe_patient_data()
 
 
 # ---------------------------------------------------------------------------
