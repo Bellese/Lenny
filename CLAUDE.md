@@ -58,6 +58,17 @@ Design doc with full evidence and option analysis: `~/.gstack/projects/Bellese-m
    - The data flow (`fhir_client.py`, `validation.py`, `orchestrator.py`)
    - HAPI behavior or configuration
    - Bundle import / `$everything` / `$evaluate-measure` paths
+   - After any wipe+push cycle in the smoke run, probe `$everything` on at least one patient to confirm the full clinical bundle comes back (not just the Patient resource). Use Python — the shell strips `$` from these URLs:
+     ```bash
+     docker exec leonard-backend-1 python3 -c "
+     import httpx, sys
+     pid = sys.argv[1]
+     r = httpx.get(f'http://hapi-fhir-measure:8080/fhir/Patient/{pid}/\$everything', timeout=30)
+     types = {e['resource']['resourceType'] for e in r.json().get('entry', [])}
+     print('resource types in bundle:', types)
+     assert 'Encounter' in types, 'FAIL: $everything returned only Patient — HAPI index not ready'
+     " <a-patient-id-in-scope>
+     ```
 5. The "ship-or-not" gate: if step 1, 2, 3, or 4 didn't run successfully, **do not push**. Tell Sutton what's blocking instead.
 
 If the change is documentation-only (`*.md`, no code), steps 1–4 are not required, but step 5 still applies — confirm in the PR description that no code changed.
