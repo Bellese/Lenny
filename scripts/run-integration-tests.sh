@@ -38,6 +38,7 @@ POLL_INTERVAL=5
 # full seed + reindex + ValueSet expansion on every test run.
 # ---------------------------------------------------------------------------
 USE_PREBAKED="${USE_PREBAKED:-0}"
+REQUIRE_PREBAKED="${REQUIRE_PREBAKED:-0}"
 _using_prebaked=false
 
 if [ "$USE_PREBAKED" = "1" ]; then
@@ -72,6 +73,20 @@ if [ "$USE_PREBAKED" = "1" ]; then
         echo "  WARNING: hash-tagged images not found; falling back to :latest prebaked images."
         _using_prebaked=true
     else
+        if [ "$REQUIRE_PREBAKED" = "1" ]; then
+            echo ""
+            echo "ERROR: REQUIRE_PREBAKED=1 but no prebaked GHCR image was reachable."
+            echo "       Tried: $CDR_HASH_IMAGE"
+            echo "              $CDR_LATEST_IMAGE"
+            echo "       This usually means a GHCR auth failure or the image has not been built yet."
+            echo "       Fix options:"
+            echo "         1. Log in to GHCR: docker login ghcr.io -u <user> -p <token>"
+            echo "         2. Trigger a bake: gh workflow run bake-hapi-image.yml"
+            echo "         3. Allow vanilla fallback: unset REQUIRE_PREBAKED (CI correctness not guaranteed)"
+            echo ""
+            echo "USED PREBAKED: no — EXITING (REQUIRE_PREBAKED=1)"
+            exit 1
+        fi
         echo "  WARNING: prebaked images unavailable; falling back to vanilla $VANILLA_IMAGE + full seed."
         _cdr_image="$VANILLA_IMAGE"
         _measure_image="$VANILLA_IMAGE"
@@ -84,6 +99,9 @@ if [ "$USE_PREBAKED" = "1" ]; then
 
     if $_using_prebaked; then
         export HAPI_PREBAKED=1
+        echo "USED PREBAKED: yes"
+    else
+        echo "USED PREBAKED: no (vanilla fallback — seed will run in-container)"
     fi
 fi
 
