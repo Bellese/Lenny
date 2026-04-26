@@ -86,6 +86,7 @@ async def load_connectathon_bundles(
             bundle_json = json.loads(bundle_path.read_bytes())
             async with async_session() as session:
                 summary = await triage_test_bundle(bundle_json, bundle_path.name, session)
+                await session.commit()
             loaded += 1
             details.append({"file": bundle_path.name, "status": "loaded", **summary})
             logger.info(
