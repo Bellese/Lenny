@@ -49,7 +49,7 @@ services:
       retries: 5
 
   hapi-fhir-cdr:
-    image: hapiproject/hapi:v8.8.0-1
+    image: ${HAPI_CDR_IMAGE:-hapiproject/hapi:v8.8.0-1}
     user: root
     ports: ["8081:8080"]
     volumes: ["cdrdata:/data/hapi"]
@@ -74,7 +74,7 @@ services:
       - JAVA_TOOL_OPTIONS=-Xmx1g -Xms256m
 
   hapi-fhir-measure:
-    image: hapiproject/hapi:v8.8.0-1
+    image: ${HAPI_MEASURE_IMAGE:-hapiproject/hapi:v8.8.0-1}
     user: root
     ports: ["8080:8080"]
     volumes: ["measuredata:/data/hapi"]

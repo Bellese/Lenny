@@ -54,7 +54,7 @@ Design doc with full evidence and option analysis: `~/.gstack/projects/Bellese-m
 1. `cd backend && ruff check app/ tests/ && ruff format --check app/ tests/` — lint clean
 2. `cd backend && python3 -m pytest tests/ --ignore=tests/integration -q` — unit suite passes
 3. `./scripts/run-integration-tests.sh` — **integration suite passes against real HAPI containers.** This is the suite that fails most often in CI; it MUST pass locally first. Takes ~3-5 min.
-4. End-to-end smoke against a local stack (`docker compose -f docker-compose.yml -f docker-compose.prebaked.yml up -d`, fall back to `hapiproject/hapi:v8.8.0-1` for CDR if GHCR pull fails) for any change touching:
+4. End-to-end smoke against a local stack (`docker compose up -d` with `HAPI_CDR_IMAGE` and `HAPI_MEASURE_IMAGE` set in `.env` for the fast path — see `.env.example`; falls back to vanilla hapiproject/hapi:v8.8.0-1 if vars are unset) for any change touching:
    - The data flow (`fhir_client.py`, `validation.py`, `orchestrator.py`)
    - HAPI behavior or configuration
    - Bundle import / `$everything` / `$evaluate-measure` paths
