@@ -371,8 +371,6 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
 
 _REINDEX_POLL_INTERVAL = 5
 _VALUESET_EXPANSION_POLL_INTERVAL = 10
-_WIPE_VERIFY_TIMEOUT_S = 30.0
-_WIPE_VERIFY_POLL_INTERVAL = 0.5
 
 
 def _normalize_patient_id(patient_ref: str) -> str:
@@ -705,7 +703,6 @@ async def wipe_patient_data(*, strict: bool = True) -> None:
                 else:
                     # Fall back to individual delete via search-and-delete
                     await _delete_all_of_type(client, rt)
-                await _verify_wiped(client, rt)
                 consecutive_failures = 0
             except httpx.HTTPError:
                 consecutive_failures += 1
@@ -746,32 +743,6 @@ async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str) -> 
             if link.get("relation") == "next":
                 url = link.get("url")
                 break
-
-
-async def _verify_wiped(client: httpx.AsyncClient, resource_type: str) -> None:
-    """Poll until the search index confirms zero resources of the given type.
-
-    HAPI's search index is async (100ms refresh interval); a conditional DELETE
-    returning 2xx does not guarantee the index has drained yet.  We poll with a
-    short deadline so that the caller can trust the count is truly zero before
-    pushing new data.
-    """
-    deadline = time.monotonic() + _WIPE_VERIFY_TIMEOUT_S
-    while time.monotonic() < deadline:
-        try:
-            probe = await client.get(
-                f"{settings.MEASURE_ENGINE_URL}/{resource_type}?_summary=count",
-                timeout=10.0,
-            )
-            if probe.status_code == 200 and probe.json().get("total", -1) == 0:
-                return
-        except Exception:
-            pass
-        await asyncio.sleep(_WIPE_VERIFY_POLL_INTERVAL)
-    raise RuntimeError(
-        f"Wipe verification timed out: {resource_type} still present after "
-        f"{_WIPE_VERIFY_TIMEOUT_S:.0f}s — HAPI delete may still be running"
-    )
 
 
 async def resolve_evaluated_resource(reference: str) -> dict[str, Any]:
