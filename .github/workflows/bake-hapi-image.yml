@@ -34,6 +34,8 @@ jobs:
     name: Bake and push seeded HAPI images
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    outputs:
+      seed-hash: ${{ steps.seed-hash.outputs.hash }}
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -201,3 +203,125 @@ jobs:
           docker commit hapi-measure-conn ghcr.io/bellese/mct2-hapi-measure:${{ steps.seed-hash.outputs.hash }}
           docker push ghcr.io/bellese/mct2-hapi-measure:${{ steps.seed-hash.outputs.hash }}
           docker rm hapi-measure-conn
+
+  # -------------------------------------------------------------------------
+  # Phase 4: Verify-bake correctness gate
+  #
+  # Pulls the just-pushed :${seed-hash} images, starts the integration test
+  # stack, runs test_connectathon_measures.py with STRICT_STU6=1 (hard-fail
+  # on the 7 strict measures; the 5 non-strict measures with known issues
+  # auto-skip).  :latest is retagged and pushed ONLY if all strict assertions
+  # pass.  This prevents shipping semantically-divergent images the way the
+  # 815a1c6 → d4ff73b revert did.
+  # -------------------------------------------------------------------------
+  verify-bake:
+    name: Verify baked image correctness
+    needs: bake
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    env:
+      STRICT_STU6: "1"
+      PYTHON_VERSION: "3.10"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: 'pip'
+          cache-dependency-path: |
+            backend/requirements.txt
+            backend/requirements-test.txt
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-test.txt
+
+      - name: Pull baked images
+        run: |
+          docker pull ghcr.io/bellese/mct2-hapi-cdr:${{ needs.bake.outputs.seed-hash }}
+          docker pull ghcr.io/bellese/mct2-hapi-measure:${{ needs.bake.outputs.seed-hash }}
+
+      - name: Start test stack with baked images
+        run: |
+          HAPI_CDR_IMAGE=ghcr.io/bellese/mct2-hapi-cdr:${{ needs.bake.outputs.seed-hash }} \
+          HAPI_MEASURE_IMAGE=ghcr.io/bellese/mct2-hapi-measure:${{ needs.bake.outputs.seed-hash }} \
+          docker compose -f docker-compose.test.yml -f docker-compose.prebaked.yml up -d
+
+      - name: Wait for HAPI FHIR instances to be ready
+        run: |
+          echo "==> Waiting for CDR (port 8180) and Measure (port 8181)..."
+          DEADLINE=$((SECONDS + 300))
+          CDR_OK=false MEASURE_OK=false
+          while [ $SECONDS -lt $DEADLINE ]; do
+            if [ "$CDR_OK" = "false" ] && curl -sf http://localhost:8180/fhir/metadata > /dev/null 2>&1; then
+              echo "CDR ready"; CDR_OK=true
+            fi
+            if [ "$MEASURE_OK" = "false" ] && curl -sf http://localhost:8181/fhir/metadata > /dev/null 2>&1; then
+              echo "Measure ready"; MEASURE_OK=true
+            fi
+            [ "$CDR_OK" = "true" ] && [ "$MEASURE_OK" = "true" ] && break
+            sleep 5
+          done
+          if [ "$CDR_OK" = "false" ] || [ "$MEASURE_OK" = "false" ]; then
+            echo "ERROR: HAPI instances did not become ready within 300s"
+            exit 1
+          fi
+
+      - name: Wait for PostgreSQL to be ready
+        run: |
+          ELAPSED=0
+          until docker compose -f docker-compose.test.yml exec -T db pg_isready -U mct2 > /dev/null 2>&1; do
+            if [ "$ELAPSED" -ge 60 ]; then echo "ERROR: PostgreSQL timeout"; exit 1; fi
+            sleep 2; ELAPSED=$((ELAPSED + 2))
+          done
+          echo "PostgreSQL ready."
+
+      - name: Run verify-bake tests (strict measures must pass)
+        working-directory: backend
+        run: |
+          python3 -m pytest \
+            tests/integration/test_connectathon_measures.py \
+            -m integration -v --tb=short --durations=20 \
+            2>&1 | tee /tmp/verify-output.txt
+          STATUS=${PIPESTATUS[0]}
+          echo "## Verify-bake Results ($([ $STATUS -eq 0 ] && echo PASS || echo FAIL))" >> "$GITHUB_STEP_SUMMARY"
+          grep -A 200 'slowest durations' /tmp/verify-output.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || true
+          exit $STATUS
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          echo "=== hapi-fhir-cdr logs (last 200 lines) ==="
+          docker compose -f docker-compose.test.yml logs --tail=200 hapi-fhir-cdr 2>&1 || true
+          echo "=== hapi-fhir-measure logs (last 200 lines) ==="
+          docker compose -f docker-compose.test.yml logs --tail=200 hapi-fhir-measure 2>&1 || true
+
+      - name: Stop test stack
+        if: always()
+        run: |
+          HAPI_CDR_IMAGE=ghcr.io/bellese/mct2-hapi-cdr:${{ needs.bake.outputs.seed-hash }} \
+          HAPI_MEASURE_IMAGE=ghcr.io/bellese/mct2-hapi-measure:${{ needs.bake.outputs.seed-hash }} \
+          docker compose -f docker-compose.test.yml -f docker-compose.prebaked.yml down -v 2>/dev/null || true
+
+      - name: Retag :latest (only reached if verification passed)
+        run: |
+          docker tag \
+            ghcr.io/bellese/mct2-hapi-cdr:${{ needs.bake.outputs.seed-hash }} \
+            ghcr.io/bellese/mct2-hapi-cdr:latest
+          docker push ghcr.io/bellese/mct2-hapi-cdr:latest
+          docker tag \
+            ghcr.io/bellese/mct2-hapi-measure:${{ needs.bake.outputs.seed-hash }} \
+            ghcr.io/bellese/mct2-hapi-measure:latest
+          docker push ghcr.io/bellese/mct2-hapi-measure:latest
+          echo "✅ :latest retagged (hash: ${{ needs.bake.outputs.seed-hash }})"
