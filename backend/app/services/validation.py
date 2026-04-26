@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import httpx
-from sqlalchemy import delete, select, tuple_
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -720,41 +720,33 @@ async def triage_test_bundle(
                 f"Details: {str(exc)}"
             ) from exc
 
-    # Fully replace expected results owned by this source bundle before loading the
-    # current bundle contents. This removes stale rows when a bundle shrinks or when
-    # MADiE changes the canonical URL for the same filename.
+    # Delete stale expected results in two passes:
+    # 1. Remove all rows owned by this exact filename so a re-upload of the same file
+    #    with fewer patients or a renamed measure URL leaves nothing behind.
+    # 2. Remove any rows from OTHER bundles that cover the same measures so uploading
+    #    bundle_v2.json after bundle_v1.json for measure M doesn't leave v1's patients
+    #    mixed in with v2's patients.  (Fixes issue #64.)
     await session.execute(delete(ExpectedResult).where(ExpectedResult.source_bundle == filename))
-
-    existing_by_key: dict[tuple[str, str], ExpectedResult] = {}
     if test_cases:
-        key_tuples = [(tc["measure_url"], tc["patient_ref"]) for tc in test_cases]
-        existing_result = await session.execute(
-            select(ExpectedResult).where(tuple_(ExpectedResult.measure_url, ExpectedResult.patient_ref).in_(key_tuples))
-        )
-        existing_by_key = {(er.measure_url, er.patient_ref): er for er in existing_result.scalars().all()}
+        covered_measure_urls = list({tc["measure_url"] for tc in test_cases})
+        await session.execute(delete(ExpectedResult).where(ExpectedResult.measure_url.in_(covered_measure_urls)))
 
     for tc in test_cases:
-        key = (tc["measure_url"], tc["patient_ref"])
-        existing = existing_by_key.get(key)
-        if existing:
-            existing.test_description = tc["test_description"]
-            existing.expected_populations = tc["expected_populations"]
-            existing.period_start = tc["period_start"]
-            existing.period_end = tc["period_end"]
-            existing.source_bundle = filename
-        else:
-            session.add(
-                ExpectedResult(
-                    measure_url=tc["measure_url"],
-                    patient_ref=tc["patient_ref"],
-                    test_description=tc["test_description"],
-                    expected_populations=tc["expected_populations"],
-                    period_start=tc["period_start"],
-                    period_end=tc["period_end"],
-                    source_bundle=filename,
-                )
+        session.add(
+            ExpectedResult(
+                measure_url=tc["measure_url"],
+                patient_ref=tc["patient_ref"],
+                test_description=tc["test_description"],
+                expected_populations=tc["expected_populations"],
+                period_start=tc["period_start"],
+                period_end=tc["period_end"],
+                source_bundle=filename,
             )
-    await session.commit()
+        )
+    # Intentionally no session.commit() here — the commit is deferred to
+    # process_bundle_upload so that DB changes and clinical push succeed or fail
+    # atomically.  If push_resources raises below, the session context manager in
+    # process_bundle_upload rolls back both the delete and these inserts.  (Fixes #65.)
 
     # Push clinical data to active CDR (default or external)
     patients_loaded = 0
