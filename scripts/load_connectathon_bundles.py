@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import pathlib
 import sys
 import time
@@ -32,9 +33,9 @@ from typing import Any
 
 import httpx
 
-MEASURE_URL = "http://hapi-fhir-measure:8080/fhir"
-CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-BUNDLE_DIR = pathlib.Path("/seed/connectathon-bundles")
+MEASURE_URL = os.environ.get("MEASURE_FHIR_URL", "http://hapi-fhir-measure:8080/fhir")
+CDR_URL = os.environ.get("CDR_FHIR_URL", "http://hapi-fhir-cdr:8080/fhir")
+BUNDLE_DIR = pathlib.Path(os.environ.get("CONNECTATHON_BUNDLES_DIR", "/seed/connectathon-bundles"))
 MANIFEST_PATH = BUNDLE_DIR / "manifest.json"
 
 _MEASURE_DEF_TYPES = {"Measure", "Library", "ValueSet", "CodeSystem"}
