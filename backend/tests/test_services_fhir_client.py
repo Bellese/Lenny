@@ -447,14 +447,16 @@ async def test_wipe_patient_data_strict_raises_after_consecutive_failures():
     assert mock_ctx.delete.call_count == 3
 
 
-async def test_wipe_patient_data_non_strict_stops_after_consecutive_failures():
+async def test_wipe_patient_data_non_strict_raises_after_consecutive_failures():
+    """non-strict mode now raises after 3 failures (silent return caused the race condition)."""
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
         mock_ctx = AsyncMock()
         mock_ctx.delete = AsyncMock(side_effect=httpx.TimeoutException("slow delete"))
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        await wipe_patient_data(strict=False)
+        with pytest.raises(RuntimeError, match="Measure engine unreachable"):
+            await wipe_patient_data(strict=False)
 
     assert mock_ctx.delete.call_count == 3
 

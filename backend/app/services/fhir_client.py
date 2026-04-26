@@ -659,10 +659,10 @@ async def wipe_patient_data(*, strict: bool = True) -> None:
     This allows the previous job's evaluated resources to remain available
     for inspection until a new job begins.
 
-    In strict mode, fail fast if the measure engine is unreachable: after 3
-    consecutive timeouts we raise immediately rather than grinding for 20+ minutes.
-    Validation runs use non-strict mode so a slow conditional delete does not abort
-    patient-level comparison when the engine is otherwise up.
+    Raises RuntimeError after 3 consecutive HTTP failures regardless of strict mode.
+    A timed-out DELETE leaves HAPI's server-side operation still running; pushing new
+    data over it causes the in-flight DELETE to wipe the freshly-pushed resources.
+    The strict parameter is kept for API compatibility but no longer silences failures.
     """
     resource_types = [
         "MeasureReport",
@@ -692,7 +692,7 @@ async def wipe_patient_data(*, strict: bool = True) -> None:
     ]
     _MAX_CONSECUTIVE_FAILURES = 3
     consecutive_failures = 0
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client:
         for rt in resource_types:
             try:
                 # Use conditional delete: DELETE ResourceType?_lastUpdated=gt1900-01-01
@@ -711,16 +711,10 @@ async def wipe_patient_data(*, strict: bool = True) -> None:
                     extra={"resourceType": rt},
                 )
                 if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-                    if strict:
-                        raise RuntimeError(
-                            f"Measure engine unreachable: {consecutive_failures} consecutive "
-                            "timeouts during wipe. Job aborted."
-                        )
-                    logger.warning(
-                        "Stopping best-effort wipe after consecutive failures",
-                        extra={"failures": consecutive_failures},
+                    raise RuntimeError(
+                        f"Measure engine unreachable: {consecutive_failures} consecutive "
+                        "timeouts during wipe. Job aborted."
                     )
-                    return
 
 
 async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str) -> None:
