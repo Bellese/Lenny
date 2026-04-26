@@ -852,6 +852,44 @@ class TestTriageTestBundle:
         mock_reindex.assert_not_called()
         mock_wait.assert_not_called()
 
+    async def test_progress_fn_called_for_each_phase(self, test_session, mock_test_bundle_with_expected, monkeypatch):
+        """progress_fn is called once per phase with the correct field name and count."""
+        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False)
+        monkeypatch.setattr("app.services.validation.settings.DEFAULT_CDR_URL", "http://hapi-fhir-cdr:8080/fhir")
+
+        calls: list[tuple[str, int]] = []
+
+        async def record_progress(field: str, value: int) -> None:
+            calls.append((field, value))
+
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+            await triage_test_bundle(
+                mock_test_bundle_with_expected, "test.json", test_session, progress_fn=record_progress
+            )
+
+        fields_called = [c[0] for c in calls]
+        assert "measures_loaded" in fields_called
+        assert "expected_results_loaded" in fields_called
+        assert "patients_loaded" in fields_called
+        # measures must be reported before expected_results which must be before patients
+        assert fields_called.index("measures_loaded") < fields_called.index("expected_results_loaded")
+        assert fields_called.index("expected_results_loaded") < fields_called.index("patients_loaded")
+        # values match summary counts
+        assert dict(calls)["measures_loaded"] == 1
+        assert dict(calls)["expected_results_loaded"] == 1
+        assert dict(calls)["patients_loaded"] == 1
+
+    async def test_progress_fn_none_does_not_raise(self, test_session, mock_test_bundle_with_expected, monkeypatch):
+        """Omitting progress_fn (None) does not raise and returns correct summary."""
+        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False)
+
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+
+        assert result["measures_loaded"] == 1
+        assert result["patients_loaded"] == 1
+        assert result["expected_results_loaded"] == 1
+
 
 # ---------------------------------------------------------------------------
 # process_bundle_upload (async, mocked async_session + triage)

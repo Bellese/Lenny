@@ -13,7 +13,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import httpx
 from sqlalchemy import delete, select
@@ -686,6 +686,8 @@ async def triage_test_bundle(
     bundle_json: dict[str, Any],
     filename: str,
     session: AsyncSession,
+    *,
+    progress_fn: Callable[[str, int], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Triage a test bundle: send resources to their correct destinations.
 
@@ -720,6 +722,9 @@ async def triage_test_bundle(
                 f"Details: {str(exc)}"
             ) from exc
 
+    if progress_fn:
+        await progress_fn("measures_loaded", sum(1 for r in measure_defs if r.get("resourceType") == "Measure"))
+
     # Delete stale expected results in two passes:
     # 1. Remove all rows owned by this exact filename so a re-upload of the same file
     #    with fewer patients or a renamed measure URL leaves nothing behind.
@@ -748,6 +753,9 @@ async def triage_test_bundle(
     # atomically.  If push_resources raises below, the session context manager in
     # process_bundle_upload rolls back both the delete and these inserts.  (Fixes #65.)
 
+    if progress_fn:
+        await progress_fn("expected_results_loaded", len(test_cases))
+
     # Push clinical data to active CDR (default or external)
     patients_loaded = 0
     if clinical:
@@ -761,6 +769,9 @@ async def triage_test_bundle(
             "Clinical resources loaded to CDR",
             extra={"count": len(clinical), "cdr_url": cdr_url},
         )
+
+    if progress_fn:
+        await progress_fn("patients_loaded", patients_loaded)
 
     if settings.HAPI_SYNC_AFTER_UPLOAD:
         sync_started = datetime.now(timezone.utc)
@@ -808,7 +819,14 @@ async def process_bundle_upload(upload_id: int) -> None:
 
             bundle_json = await asyncio.to_thread(lambda: json.loads(Path(upload.file_path).read_bytes()))
 
-            summary = await triage_test_bundle(bundle_json, upload.filename, session)
+            async def _on_progress(field: str, value: int) -> None:
+                async with async_session() as prog_session:
+                    u = await prog_session.get(BundleUpload, upload_id)
+                    if u:
+                        setattr(u, field, value)
+                        await prog_session.commit()
+
+            summary = await triage_test_bundle(bundle_json, upload.filename, session, progress_fn=_on_progress)
 
             upload.measures_loaded = summary["measures_loaded"]
             upload.patients_loaded = summary["patients_loaded"]
