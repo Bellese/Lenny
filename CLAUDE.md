@@ -13,9 +13,9 @@
 | Frontend dev server | `cd frontend && npm start` (port 3001) | local dev only |
 
 **Decision tree:**
-- Pushing a PR? → Lint + Unit + Integration (no skipping).
+- Pushing a PR? → Lint + Unit + CI-equivalent integration (no skipping).
 - Touching `measure_*` / `orchestrator.py` / `fhir_client.py` / `validation.py`? → Add Full workflow.
-- Adding measures or bumping HAPI? → Manually trigger Connectathon source-of-truth before merge.
+- Adding measures or bumping HAPI? → Run the full integration suite (or manually trigger the nightly Connectathon Measures workflow) before merge.
 
 The nightly Connectathon Measures workflow has three independent jobs: **Bundle Loader Test** (vanilla HAPI), **Connectathon Eval** (pre-baked HAPI), and **Full Workflow** (clean nightly run). See `docs/testing.md` for the full strategy.
 
@@ -91,7 +91,16 @@ If the change is documentation-only (`*.md`, no code), steps 1–4 are not requi
 Branches: `feature/*`, `fix/*`, or `chore/*` off `main`, merged via PR. Always work in a git worktree (`git worktree add ../mct2-<branch> -b <branch> origin/main`) — never commit directly on the current branch.
 Work items: GitHub Issues on the [project board](https://github.com/orgs/Bellese/projects/33/views/3).
 
-Phase commands (Ideate → Plan → Build → Review → Ship → Verify) and skill toolkits are documented in `docs/workflow.md`.
+| Phase | Command | Toolkit |
+|-------|---------|---------|
+| Ideate | `/office-hours` | gstack |
+| Plan | `/brainstorming` then `/writing-plans` | superpowers |
+| Build | `/subagent-driven-development` | superpowers |
+| Review | `/review` | gstack |
+| Ship | `/ship` | gstack |
+| Verify | `/qa` + `/browse` | gstack |
+
+Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small tasks skip Ideate and Plan; spikes are Ideate only. See `docs/workflow.md` for full details.
 
 ## AWS
 
