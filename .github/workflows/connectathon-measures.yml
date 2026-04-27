@@ -34,13 +34,14 @@ jobs:
   bundle-loader-test:
     name: Bundle Loader Test (vanilla HAPI)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     # Validates load_connectathon_bundles() end-to-end: manifest integrity, SHA256,
     # bundle upload, canonical URL resolution, and ExpectedResult row counts.
     # Must run on vanilla HAPI — when HAPI_PREBAKED=1 these tests skip themselves.
     # Runtime: cold HAPI startup + full 12-bundle upload via load_connectathon_bundles()
     # (no cross-bundle VS deduplication, slower than the fixture path) + static checks.
-    # Worst-case on slow runners: ~50-60 min; 90 min gives comfortable headroom.
+    # Empirical: Apr 27 run hit the 90-min wall; 120 min matches the original monolithic
+    # source-of-truth budget and gives headroom for slow runners.
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
