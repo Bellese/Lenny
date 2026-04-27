@@ -71,6 +71,7 @@ services:
       - hapi.fhir.maximum_expansion_size=50000 # Connectathon ValueSets exceed HAPI's default expansion limit.
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
+      - spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync
       - JAVA_TOOL_OPTIONS=-Xmx1g -Xms256m
 
   hapi-fhir-measure:
@@ -104,6 +105,7 @@ services:
       - spring.jpa.properties.hibernate.search.backend.directory.root=/data/hapi/lucene
       - spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
       - spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100 # Reduce HAPI search-index lag after uploads.
+      - spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync
       - JAVA_TOOL_OPTIONS=-Xmx1500m -Xms256m
 
   seed:

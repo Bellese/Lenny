@@ -25,3 +25,4 @@ ENV hapi.fhir.enforce_referential_integrity_on_write=false
 ENV hapi.fhir.maximum_expansion_size=50000
 ENV spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
 ENV spring.datasource.driverClassName=org.h2.Driver
+ENV spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync
