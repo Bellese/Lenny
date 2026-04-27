@@ -1,5 +1,11 @@
 # TODOS — MCT2
 
+> **FROZEN 2026-04-27** — Work tracking moved to GitHub Issues
+> ([project board](https://github.com/orgs/Bellese/projects/33/views/3))
+> per ADR-005. The items below are kept here as historical context only;
+> do not add, edit, or remove items in this file. Open a new GitHub Issue
+> for any new work.
+
 ## Future Data Acquisition: Bulk Data Export Strategy
 **What:** Add `BulkExportStrategy` as a second data acquisition option using FHIR Bulk Data $export.
 **Why:** Batch queries work for ~4,000 patients but may not scale to larger populations. $export returns NDJSON files asynchronously and is purpose-built for bulk extraction — 10-100x faster for large populations with less CDR load.
