@@ -34,3 +34,4 @@ ENV spring.jpa.properties.hibernate.search.backend.analysis.configurer=ca.uhn.fh
 ENV spring.jpa.properties.hibernate.search.backend.directory.root=/data/hapi/lucene
 ENV spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
 ENV spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100
+ENV spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync

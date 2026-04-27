@@ -44,9 +44,9 @@ PUT/POST 200 means the resource is durable. Search consistency is async, governe
 - `/validation/upload-bundle` returns 200 before CDR indexing completes; subsequent `/jobs` runs race the index. There is no CDR-side wait.
 - `$everything` is a victim of this bug, not a cause. Don't propose replacing it.
 
-### Structural fix (NOT yet applied — tracked in #206)
+### Structural fix (applied in PR #206)
 
-Setting `hibernate.search.indexing.plan.synchronization.strategy=sync` on both HAPI services would make POST/PUT block until the index is refreshed, eliminating the bug class entirely (write-throughput hit). See issue #206 for the rollout plan.
+`spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync` is now set on both HAPI services in `docker-compose.yml`, `docker-compose.test.yml`, and both seeded Dockerfiles. POST/PUT blocks until the Lucene index is refreshed, eliminating the bug class. The Python-side compensator (`HAPI_SYNC_AFTER_UPLOAD` + `trigger_reindex_and_wait*`) is still present as a rollback safety net; removal is a follow-up.
 
 ### History
 

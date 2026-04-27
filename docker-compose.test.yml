@@ -44,6 +44,7 @@ services:
       - hapi.fhir.maximum_expansion_size=50000
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
+      - spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync
 
   hapi-fhir-measure:
     image: ${HAPI_MEASURE_IMAGE:-hapiproject/hapi:v8.8.0-1}
@@ -70,6 +71,7 @@ services:
       - spring.jpa.properties.hibernate.search.backend.directory.root=/data/hapi/lucene
       - spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
       - spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100
+      - spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync
       - hapi.fhir.reuse_cached_search_results_millis=${HAPI_REUSE_SEARCH_CACHE_MS:-0}
       - hapi.fhir.client_id_strategy=ANY
       - hapi.fhir.allow_external_references=true
