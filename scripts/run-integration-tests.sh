@@ -43,7 +43,7 @@ _using_prebaked=false
 
 if [ "$USE_PREBAKED" = "1" ]; then
     echo "==> USE_PREBAKED=1 — resolving pre-baked HAPI images from GHCR..."
-    SEED_HASH=$(cd "$PROJECT_ROOT" && find seed/ seed/connectathon-bundles/ docker/seed-hapi.sh docker-compose.test.yml \
+    SEED_HASH=$(cd "$PROJECT_ROOT" && find seed/ docker/seed-hapi.sh docker-compose.test.yml \
         docker/hapi-cdr-seeded.Dockerfile docker/hapi-measure-seeded.Dockerfile \
         -type f 2>/dev/null | sort | xargs sha256sum 2>/dev/null | sha256sum | cut -c1-12)
     echo "  Seed hash: ${SEED_HASH}"
