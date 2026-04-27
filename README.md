@@ -22,6 +22,8 @@ MCT2 runs 5 Docker containers:
 | **hapi-fhir-cdr** | Default clinical data repository | 8080 (internal) |
 | **hapi-fhir-measure** | Measure calculation engine ($evaluate-measure) | 8080 (internal) |
 
+Local dev uses vanilla `docker-compose.yml` with runtime IG load; CI and prod use `docker-compose.prebaked.yml` (HAPI images with QI-Core / US-Core IGs and connectathon bundles baked in for fast cold-start). See [docs/architecture.md](docs/architecture.md) for the full service map, data flow, HAPI configuration, and environment variables.
+
 ## Requirements
 
 - Docker Engine 24+ and Docker Compose v2+
@@ -61,20 +63,40 @@ By default, MCT2 uses a bundled CDR with test data. To connect to your organizat
 4. Click "Test Connection" to verify
 5. Save
 
+## Connectathon Measures
+
+MCT2 ships with the 12 measures targeted for the MADiE May 2026 Connectathon, pre-loaded into the bundled CDR for immediate testing. Per-measure pass/fail status, excluded bundles with root-cause notes, and resource baselines (Patient: 568, Measure: ≥12, Library: 24, ValueSet: ≈123) are tracked in [docs/connectathon-measures-status.md](docs/connectathon-measures-status.md). The nightly **Connectathon Measures** GitHub Actions workflow runs the source-of-truth suite (golden + connectathon-measures + full-workflow tests) against pre-baked HAPI images and surfaces drift.
+
 ## Development
 
+The backend pins to **Python 3.10** to match CI. Use a project-local venv:
+
 ```bash
+# One-time setup
+cd backend
+python3.10 -m venv .venv
+.venv/bin/pip install -r requirements.txt -r requirements-test.txt
+
+# Day-to-day
+source backend/.venv/bin/activate
+
 # Unit tests
 cd backend && python -m pytest tests/ --ignore=tests/integration -v
 
 # Unit tests with coverage (70% floor enforced by CI)
 cd backend && python -m pytest tests/ --ignore=tests/integration --cov=app --cov-report=term-missing
 
+# Integration tests (CI-equivalent — same ignore flags pr-checks.yml uses)
+./scripts/run-integration-tests.sh \
+  --ignore=tests/integration/test_golden_measures.py \
+  --ignore=tests/integration/test_connectathon_measures.py \
+  --ignore=tests/integration/test_full_workflow.py
+
 # Lint
 cd backend && ruff check app/ tests/ && ruff format --check app/ tests/
 ```
 
-See [docs/testing.md](docs/testing.md) for the full testing strategy, integration test setup, and golden file test patterns.
+See [docs/testing.md](docs/testing.md) for the full testing strategy, the three-job nightly workflow (Bundle Loader Test, Connectathon Eval, Full Workflow), and golden file test patterns. See [CLAUDE.md](CLAUDE.md) for the mandatory pre-push checklist and the HAPI async-indexing troubleshooting reference.
 
 ## License
 
