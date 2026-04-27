@@ -53,7 +53,14 @@ Design doc with full evidence and option analysis: `~/.gstack/projects/Bellese-m
 
 1. `cd backend && ruff check app/ tests/ && ruff format --check app/ tests/` — lint clean
 2. `cd backend && python3 -m pytest tests/ --ignore=tests/integration -q` — unit suite passes
-3. `./scripts/run-integration-tests.sh` — **integration suite passes against real HAPI containers.** This is the suite that fails most often in CI; it MUST pass locally first. Takes ~3-5 min.
+3. Run the CI-equivalent integration suite — **same ignore flags that `pr-checks.yml` uses, against real HAPI containers.** This is the suite that fails most often in CI; it MUST pass locally first. Takes ~3-5 min.
+   ```bash
+   ./scripts/run-integration-tests.sh \
+     --ignore=tests/integration/test_golden_measures.py \
+     --ignore=tests/integration/test_connectathon_measures.py \
+     --ignore=tests/integration/test_full_workflow.py
+   ```
+   (The full suite — `./scripts/run-integration-tests.sh` with no flags — runs 600+ connectathon-measure patient tests that CI skips on PRs. Only run those when changing the measure evaluation pipeline or before a nightly run.)
 4. End-to-end smoke against a local stack (`docker compose up -d` with `HAPI_CDR_IMAGE` and `HAPI_MEASURE_IMAGE` set in `.env` for the fast path — see `.env.example`; falls back to vanilla hapiproject/hapi:v8.8.0-1 if vars are unset) for any change touching:
    - The data flow (`fhir_client.py`, `validation.py`, `orchestrator.py`)
    - HAPI behavior or configuration
