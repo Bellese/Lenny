@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.7.0] - 2026-04-27
+
+### Changed
+- **Measure IDs now display as short CMS numbers** — the Measures table, job creation form, patient group dropdown, and Results page all show `CMS122` instead of the full raw HAPI ID (`CMS122FHIRDiabetesAssessGT9Pct`). Handles both `CMS{n}FHIR...` and `CMSFHIR{n}...` ID patterns.
+- **"FHIR" suffix stripped from measure names** — display names like `"Breast Cancer ScreeningFHIR"` now show as `"Breast Cancer Screening"` across all pages.
+- **Job creation dropdown shows formatted labels** — measure options now display as `CMS71 — Anticoagulation Therapy Prescribed at Discharge` instead of raw FHIR IDs. Patient group options show the same format with patient count appended.
+
 ## [0.0.6.8] - 2026-04-25
 
 ### Added
