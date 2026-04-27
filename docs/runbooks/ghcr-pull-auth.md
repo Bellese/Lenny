@@ -2,15 +2,21 @@
 
 ## Why this exists
 
-The Phase 1 per-measure HAPI reset architecture (PR #167, design doc
-`2026-04-24-main-design-ephemeral-hapi-per-measure.md`) requires the prod EC2
-instance to pull pre-baked HAPI images from `ghcr.io/bellese/mct2-hapi-{cdr,measure}`.
-GHCR packages owned by an org default to **private**, so an unauthenticated
+CI and prod deploys consume pre-baked HAPI images from
+`ghcr.io/bellese/mct2-hapi-{cdr,measure}` via `docker-compose.prebaked.yml`
+(connectathon bundles + IGs baked in for fast cold-start, PR #199). GHCR
+packages owned by an org default to **private**, so an unauthenticated
 `docker compose pull` returns 401 and the deploy fails:
 
 ```
 hapi-fhir-measure Error Head "https://ghcr.io/v2/bellese/mct2-hapi-measure/manifests/latest": unauthorized
 ```
+
+> **Note:** The original justification for this auth flow was the Phase 1
+> per-measure HAPI reset architecture (PR #167), which was reverted in
+> PR #180. The auth mechanism remains in use because pre-baked images
+> are still the deployment path for CI and prod under the current
+> single-instance architecture (PR #199).
 
 ## How auth works
 
@@ -100,6 +106,7 @@ Considered. Rejected because:
 
 ## Related
 
-- PR that introduced this: TBD (chore/ghcr-pull-auth)
-- PR that introduced the prebaked dependency: #167
+- PR that introduced the auth mechanism: #168
+- PR that introduced the prebaked dependency: #167 (Phase 1, reverted in #180)
+- PR that wired prebaked images into CI/prod under current architecture: #199
 - Bake workflow: `.github/workflows/bake-hapi-image.yml`

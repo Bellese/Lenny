@@ -100,17 +100,26 @@ Integration tests are marked `@pytest.mark.integration` and live in `backend/tes
 | `test_connectathon_measures.py` | Parametrized per-test-case run across all connectathon bundles; skipped on the PR gate and included in the nightly source-of-truth job |
 | `test_full_workflow.py` | Full-stack pipeline covering job orchestration → measure eval → result storage; skipped on the PR gate and run in its own clean nightly job |
 
-The nightly `connectathon-measures.yml` workflow still runs once per night, but it now uses two clean jobs:
-- `source-of-truth` runs `test_golden_measures.py` and `test_connectathon_measures.py`.
-- `full-workflow` runs `test_full_workflow.py` by itself so it does not inherit the connectathon-loaded CDR state.
+The nightly `connectathon-measures.yml` workflow runs once per night and on manual dispatch. It uses three independent clean jobs (PR #203):
+- **Bundle Loader Test (vanilla HAPI)** — exercises the runtime IG load + bundle replay path against `hapiproject/hapi:v8.8.0-1`.
+- **Connectathon Eval (pre-baked HAPI)** — runs the connectathon source-of-truth suite (`test_golden_measures.py` + `test_connectathon_measures.py`) against the prebaked GHCR images.
+- **Full Workflow (clean nightly run)** — runs `test_full_workflow.py` by itself so it does not inherit the connectathon-loaded CDR state.
+
+**Manually triggering the nightly workflow** (Actions → Connectathon Measures → Run workflow) is appropriate before merging measure-engine, HAPI-bump, or bundle-format changes, in addition to the automatic nightly run.
 
 ---
 
 ## Troubleshooting measure IP undercount
 
-If `/jobs` reports lower initial population counts than the direct-HAPI integration harness, check `HAPI_SYNC_AFTER_UPLOAD`, `PATIENT_DATA_STRATEGY`, and `VALUESET_RELOAD_MODE` first. HAPI indexes Encounter patient references and expands large ValueSets asynchronously after bundle upload, so MCT2 waits for reindex and `$expand` readiness before jobs can run against freshly uploaded Connectathon bundles. To isolate a regression, temporarily set `HAPI_SYNC_AFTER_UPLOAD=False`, `PATIENT_DATA_STRATEGY=data_requirements`, or `VALUESET_RELOAD_MODE=remap` and restart the backend.
+If `/jobs` reports lower initial population counts than the direct-HAPI integration harness, work the ladder below in order — each step rules out one cause class. The same three env vars (`HAPI_SYNC_AFTER_UPLOAD`, `PATIENT_DATA_STRATEGY`, `VALUESET_RELOAD_MODE`) are the levers; isolate one at a time.
 
-The validation dashboard path uses the same `HAPI_SYNC_AFTER_UPLOAD` reindex wait after the validation worker pushes patient data to the measure engine. Upload-bundle and `/jobs` still wait for both reindex and ValueSet expansion readiness; validation runs only need the reindex wait because they do not load new ValueSets.
+**Step 1 — confirm async-indexing is the cause.** Set `HAPI_SYNC_AFTER_UPLOAD=False`, restart the backend, and re-run the failing job. If the count *changes*, the symptom is the HAPI async-indexing race (see CLAUDE.md) — the reindex wait is masking or revealing it. If the count is *unchanged*, async-indexing is not the issue; continue to Step 2.
+
+**Step 2 — confirm the data-acquisition path.** Set `PATIENT_DATA_STRATEGY=data_requirements` (or `batch_query` if you were on `data_requirements`), restart, and re-run. If counts shift, MCT2 is fetching different resource sets between strategies — investigate which strategy is missing resources the measure CQL requires.
+
+**Step 3 — confirm ValueSet expansion.** Set `VALUESET_RELOAD_MODE=remap`, restart, and re-run. If counts move, a ValueSet expansion is the culprit (typically a code-system version mismatch between bundle and HAPI's terminology cache).
+
+**Background.** HAPI indexes Encounter patient references and expands large ValueSets asynchronously after bundle upload, so MCT2 waits for reindex and `$expand` readiness before jobs can run against freshly uploaded Connectathon bundles. The validation dashboard path uses the same `HAPI_SYNC_AFTER_UPLOAD` reindex wait after the validation worker pushes patient data; upload-bundle and `/jobs` still wait for both reindex and ValueSet expansion readiness, but validation runs only need the reindex wait because they do not load new ValueSets. The full HAPI consistency model (and the structural fix tracked in #206) lives in the *Recurring bug: HAPI async-indexing race* section of `CLAUDE.md`.
 
 ---
 
@@ -217,16 +226,17 @@ Exact population count assertions should be added once HAPI evaluation behavior 
 
 ## CI Checks (PR Gate)
 
-Every PR to `main` triggers `.github/workflows/pr-checks.yml` with 4 jobs:
+Every PR to `main` triggers `.github/workflows/pr-checks.yml` with 5 jobs:
 
 | Job | What it does | Fails if |
 |-----|-------------|----------|
 | **Unit Tests + Coverage** | Runs all unit tests with `--cov-fail-under=70` | Any test fails OR coverage < 70% |
 | **Lint** | `ruff check` + `ruff format --check` | Any lint or formatting violation |
 | **Integration Tests** | Spins up Docker containers, runs integration smoke coverage while excluding `test_golden_measures.py`, `test_connectathon_measures.py`, and `test_full_workflow.py` (all moved out of the PR gate). `STRICT_STU6=0` during rollout. | Any remaining integration test fails |
+| **Script Security Lint** | Rejects `set -x` in prod scripts and password expansion in `echo`/`printf`; runs bash unit tests | Any script violates the rules |
 | **Frontend Build** | `npm ci && npm run build` | Build fails |
 
-All 4 jobs must pass before a PR can merge.
+All 5 jobs must pass before a PR can merge.
 
 The nightly `connectathon-measures.yml` workflow adds a once-nightly source-of-truth run with clean runner isolation:
 - `source-of-truth` runs `test_golden_measures.py` and `test_connectathon_measures.py`.

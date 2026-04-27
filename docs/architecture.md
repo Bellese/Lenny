@@ -13,6 +13,15 @@
 
 The CDR and Measure Engine are intentionally separate. The CDR is replaceable — users connect their own FHIR server in Settings. The Measure Engine is permanent and is the only service with `hapi.fhir.cr.enabled=true`.
 
+### Compose modes: vanilla vs. prebaked
+
+Two compose layouts share these services:
+
+- **Local dev (`docker-compose.yml` alone)** — pulls vanilla `hapiproject/hapi:v8.8.0-1`. HAPI loads QI-Core / US-Core / CQL IGs at runtime via `hapi.fhir.implementationguides.*` env vars (see *HAPI FHIR Configuration* below). Cold-start is slow because IG packages download from the HL7 registry on first boot.
+- **CI + prod (`docker-compose.yml` + `docker-compose.prebaked.yml`)** — pulls pre-baked `ghcr.io/bellese/mct2-hapi-{cdr,measure}` images that already contain the IGs and connectathon bundles, skipping the runtime IG load (PR #199, Phase 3). GHCR auth is required to pull these — see `docs/runbooks/ghcr-pull-auth.md`.
+
+The local fast path is to set `HAPI_CDR_IMAGE` and `HAPI_MEASURE_IMAGE` in `.env` so vanilla compose reuses prebaked images without the prebaked overlay (see `.env.example`).
+
 ## Backend Structure
 
 ```

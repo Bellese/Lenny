@@ -1,5 +1,14 @@
 # Validation Failure Recovery Guide
 
+> **HISTORICAL (2026-04-27)** — The recovery flows described here are now
+> automatic in `backend/app/services/validation.py` and `_resolve_measure_id()`;
+> no manual intervention is required. EXM relative-reference resolution
+> shipped in v0.0.6.7 (#108); auto-reload of missing measures is built
+> into `run_validation()`. Kept for historical context only.
+>
+> For current debugging guidance, see `docs/testing.md` (Troubleshooting
+> measure IP undercount) and the HAPI async-indexing section of `CLAUDE.md`.
+
 ## Problem
 
 Validation runs can fail for two distinct reasons:
