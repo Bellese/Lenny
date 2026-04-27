@@ -197,11 +197,12 @@ export default function JobsPage() {
   const getPatientCount = (job) => {
     const processed = job.processed_patients ?? job.patients_processed;
     const total = job.total_patients;
-    if (processed != null && total != null && isRunning(job.status)) {
-      return `${processed.toLocaleString()} / ${total.toLocaleString()}`;
+    if (isRunning(job.status) && total > 0) {
+      return `${(processed ?? 0).toLocaleString()} / ${total.toLocaleString()}`;
     }
-    if (total != null) return total.toLocaleString();
-    if (processed != null) return processed.toLocaleString();
+    if (isRunning(job.status)) return '--';
+    if (total > 0) return total.toLocaleString();
+    if (processed > 0) return processed.toLocaleString();
     return '--';
   };
 
@@ -260,7 +261,10 @@ export default function JobsPage() {
             <div className={styles.heroProgress}>
               <div className={styles.heroProgressTop}>
                 <span className={styles.heroPct}>{progress}<span className={styles.heroPctUnit}>%</span></span>
-                {total != null && <span className={styles.heroProgressLabel}>{proc.toLocaleString()} of {total.toLocaleString()} patients</span>}
+                {total > 0
+                  ? <span className={styles.heroProgressLabel}>{proc.toLocaleString()} of {total.toLocaleString()} patients</span>
+                  : <span className={styles.heroProgressLabel}>Preparing…</span>
+                }
                 {estimateRemaining(activeJob.started_at || activeJob.created_at, progress) && (
                   <span className={styles.heroEta}>{estimateRemaining(activeJob.started_at || activeJob.created_at, progress)}</span>
                 )}
