@@ -5,11 +5,16 @@ name: Connectathon Measures
 # once a week here and can be triggered manually for large changes.
 #
 # Job split:
-#   - source-of-truth: golden isolation plus full-bundle connectathon coverage.
-#   - full-workflow: orchestration end-to-end coverage in a clean runner so it
-#     does not inherit the connectathon-loaded CDR state.
+#   - bundle-loader-test: vanilla HAPI; validates load_connectathon_bundles() end-to-end
+#     (test_smart_load.py).  Must run on vanilla HAPI — pre-baked images skip these
+#     tests since the data is already loaded.
+#   - connectathon-eval: pre-baked HAPI; golden isolation + full connectathon coverage
+#     (test_golden_measures.py + test_connectathon_measures.py).  Pre-baked images make
+#     PUT uploads idempotent/fast; eval-gate + 568 connectathon evals dominate the clock.
+#   - full-workflow: orchestration end-to-end coverage in a clean runner so it does not
+#     inherit the connectathon-loaded CDR state.
 #
-# When STRICT_STU6 flips to "1" the source-of-truth job will hard-fail on
+# When STRICT_STU6 flips to "1" the connectathon-eval job will hard-fail on
 # population mismatches, giving a weekly signal of connectathon readiness.
 
 on:
@@ -26,17 +31,16 @@ env:
   PYTHON_VERSION: "3.10"
 
 jobs:
-  source-of-truth:
-    name: Source of Truth (golden + connectathon)
+  bundle-loader-test:
+    name: Bundle Loader Test (vanilla HAPI)
     runs-on: ubuntu-latest
-    timeout-minutes: 120
-    # Runtime breakdown: cold HAPI startup + _load_seed_data + load_connectathon_bundles
-    # (12 bundles × 2 HAPI instances, ~30-50 min vanilla) + _load_golden_bundles_to_hapi
-    # eval-gate (≤600s) + 568 connectathon evals.  Apr 21 without test_smart_load took 52m;
-    # adding load_connectathon_bundles pushes the floor to 80-100m on slower runners.
-    env:
-      # workflow_dispatch input or nightly soft default
-      STRICT_STU6: ${{ github.event.inputs.strict_stu6 || '0' }}
+    timeout-minutes: 90
+    # Validates load_connectathon_bundles() end-to-end: manifest integrity, SHA256,
+    # bundle upload, canonical URL resolution, and ExpectedResult row counts.
+    # Must run on vanilla HAPI — when HAPI_PREBAKED=1 these tests skip themselves.
+    # Runtime: cold HAPI startup + full 12-bundle upload via load_connectathon_bundles()
+    # (no cross-bundle VS deduplication, slower than the fixture path) + static checks.
+    # Worst-case on slow runners: ~50-60 min; 90 min gives comfortable headroom.
 
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
@@ -50,15 +54,46 @@ jobs:
         working-directory: backend
         run: pip install -r requirements.txt -r requirements-test.txt
 
-      - name: Run weekly source-of-truth integration suite
+      - name: Run bundle-loader integration tests (vanilla HAPI)
+        run: ./scripts/run-integration-tests.sh tests/integration/test_smart_load.py
+
+  connectathon-eval:
+    name: Connectathon Eval (pre-baked HAPI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Runs golden isolation and full connectathon coverage against pre-baked images.
+    # Pre-baked images already contain all 12 bundles; PUT uploads are fast idempotent
+    # upserts.  Clock is dominated by eval-gate (≤600s) + 568 connectathon evals.
+    # verify-bake (superset) finishes in ~45 min — 60 min is safe headroom.
+    env:
+      STRICT_STU6: ${{ github.event.inputs.strict_stu6 || '0' }}
+      USE_PREBAKED: "1"
+      REQUIRE_PREBAKED: "1"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-test.txt
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run golden + connectathon eval tests (pre-baked HAPI)
         run: >-
           ./scripts/run-integration-tests.sh
-          tests/integration/test_smart_load.py
           tests/integration/test_golden_measures.py
           tests/integration/test_connectathon_measures.py
-        # test_smart_load includes the bundle-loader tests (load_connectathon_bundles),
-        # which are skipped on the PR gate when HAPI_PREBAKED=1 to avoid re-uploading
-        # 12 CMS bundles on every PR.  Nightly runs vanilla HAPI so they execute in full.
 
   full-workflow:
     name: Full Workflow (clean nightly run)
