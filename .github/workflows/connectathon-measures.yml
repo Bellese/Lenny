@@ -29,7 +29,11 @@ jobs:
   source-of-truth:
     name: Source of Truth (golden + connectathon)
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 120
+    # Runtime breakdown: cold HAPI startup + _load_seed_data + load_connectathon_bundles
+    # (12 bundles × 2 HAPI instances, ~30-50 min vanilla) + _load_golden_bundles_to_hapi
+    # eval-gate (≤600s) + 568 connectathon evals.  Apr 21 without test_smart_load took 52m;
+    # adding load_connectathon_bundles pushes the floor to 80-100m on slower runners.
     env:
       # workflow_dispatch input or nightly soft default
       STRICT_STU6: ${{ github.event.inputs.strict_stu6 || '0' }}
