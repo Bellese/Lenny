@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.8.0] - 2026-04-27
+
+### Changed
+- **Bundle-loader CI test now runs against a 2-bundle subset** — `bundle-loader-test` exercises `load_connectathon_bundles()` against CMS122 and CMS124 instead of all 12 connectathon bundles, cutting vanilla-HAPI CI wall-clock from >90 min toward ≤60 min. Structural tests (file presence, SHA256) still cover all 12 bundles. All 12 continue to load nightly via the bake job. Closes #202.
+
 ## [0.0.7.0] - 2026-04-27
 
 ### Changed
