@@ -1,6 +1,6 @@
 {
   "name": "mct2-frontend",
-  "version": "0.0.7.0",
+  "version": "0.0.8.0",
   "private": true,
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.0.0",

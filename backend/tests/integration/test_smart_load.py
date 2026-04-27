@@ -10,6 +10,21 @@ Verifies that every entry in seed/connectathon-bundles/manifest.json:
 
 All tests tagged @pytest.mark.integration require live HAPI FHIR + PostgreSQL
 infrastructure (run via scripts/run-integration-tests.sh).
+
+CI subset (bundle-loader-test job)
+-----------------------------------
+Structural tests (file presence, SHA256) run against all 12 bundles — they are
+fast and guard against checked-in corruption.
+
+Loader-replay tests (test_loader_*) exercise load_connectathon_bundles() against
+a 2-bundle subset (_CI_SUBSET) to keep vanilla-HAPI CI runtime under 60 min.
+The subset was chosen to cover two distinct clinical domains that share VSAC
+ValueSets (race/ethnicity/payer demographics), exercising the shared-VS PUT path
+without loading all 12 bundles.  All 12 bundles are still loaded nightly by the
+bake job (scripts/load_connectathon_bundles.py) which is the authoritative
+source-of-truth coverage.
+
+See: https://github.com/Bellese/mct2/issues/202
 """
 
 from __future__ import annotations
@@ -42,6 +57,15 @@ _MANIFEST_PATH = _BUNDLE_DIR / "manifest.json"
 # QI-Core IG canonical URL
 _QICORE_IG_URL = "http://hl7.org/fhir/us/qicore/ImplementationGuide/hl7.fhir.us.qicore"
 
+# Loader-replay tests run against this 2-bundle subset to keep CI runtime manageable.
+# Structural tests (file presence, SHA256) still cover all 12 bundles.
+_CI_SUBSET = frozenset(
+    {
+        "CMS122FHIRDiabetesAssessGreaterThan9Percent-bundle.json",
+        "CMS124FHIRCervicalCancerScreening-bundle.json",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -66,6 +90,13 @@ def _manifest_measures() -> list[dict]:
     if not _MANIFEST_PATH.exists():
         return []
     return _load_manifest().get("measures", [])
+
+
+def _subset_manifest_entries() -> list[dict]:
+    """Return manifest entries restricted to _CI_SUBSET (preserves manifest order)."""
+    if not _MANIFEST_PATH.exists():
+        return []
+    return [m for m in _load_manifest().get("measures", []) if m["bundle_file"] in _CI_SUBSET]
 
 
 # ---------------------------------------------------------------------------
@@ -118,12 +149,16 @@ def test_bundle_sha256_matches(entry: dict):
 
 
 @pytest_asyncio.fixture(scope="module")
-async def loader_result(integration_session_factory):
+async def loader_result(integration_session_factory, tmp_path_factory):
     """Call load_connectathon_bundles() once per module and return a result dict.
 
     Patches settings so the loader talks to the test HAPI instances and uses
     the test PostgreSQL session factory (via the async_session context manager
     used inside bundle_loader).
+
+    Runs against _CI_SUBSET (2 bundles) rather than the full 12 to keep
+    vanilla-HAPI CI runtime under 60 min.  All 12 bundles are covered nightly
+    by the bake job (scripts/load_connectathon_bundles.py).
 
     Returns a dict with keys:
       - ``failed``         — number of failed bundle loads
@@ -140,12 +175,20 @@ async def loader_result(integration_session_factory):
     if os.environ.get("HAPI_PREBAKED") == "1":
         pytest.skip("Bundle-loader tests skipped in pre-baked mode — run nightly")
 
+    # Build a temp directory with only the CI-subset bundles (symlinked from the
+    # real bundle dir) so the production loader signature is unchanged.
+    subset_dir = tmp_path_factory.mktemp("connectathon-subset")
+    for name in _CI_SUBSET:
+        (subset_dir / name).symlink_to(_BUNDLE_DIR / name)
+    # Symlink the manifest so the loader's manifest.json skip is exercised.
+    (subset_dir / "manifest.json").symlink_to(_MANIFEST_PATH)
+
     with (
         patch("app.config.settings.MEASURE_ENGINE_URL", TEST_MEASURE_URL),
         patch("app.config.settings.DEFAULT_CDR_URL", TEST_CDR_URL),
         patch("app.services.bundle_loader.async_session", integration_session_factory),
     ):
-        result = await load_connectathon_bundles(_BUNDLE_DIR)
+        result = await load_connectathon_bundles(subset_dir)
 
     # Capture ExpectedResult counts immediately — before any function-scoped
     # _truncate_tables teardown can wipe the expected_results table.
@@ -183,29 +226,25 @@ async def test_loader_zero_failures(loader_result):
 
 @pytest.mark.asyncio
 async def test_loader_all_bundles_loaded(loader_result):
-    """The loader must have attempted and loaded all bundles listed in the manifest."""
-    manifest = _load_manifest()
-    expected_files = {entry["bundle_file"] for entry in manifest["measures"]}
-
-    details = loader_result["details"]
-    loaded_files = {d["file"] for d in details if d.get("status") == "loaded"}
+    """The loader must have loaded all bundles in the CI subset."""
+    expected_files = set(_CI_SUBSET)
+    loaded_files = {d["file"] for d in loader_result["details"] if d.get("status") == "loaded"}
 
     assert expected_files.issubset(loaded_files), (
-        f"Not all manifest bundles were loaded.\n  missing from loader: {expected_files - loaded_files}"
+        f"CI-subset bundles not fully loaded.\n  missing from loader: {expected_files - loaded_files}"
     )
 
 
 @pytest.mark.asyncio
 async def test_loader_canonical_urls_on_measure_engine(loader_result):
-    """After loading, every manifest canonical URL must resolve on the measure engine.
+    """After loading, every CI-subset canonical URL must resolve on the measure engine.
 
-    Queries GET /Measure?url=<canonical_url>&_count=1 for each manifest entry.
+    Queries GET /Measure?url=<canonical_url>&_count=1 for each subset entry.
     Failures are aggregated and reported together.
     """
-    manifest = _load_manifest()
     missing: list[str] = []
 
-    for entry in manifest["measures"]:
+    for entry in _subset_manifest_entries():
         canonical_url = entry["canonical_url"]
         search_url = f"{TEST_MEASURE_URL}/Measure?url={canonical_url}&_count=1"
         try:
@@ -231,11 +270,10 @@ async def test_expected_results_counts(loader_result):
     module-scoped loader_result fixture, immediately after load_connectathon_bundles()
     completes — before any function-scoped _truncate_tables teardown can clear rows.
     """
-    manifest = _load_manifest()
     counts_by_measure = loader_result["counts_by_measure"]
     mismatches: list[str] = []
 
-    for entry in manifest["measures"]:
+    for entry in _subset_manifest_entries():
         if entry["expected_test_cases"] == 0:
             continue  # definition-only bundle — skip
 
