@@ -9,6 +9,7 @@ import PulseDot from '../components/PulseDot';
 import { TrashIcon, ViewIcon, SparkIcon, PlusIcon, XIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
 import PeriodPicker from '../components/PeriodPicker';
+import { extractCmsId, cleanMeasureName, measureOptionLabel } from '../utils/measureFormat';
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '--';
@@ -175,10 +176,11 @@ export default function JobsPage() {
   };
 
   const getMeasureName = (job) => {
-    if (job.measure_name) return job.measure_name;
-    const m = measures.find(m => m.id === job.measure_id);
-    if (m) return m.resource?.title || m.resource?.name || m.title || m.name || job.measure_id;
-    return job.measure_id || '--';
+    const raw = job.measure_name || (() => {
+      const m = measures.find(m => m.id === job.measure_id);
+      return m ? (m.resource?.title || m.resource?.name || m.title || m.name || job.measure_id) : job.measure_id;
+    })() || '--';
+    return cleanMeasureName(raw);
   };
 
   const getProgress = (job) => {
@@ -404,7 +406,7 @@ export default function JobsPage() {
                   onChange={e => setFormData(p => ({ ...p, measure_id: e.target.value }))} required>
                   <option value="" disabled>Choose a measure…</option>
                   {measures.map((m, i) => (
-                    <option key={m.id || i} value={m.id || ''}>{m.resource?.title || m.resource?.name || m.title || m.name || m.id}</option>
+                    <option key={m.id || i} value={m.id || ''}>{measureOptionLabel(m.id, m.resource?.title || m.resource?.name || m.title || m.name)}</option>
                   ))}
                 </select>
               </div>
@@ -413,7 +415,14 @@ export default function JobsPage() {
                 <select id="group-select" className={styles.select} value={formData.group_id}
                   onChange={e => setFormData(p => ({ ...p, group_id: e.target.value }))}>
                   <option value="">All patients (no group filter)</option>
-                  {groups.map(g => <option key={g.id} value={g.id}>{g.name || g.id} ({g.member_count} patients)</option>)}
+                  {groups.map(g => {
+                    const cmsId = extractCmsId(g.name || g.id);
+                    const m = cmsId && measures.find(mx => mx.id === (g.name || g.id));
+                    const label = m
+                      ? measureOptionLabel(m.id, m.resource?.title || m.resource?.name || m.title || m.name)
+                      : (cmsId || g.name || g.id);
+                    return <option key={g.id} value={g.id}>{label} ({g.member_count} patients)</option>;
+                  })}
                 </select>
               </div>
               <PeriodPicker

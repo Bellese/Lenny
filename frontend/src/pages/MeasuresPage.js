@@ -6,6 +6,7 @@ import KebabMenu from '../components/KebabMenu';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { TrashIcon, PlusIcon, CheckIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
+import { extractCmsId, cleanMeasureName } from '../utils/measureFormat';
 
 function getMeasureDisplayName(measure) {
   let name;
@@ -14,7 +15,7 @@ function getMeasureDisplayName(measure) {
   else if (measure.title) name = measure.title;
   else if (measure.name) name = measure.name;
   else name = measure.id || 'Unknown Measure';
-  return name.replace(/\s+FHIR\s*$/, '');
+  return cleanMeasureName(name);
 }
 
 function getMeasureVersion(measure) {
@@ -186,7 +187,7 @@ export default function MeasuresPage() {
               ) : (
                 visible.map((measure, i) => (
                   <tr key={measure.id || i} className={styles.row}>
-                    <td data-label="ID"><span className={styles.mono}>{measure.id || '--'}</span></td>
+                    <td data-label="ID"><span className={styles.mono}>{extractCmsId(measure.id) || measure.id || '--'}</span></td>
                     <td data-label="Measure" className={styles.measureName}>{getMeasureDisplayName(measure)}</td>
                     <td data-label="Version" className={styles.mono} style={{ color: 'var(--text-muted)' }}>{getMeasureVersion(measure)}</td>
                     <td data-label="Status"><StatusBadge status={getMeasureStatus(measure)} /></td>

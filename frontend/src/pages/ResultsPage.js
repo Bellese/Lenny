@@ -9,6 +9,7 @@ import Sparkline from '../components/Sparkline';
 import DistBar from '../components/DistBar';
 import { CheckIcon, XIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
+import { extractCmsId, cleanMeasureName, measureOptionLabel } from '../utils/measureFormat';
 
 const SPARK_FALLBACK = [61.2, 62.8, 63.1, 64.0, 64.7, 65.2, 65.9, 66.1, 66.4, 66.8, 67.1, 67.4];
 
@@ -197,7 +198,7 @@ export default function ResultsPage() {
     <div className={styles.page}>
       <div className={styles.pageHeader}>
         <div>
-          {measureName && <div className={styles.eyebrow}>{measureName}</div>}
+          {measureName && <div className={styles.eyebrow}>{extractCmsId(measureName) || cleanMeasureName(measureName)}</div>}
           <h1 className={styles.title}>Results</h1>
           {period && <div className={styles.sub}><span className={styles.mono}>{period}</span></div>}
           {completedAgo && (
@@ -211,7 +212,7 @@ export default function ResultsPage() {
             <select className={styles.jobSelect} value={selectedJobId} onChange={handleJobChange} aria-label="Select job">
               {jobs.map(job => (
                 <option key={job.id} value={job.id}>
-                  {job.measure_name || job.measure_id || job.id}
+                  {measureOptionLabel(job.measure_id, job.measure_name)}
                   {job.period_start ? ` (${job.period_start})` : ''}
                 </option>
               ))}
