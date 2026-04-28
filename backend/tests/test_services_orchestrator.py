@@ -427,8 +427,23 @@ async def test_run_job_nonexistent(session_factory):
         await run_job(99999)
 
 
-async def test_get_cdr_auth_headers_reads_from_job_row(test_session, session_factory):
-    """_get_cdr_auth_headers reads auth from the job row, not the active CDRConfig."""
+async def test_get_cdr_auth_headers_reads_live_cdr_config(test_session, session_factory):
+    """_get_cdr_auth_headers joins cdr_configs via cdr_id for live credentials."""
+    from app.models.config import AuthType, CDRConfig
+
+    cfg = CDRConfig(
+        name="Live CDR",
+        cdr_url="http://cdr.example.com/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "test-jwt"},
+        is_active=False,
+        is_default=False,
+        is_read_only=False,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
     job = Job(
         measure_id="m-1",
         period_start="2024-01-01",
@@ -436,7 +451,7 @@ async def test_get_cdr_auth_headers_reads_from_job_row(test_session, session_fac
         cdr_url="http://cdr.example.com/fhir",
         status=JobStatus.queued,
         cdr_auth_type="bearer",
-        cdr_auth_credentials={"token": "test-jwt"},
+        cdr_id=cfg.id,
     )
     test_session.add(job)
     await test_session.commit()
@@ -453,7 +468,29 @@ async def test_get_cdr_auth_headers_reads_from_job_row(test_session, session_fac
         headers = await _get_cdr_auth_headers(job.id)
 
     assert headers == {"Authorization": "Bearer test-jwt"}
-    mock_auth.assert_called_once_with("bearer", {"token": "test-jwt"})
+    # Called with the live CDR's auth_type and credentials (decrypted by TypeDecorator)
+    mock_auth.assert_called_once()
+    call_auth_type = mock_auth.call_args[0][0]
+    assert call_auth_type == AuthType.bearer
+
+
+async def test_orchestrator_fails_clearly_when_cdr_deleted(test_session, session_factory):
+    """_get_cdr_auth_headers raises RuntimeError when the CDR config no longer exists."""
+    job = Job(
+        measure_id="m-orphan",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://gone.example.com/fhir",
+        status=JobStatus.running,
+        cdr_id=None,  # CDR was deleted (FK set NULL by ON DELETE SET NULL)
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    with patch("app.services.orchestrator.async_session", session_factory):
+        with pytest.raises(RuntimeError, match="has no cdr_id"):
+            await _get_cdr_auth_headers(job.id)
 
 
 async def test_process_batch_uses_everything_strategy(test_session, session_factory, monkeypatch):

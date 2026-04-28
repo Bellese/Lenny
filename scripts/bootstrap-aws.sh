@@ -1,6 +1,7 @@
 #!/bin/bash
 # One-time AWS bootstrap for Leonard prod:
 #   - Creates the /leonard/prod/POSTGRES_PASSWORD SSM SecureString parameter
+#   - Creates the /leonard/prod/CDR_FERNET_KEY SSM SecureString parameter
 #   - Creates IAM policy, role, and instance profile for EC2 SSM access
 #   - Associates the instance profile with the prod EC2 instance
 #   - Enforces IMDSv2 (http-tokens=required, hop-limit=1)
@@ -19,6 +20,7 @@ ACCOUNT_ID="439475769170"
 REGION="us-east-1"
 INSTANCE_ID="i-0f00585639d2f3ef1"
 SSM_PARAM="/leonard/prod/POSTGRES_PASSWORD"
+SSM_FERNET_PARAM="/leonard/prod/CDR_FERNET_KEY"
 POLICY_NAME="leonard-prod-ssm-read"
 ROLE_NAME="leonard-ec2-prod"
 PROFILE_NAME="leonard-ec2-prod"
@@ -77,6 +79,41 @@ print(json.dumps({
   echo "  IMPORTANT: The generated POSTGRES_PASSWORD has been stored in SSM."
   echo "  It is NOT printed here. Retrieve it with:"
   echo "    AWS_PROFILE=leonard aws ssm get-parameter --name '$SSM_PARAM' --with-decryption --region $REGION"
+  echo ""
+fi
+
+# ---------------------------------------------------------------------------
+# 1b. CDR_FERNET_KEY SSM parameter — skip if exists, generate Fernet key if new
+# ---------------------------------------------------------------------------
+echo "[+] Checking SSM parameter $SSM_FERNET_PARAM ..."
+if aws ssm get-parameter --name "$SSM_FERNET_PARAM" --region "$REGION" >/dev/null 2>&1; then
+  echo "[=] SSM parameter already exists — skipping creation"
+else
+  echo "[+] Generating Fernet key for CDR credential encryption ..."
+  # Write param JSON to a mode-600 temp file so the key never appears as a
+  # process argument (visible via `ps` / /proc/<pid>/cmdline).
+  FERNET_JSON=$(mktemp)
+  chmod 600 "$FERNET_JSON"
+  python3 -c "
+import json, sys
+from cryptography.fernet import Fernet
+print(json.dumps({
+  'Name': sys.argv[1],
+  'Value': Fernet.generate_key().decode(),
+  'Type': 'SecureString',
+  'Description': 'Leonard prod Fernet key for CDR credential encryption at rest',
+  'Overwrite': False,
+  'Tier': 'Standard'
+}))
+" "$SSM_FERNET_PARAM" > "$FERNET_JSON"
+  echo "[+] Creating SSM SecureString parameter ..."
+  aws ssm put-parameter --cli-input-json "file://$FERNET_JSON" --region "$REGION"
+  rm -f "$FERNET_JSON"
+  echo "[+] SSM parameter $SSM_FERNET_PARAM created (value stored in SSM, not printed)"
+  echo ""
+  echo "  IMPORTANT: The generated CDR_FERNET_KEY has been stored in SSM."
+  echo "  It is NOT printed here. Retrieve it with:"
+  echo "    AWS_PROFILE=leonard aws ssm get-parameter --name '$SSM_FERNET_PARAM' --with-decryption --region $REGION"
   echo ""
 fi
 

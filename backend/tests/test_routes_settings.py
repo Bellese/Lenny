@@ -540,3 +540,108 @@ async def test_test_connection_failure_does_not_leak_hostname(client):
     body = resp.text
     assert "hapi-fhir-cdr" not in body
     assert "8080" not in body
+
+
+# ---------------------------------------------------------------------------
+# Credential encryption (issue #219)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_connection_stores_credentials_encrypted(client, test_session):
+    """POST /settings/connections stores auth_credentials encrypted, not as plaintext."""
+    from sqlalchemy import text
+
+    smart_creds = {
+        "client_id": "c",
+        "client_secret": "very-secret",
+        "token_endpoint": "https://auth.example.com/token",
+    }
+    resp = await client.post(
+        "/settings/connections",
+        json={
+            "name": "Encrypted CDR",
+            "cdr_url": "https://enc.example.com/fhir",
+            "auth_type": "smart",
+            "auth_credentials": smart_creds,
+        },
+    )
+    assert resp.status_code == 201
+    conn_id = resp.json()["id"]
+
+    # Load the raw DB row — bypass the ORM TypeDecorator to check physical storage
+    result = await test_session.execute(
+        text("SELECT auth_credentials FROM cdr_configs WHERE id = :id"),
+        {"id": conn_id},
+    )
+    raw = result.scalar_one()
+    # SQLite stores JSON as text; parse it
+    import json
+
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    # Must have the envelope shape, not plaintext
+    assert isinstance(raw, dict), f"Expected dict envelope, got {type(raw)}"
+    assert raw.get("v") == 1, "Envelope must carry v=1"
+    assert "ct" in raw, "Envelope must carry ct field"
+    # Plaintext secret must NOT appear anywhere in the stored value
+    assert "very-secret" not in json.dumps(raw)
+
+
+async def test_credentials_changed_audit_log_on_create(client, caplog):
+    """POST /settings/connections emits a structured audit log entry."""
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="app.routes.settings"):
+        resp = await client.post(
+            "/settings/connections",
+            json={"name": "Audit CDR", "cdr_url": "https://audit.example.com/fhir", "auth_type": "none"},
+        )
+    assert resp.status_code == 201
+
+    audit_records = [r for r in caplog.records if getattr(r, "event", None) == "cdr_credentials_changed"]
+    assert audit_records, "Expected a cdr_credentials_changed log record"
+    record = audit_records[0]
+    assert record.action == "create"
+    # Credential values must not appear in the log
+    assert "secret" not in record.getMessage().lower()
+
+
+async def test_delete_connection_blocked_when_active_jobs(client, test_session):
+    """DELETE /settings/connections/{id} returns 409 when queued/running jobs reference it."""
+    from app.models.config import AuthType, CDRConfig
+    from app.models.job import Job, JobStatus
+
+    cfg = CDRConfig(
+        name="In-Use CDR",
+        cdr_url="https://inuse.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=False,
+        is_default=False,
+        is_read_only=False,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    job = Job(
+        measure_id="m-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url=cfg.cdr_url,
+        status=JobStatus.running,
+        cdr_id=cfg.id,
+    )
+    test_session.add(job)
+    await test_session.commit()
+
+    resp = await client.delete(f"/settings/connections/{cfg.id}")
+    assert resp.status_code == 409
+    diag = resp.json()["detail"]["issue"][0]["diagnostics"]
+    assert "queued or running jobs" in diag
+
+    # Mark job complete — delete should now succeed
+    job.status = JobStatus.complete
+    await test_session.commit()
+
+    resp2 = await client.delete(f"/settings/connections/{cfg.id}")
+    assert resp2.status_code == 204

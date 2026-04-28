@@ -47,19 +47,25 @@ backend/app/
     validation.py   POST /validation/upload, GET /validation/runs
 
   services/
-    orchestrator.py  Core job execution. Pulls patients, runs $evaluate-measure in batches,
-                     stores MeasureReports. Group filtering via group_id param.
-    fhir_client.py   All FHIR server communication. DataAcquisitionStrategy ABC with two
-                     implementations: BatchQueryStrategy (paginated /Patient + $everything)
-                     and DataRequirementsStrategy (DEQM spec — calls $data-requirements on
-                     the measure engine, then fetches only the required resource types from
-                     the CDR; falls back to $everything on any failure).
-    bundle_loader.py Startup bundle loader. Called once during FastAPI lifespan. Scans
-                     seed/connectathon-bundles/, waits for HAPI readiness, then loads each
-                     .json file via triage_test_bundle (Measure/Library → MCS, clinical
-                     resources → CDR, test-case MeasureReports → ExpectedResult table).
-    validation.py    Test bundle parsing, ExpectedResult comparison, pass/fail logic.
-    worker.py        Background task queue, priority ordering, job lifecycle management.
+    orchestrator.py      Core job execution. Pulls patients, runs $evaluate-measure in batches,
+                         stores MeasureReports. Group filtering via group_id param. Reads live
+                         CDR credentials from cdr_configs via job.cdr_id FK.
+    fhir_client.py       All FHIR server communication. DataAcquisitionStrategy ABC with two
+                         implementations: BatchQueryStrategy (paginated /Patient + $everything)
+                         and DataRequirementsStrategy (DEQM spec — calls $data-requirements on
+                         the measure engine, then fetches only the required resource types from
+                         the CDR; falls back to $everything on any failure).
+    bundle_loader.py     Startup bundle loader. Called once during FastAPI lifespan. Scans
+                         seed/connectathon-bundles/, waits for HAPI readiness, then loads each
+                         .json file via triage_test_bundle (Measure/Library → MCS, clinical
+                         resources → CDR, test-case MeasureReports → ExpectedResult table).
+    credential_crypto.py EncryptedJSON SQLAlchemy TypeDecorator (Fernet/AES-128-CBC + HMAC-SHA256)
+                         for CDR auth credentials. Lazy Fernet singleton reads
+                         /run/secrets/cdr_fernet_key first, falls back to CDR_FERNET_KEY env var
+                         (immediately popped to prevent subprocess leakage). self_check() runs at
+                         startup to verify the key is valid.
+    validation.py        Test bundle parsing, ExpectedResult comparison, pass/fail logic.
+    worker.py            Background task queue, priority ordering, job lifecycle management.
 ```
 
 ## Frontend Structure
@@ -167,6 +173,7 @@ Defined in `backend/app/config.py`. All overridable via environment variables.
 | `HAPI_INDEX_WAIT_SECONDS` | `5` | Wait after uploading patients before evaluating (index propagation) |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `ALLOWED_ORIGINS` | `"*"` | Comma-separated CORS allowed origins; `"*"` for wildcard (local dev default). Set to `https://${CADDY_HOST}` in production via `docker-compose.prod.yml`. |
+| `CDR_FERNET_KEY` | _(none)_ | Fernet key for encrypting CDR auth credentials at rest. Required in production. Generate with: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. In prod, injected via Docker secret at `/run/secrets/cdr_fernet_key` (takes priority over env var). See `.env.example`. |
 
 ### Prod secrets
 
@@ -175,10 +182,11 @@ Production secrets are stored in **AWS SSM Parameter Store** under `/leonard/pro
 | SSM Path | Secret | Consumer |
 |---|---|---|
 | `/leonard/prod/POSTGRES_PASSWORD` | DB superuser password | backend, db (first-init) |
+| `/leonard/prod/CDR_FERNET_KEY` | Fernet key for CDR credential encryption | backend (credential_crypto.py) |
 
 **Instance profile:** `leonard-ec2-prod` (attached to EC2 `i-0f00585639d2f3ef1`) grants `ssm:GetParametersByPath` on `/leonard/prod/*` with `kms:ViaService` scoped to SSM only.
 
-**Boot flow:** On every deploy, `scripts/fetch-prod-secrets.sh` reads SSM and writes values to `/run/leonard/env` (tmpfs, mode 0600, cleared on reboot). `deploy-prod.sh` then extracts `POSTGRES_PASSWORD` from that file to `/run/leonard/POSTGRES_PASSWORD` (mode 0600). `docker-compose.prod.yml` mounts this as a Docker secret — the `backend` service reads it via `/run/secrets/postgres_password` (assembled into `DATABASE_URL` by `backend/docker-entrypoint.sh`), and the `db` service reads it via `POSTGRES_PASSWORD_FILE`. `scripts/reconcile-db-password.sh` then runs `ALTER ROLE mct2 PASSWORD :'newpw'` to synchronize the DB volume's embedded password.
+**Boot flow:** On every deploy, `scripts/fetch-prod-secrets.sh` reads SSM and writes values to `/run/leonard/env` (tmpfs, mode 0600, cleared on reboot). `deploy-prod.sh` extracts `POSTGRES_PASSWORD` to `/run/leonard/POSTGRES_PASSWORD` (mode 0600) and `CDR_FERNET_KEY` to `/run/leonard/CDR_FERNET_KEY` (mode 0600). `docker-compose.prod.yml` mounts both as Docker secrets — the `backend` service reads `POSTGRES_PASSWORD` via `/run/secrets/postgres_password` (assembled into `DATABASE_URL` by `backend/docker-entrypoint.sh`) and `CDR_FERNET_KEY` via `/run/secrets/cdr_fernet_key` (read by `credential_crypto.py` at startup). The `db` service reads `POSTGRES_PASSWORD` via `POSTGRES_PASSWORD_FILE`. `scripts/reconcile-db-password.sh` then runs `ALTER ROLE mct2 PASSWORD :'newpw'` to synchronize the DB volume's embedded password.
 
 **Rotation:** Update the SSM param, then run `scripts/deploy-prod.sh`. The backend must be restarted for the new `DATABASE_URL` to take effect (deploy-prod.sh handles this). See `docs/runbooks/rotate-db-password.md`.
 

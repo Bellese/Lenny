@@ -49,6 +49,15 @@ class JSONFormatter(logging.Formatter):
             "status_code",
             "latency_ms",
             "hint",
+            "matched",
+            "null_remaining",
+            "null_job_count",
+            "legacy_rows_seen",
+            "encrypted_now",
+            "event",
+            "action",
+            "cdr_id",
+            "cdr_name",
         )
         for key in _EXTRA_KEYS:
             val = getattr(record, key, None)
@@ -255,6 +264,45 @@ async def _run_schema_migrations(conn) -> None:
         ]:
             await conn.execute(text(stmt))
 
+        # Issue #219: replace per-job cdr_auth_credentials snapshot with a live FK.
+        # Uses IF NOT EXISTS / IF EXISTS guards — idempotent across concurrent startups.
+        await conn.execute(
+            text(
+                "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_id INTEGER REFERENCES cdr_configs(id) ON DELETE SET NULL"
+            )
+        )
+        await conn.execute(text("CREATE INDEX IF NOT EXISTS ix_jobs_cdr_id ON jobs(cdr_id)"))
+        # Backfill cdr_id for historical jobs where exactly one CDR matches url+name.
+        # Ambiguous matches (cdr_configs.name has a unique constraint so this is rare) stay NULL.
+        result = await conn.execute(
+            text("""
+            UPDATE jobs j
+            SET cdr_id = c.id
+            FROM cdr_configs c
+            WHERE j.cdr_id IS NULL
+              AND c.cdr_url = j.cdr_url
+              AND COALESCE(c.name, '') = COALESCE(j.cdr_name, '')
+              AND (
+                SELECT COUNT(*) FROM cdr_configs c2
+                WHERE c2.cdr_url = j.cdr_url
+                  AND COALESCE(c2.name, '') = COALESCE(j.cdr_name, '')
+              ) = 1
+            """)
+        )
+        matched = result.rowcount
+        # Count how many jobs were left with NULL (ambiguous or no match).
+        skipped_result = await conn.execute(text("SELECT COUNT(*) FROM jobs WHERE cdr_id IS NULL"))
+        skipped = skipped_result.scalar() or 0
+        logger.info("cdr_id_backfill", extra={"matched": matched, "null_remaining": skipped})
+        if skipped:
+            logger.warning(
+                "Some jobs have no cdr_id — CDR config deleted or name mismatch",
+                extra={"null_job_count": skipped},
+            )
+
+        # Drop the old plaintext credential snapshot column.
+        await conn.execute(text("ALTER TABLE jobs DROP COLUMN IF EXISTS cdr_auth_credentials"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -292,6 +340,44 @@ async def lifespan(app: FastAPI):
             """)
             )
     logger.info("Database tables created")
+
+    # Encrypt any plaintext cdr_configs.auth_credentials rows left from before #219.
+    # Idempotent: rows already wrapped in {v, ct} envelope are skipped by the TypeDecorator.
+    if engine.dialect.name == "postgresql":
+        try:
+            from sqlalchemy.ext.asyncio import AsyncSession
+            from sqlalchemy.orm.attributes import flag_modified
+
+            from app.models.config import CDRConfig
+            from app.services.credential_crypto import self_check
+
+            if self_check():
+                async with AsyncSession(engine) as session:
+                    # Only fetch rows that lack the {v, ct} envelope — legacy plaintext.
+                    result = await session.execute(
+                        text(
+                            "SELECT id FROM cdr_configs"
+                            " WHERE auth_credentials IS NOT NULL"
+                            " AND NOT (auth_credentials::jsonb ? 'v')"
+                        )
+                    )
+                    ids = [row[0] for row in result.fetchall()]
+                    encrypted_count = 0
+                    for cdr_id in ids:
+                        cfg = await session.get(CDRConfig, cdr_id)
+                        if cfg is not None and cfg.auth_credentials is not None:
+                            # flag_modified forces SQLAlchemy to mark the attribute dirty so
+                            # EncryptedJSON.process_bind_param fires on flush and encrypts the value.
+                            flag_modified(cfg, "auth_credentials")
+                            await session.flush()
+                            encrypted_count += 1
+                    await session.commit()
+                logger.info(
+                    "credentials_encrypted",
+                    extra={"legacy_rows_seen": len(ids), "encrypted_now": encrypted_count},
+                )
+        except Exception:
+            logger.exception("Credential encryption backfill failed — continuing startup")
 
     # Load connectathon bundles at startup (no-op if directory missing)
     try:

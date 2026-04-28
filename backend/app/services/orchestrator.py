@@ -14,6 +14,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import async_session
+from app.models.config import CDRConfig
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
 from app.services.fhir_client import (
     BatchQueryStrategy,
@@ -261,17 +262,20 @@ async def run_job(job_id: int) -> None:
 
 
 async def _get_cdr_auth_headers(job_id: int) -> dict[str, str]:
-    """Resolve auth headers from the job's stamped CDR credentials.
-
-    Reads cdr_auth_type / cdr_auth_credentials from the Job row (stamped at
-    creation time) so the orchestrator is not affected by active CDR changes
-    after the job was created.
-    """
+    """Resolve auth headers by reading live credentials from the referenced CDR config."""
     async with async_session() as session:
         job = await session.get(Job, job_id)
-        if job and job.cdr_auth_type:
-            return await _build_auth_headers(job.cdr_auth_type, job.cdr_auth_credentials)
-    return {}
+        if job is None:
+            return {}
+        if job.cdr_id is None:
+            raise RuntimeError(
+                f"Job {job_id} has no cdr_id — CDR config was deleted after job creation. "
+                "Cannot fetch auth credentials."
+            )
+        cfg = await session.get(CDRConfig, job.cdr_id)
+        if cfg is None:
+            raise RuntimeError(f"CDR config {job.cdr_id} referenced by job {job_id} no longer exists.")
+        return await _build_auth_headers(cfg.auth_type, cfg.auth_credentials)
 
 
 async def _get_cdr_url(job_id: int) -> str:

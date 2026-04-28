@@ -49,11 +49,13 @@ command -v jq >/dev/null 2>&1 || { printf '[!] jq is required but not installed.
 # ── constants ──────────────────────────────────────────────────────────────────
 readonly SSM_REGION="us-east-1"
 readonly SSM_PATH_PREFIX="/leonard/prod/"
-readonly REQUIRED_PARAMS=("POSTGRES_PASSWORD")
+readonly REQUIRED_PARAMS=("POSTGRES_PASSWORD" "CDR_FERNET_KEY")
 readonly ENV_DIR="${LEONARD_ENV_DIR:-/run/leonard}"
 readonly ENV_FILE="${ENV_DIR}/env"
 # Value must be printable, no whitespace/quotes/semicolons, length 16–128.
-readonly VALIDATION_REGEX='^[A-Za-z0-9_.-]{16,128}$'
+# '=' is allowed for base64 padding (Fernet keys end in '=').
+# Hyphen is placed first in the character class to avoid range ambiguity.
+readonly VALIDATION_REGEX='^[-A-Za-z0-9_.=]{16,128}$'
 
 # ── functions ──────────────────────────────────────────────────────────────────
 
@@ -71,7 +73,7 @@ validate_value() {
     local name="$1"
     local value="$2"
     if ! printf '%s' "$value" | grep -qE "$VALIDATION_REGEX"; then
-        die 2 "Value for '${name}' failed validation — check length (16–128) and allowed characters ([A-Za-z0-9_.-]). Value not logged."
+        die 2 "Value for '${name}' failed validation — check length (16–128) and allowed characters ([A-Za-z0-9_.=-]). Value not logged."
     fi
 }
 
@@ -113,8 +115,45 @@ declare -A PARAMS
 _aws_err=$(mktemp)
 trap 'rm -f "$_aws_err"' EXIT
 
+# ── fetch all params under /leonard/prod/ (always) ───────────────────────────
+next_token=""
+fetched=0
+
+while true; do
+    aws_args=(
+        ssm get-parameters-by-path
+        --region "$SSM_REGION"
+        --path "$SSM_PATH_PREFIX"
+        --with-decryption
+        --recursive
+        --max-results 10
+        --output json
+    )
+    [[ -n "$next_token" ]] && aws_args+=(--next-token "$next_token")
+    if ! response=$(aws "${aws_args[@]}" 2>"$_aws_err"); then
+        die 1 "SSM get-parameters-by-path failed: $(cat "$_aws_err")"
+    fi
+
+    # Parse each parameter into the associative array.
+    while IFS=$'\t' read -r full_name value; do
+        short_name="${full_name#"$SSM_PATH_PREFIX"}"
+        PARAMS["$short_name"]="$value"
+        (( fetched++ )) || true
+    done < <(printf '%s' "$response" | jq -r '.Parameters[] | [.Name, .Value] | @tsv')
+
+    next_token=$(printf '%s' "$response" | jq -r '.NextToken // empty')
+    if [[ -z "$next_token" ]]; then
+        break
+    fi
+done
+
+if [[ "$fetched" -eq 0 ]]; then
+    die 1 "No parameters returned from SSM path '${SSM_PATH_PREFIX}'. Check IAM permissions and path."
+fi
+
 if [[ -n "${LEONARD_SSM_VERSION:-}" ]]; then
-    # ── rollback path: fetch POSTGRES_PASSWORD at a specific version ───────────
+    # ── rollback override: pin POSTGRES_PASSWORD to a specific SSM version ──────
+    # All other params (e.g. CDR_FERNET_KEY) stay at their latest values from above.
     if ! response=$(aws ssm get-parameter \
         --region "$SSM_REGION" \
         --name "${SSM_PATH_PREFIX}POSTGRES_PASSWORD:${LEONARD_SSM_VERSION}" \
@@ -128,43 +167,6 @@ if [[ -n "${LEONARD_SSM_VERSION:-}" ]]; then
         die 1 "SSM response did not contain a value for POSTGRES_PASSWORD."
     fi
     PARAMS["POSTGRES_PASSWORD"]="$value"
-
-else
-    # ── normal path: fetch all params under /leonard/prod/ ────────────────────
-    next_token=""
-    fetched=0
-
-    while true; do
-        aws_args=(
-            ssm get-parameters-by-path
-            --region "$SSM_REGION"
-            --path "$SSM_PATH_PREFIX"
-            --with-decryption
-            --recursive
-            --max-results 10
-            --output json
-        )
-        [[ -n "$next_token" ]] && aws_args+=(--next-token "$next_token")
-        if ! response=$(aws "${aws_args[@]}" 2>"$_aws_err"); then
-            die 1 "SSM get-parameters-by-path failed: $(cat "$_aws_err")"
-        fi
-
-        # Parse each parameter into the associative array.
-        while IFS=$'\t' read -r full_name value; do
-            short_name="${full_name#"$SSM_PATH_PREFIX"}"
-            PARAMS["$short_name"]="$value"
-            (( fetched++ )) || true
-        done < <(printf '%s' "$response" | jq -r '.Parameters[] | [.Name, .Value] | @tsv')
-
-        next_token=$(printf '%s' "$response" | jq -r '.NextToken // empty')
-        if [[ -z "$next_token" ]]; then
-            break
-        fi
-    done
-
-    if [[ "$fetched" -eq 0 ]]; then
-        die 1 "No parameters returned from SSM path '${SSM_PATH_PREFIX}'. Check IAM permissions and path."
-    fi
 fi
 
 # ── validate all fetched values ───────────────────────────────────────────────

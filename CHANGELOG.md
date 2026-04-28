@@ -2,6 +2,24 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.10.0] - 2026-04-28
+
+### Added
+- **Fernet encryption for CDR auth credentials at rest (issue #219)** — Basic passwords, Bearer tokens, and SMART `client_secret` values are now encrypted in `cdr_configs.auth_credentials` using Fernet (AES-128-CBC + HMAC-SHA256). Each value is stored as a `{"v": 1, "ct": "<token>"}` envelope; the TypeDecorator decrypts transparently on read so no call-site changes are required.
+- **`credential_crypto` module** — `EncryptedJSON` SQLAlchemy `TypeDecorator`, lazy Fernet singleton loader (reads `/run/secrets/cdr_fernet_key` first, falls back to `CDR_FERNET_KEY` env var which is immediately `os.environ.pop`'d to prevent subprocess leakage), `self_check()` startup probe.
+- **`CDR_FERNET_KEY` in SSM/Docker-secrets pipeline** — `bootstrap-aws.sh` provisions `/leonard/prod/CDR_FERNET_KEY` as a SecureString (generated via Python, never visible as a process arg). `fetch-prod-secrets.sh` fetches it alongside `POSTGRES_PASSWORD`. `deploy-prod.sh` writes it to `/run/leonard/CDR_FERNET_KEY` (mode 0600). `docker-compose.prod.yml` mounts it as a Docker secret. `.env.example` documents the local dev generation command.
+- **`cdr_id` FK on `Job`** — replaces the per-job `cdr_auth_credentials` plaintext snapshot. The orchestrator now reads live credentials from `cdr_configs` via the FK, so mid-job CDR credential rotations propagate naturally.
+- **Audit logging on CDR connection changes** — `POST`/`PUT`/`DELETE` to `/connections` emit a structured `INFO` log with `event: cdr_credentials_changed`, `action`, `cdr_id`, and `cdr_name`. Credential values are never logged.
+- **409 guard on CDR connection delete** — `DELETE /connections/{id}` returns 409 if any `queued` or `running` jobs reference the connection, preventing orphaned in-flight jobs.
+
+### Changed
+- **Inline migration** — startup adds `cdr_id INTEGER REFERENCES cdr_configs(id) ON DELETE SET NULL` to `jobs`, backfills from matching `cdr_url + name`, then drops `cdr_auth_credentials`. Guarded by `IF NOT EXISTS`/`IF EXISTS` — idempotent on concurrent restarts.
+- **Credential encryption backfill** — on Postgres, any `cdr_configs.auth_credentials` rows lacking the `{v, ct}` envelope are re-saved through the TypeDecorator at startup (uses `flag_modified` to force SQLAlchemy dirty-check).
+- **Orchestrator live-lookup** — `_get_cdr_auth_headers` now joins `cdr_configs` via `job.cdr_id` instead of reading the stale job snapshot. Raises `RuntimeError` with a clear message if `cdr_id` is NULL or the CDR row no longer exists.
+
+### Fixed
+- **Plaintext CDR credentials at rest** — closes the HIGH finding from the 2026-04-28 security audit. Credentials are no longer recoverable from a DB backup, read replica, or ops console query.
+
 ## [0.0.9.0] - 2026-04-28
 
 ### Added

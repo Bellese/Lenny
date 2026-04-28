@@ -1,14 +1,43 @@
 """Shared pytest fixtures for MCT2 backend tests."""
 
 import asyncio
+import os
 from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.models.base import Base
+
+# ---------------------------------------------------------------------------
+# CDR Fernet key — must be present before any EncryptedJSON TypeDecorator call
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _cdr_fernet_key():
+    """Set a test Fernet key for the full session and prime the singleton.
+
+    EncryptedJSON.process_bind_param calls _get_fernet() on every flush of a
+    CDRConfig row.  Without this fixture any test that touches auth_credentials
+    would raise RuntimeError("CDR_FERNET_KEY not configured").
+
+    The singleton is intentionally left live after the session ends — it will
+    be torn down with the process.  Tests in test_services_credential_crypto.py
+    that need to exercise key-loading edge cases call _reset_fernet() themselves
+    and manage the env var locally.
+    """
+    from app.services.credential_crypto import _get_fernet, _reset_fernet
+
+    key = Fernet.generate_key().decode()
+    os.environ["CDR_FERNET_KEY"] = key
+    _get_fernet()  # prime the singleton (also pops the env var)
+    yield key
+    _reset_fernet()
+
 
 # ---------------------------------------------------------------------------
 # Async SQLite engine (in-memory, one per test)
