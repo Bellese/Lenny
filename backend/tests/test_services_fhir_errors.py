@@ -196,6 +196,27 @@ def test_sanitize_url_preserves_port():
 
 
 # ---------------------------------------------------------------------------
+# _sanitize_str regex edge cases (adversarial review findings)
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_str_redacts_colon_space_password():
+    """_AUTH_RE must handle colon-space delimiter (e.g. HAPI error logs)."""
+    from app.services.fhir_errors import _sanitize_str
+
+    result = _sanitize_str("password: hunter2")
+    assert "hunter2" not in result
+
+
+def test_sanitize_str_redacts_single_word_hostport():
+    """_HOSTPORT_RE must redact single-word Docker service names like db:5432."""
+    from app.services.fhir_errors import _sanitize_str
+
+    result = _sanitize_str("connect to db:5432 failed")
+    assert "db:5432" not in result
+
+
+# ---------------------------------------------------------------------------
 # redact_outcome
 # ---------------------------------------------------------------------------
 

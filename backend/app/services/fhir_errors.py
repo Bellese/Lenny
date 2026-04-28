@@ -16,22 +16,35 @@ import httpx
 # Sanitization regexes — same patterns as validation.sanitize_error but applied
 # to plain strings (no Exception wrapping needed here).
 _URL_RE = re.compile(r"https?://\S+", re.IGNORECASE)
-_HOSTPORT_RE = re.compile(r"\b[a-z0-9][a-z0-9]*(?:-[a-z0-9]+)+:\d{2,5}\b", re.IGNORECASE)
+# _HOSTPORT_RE: catches Docker service names in diagnostic text.
+# * quantifier (vs + previously) catches single-word names like db:5432, not just
+# hyphened ones like hapi-fhir-cdr:8080.
+_HOSTPORT_RE = re.compile(r"\b[a-z0-9][a-z0-9]*(?:-[a-z0-9]+)*:\d{2,5}\b", re.IGNORECASE)
+# _AUTH_RE: single-delimiter match (space OR colon OR equals). Single-char is intentional —
+# it relies on the engine falling through to a secondary match for "Authorization: Bearer VALUE":
+# the engine fails "Authorization: VALUE" (space blocks \S+), then later matches "Bearer VALUE".
 _AUTH_RE = re.compile(r"(Authorization|Bearer|Basic|password|token|secret)[=:\s]\S+", re.IGNORECASE)
+# _AUTH_COLON_RE: catches colon-space delimiter missed by _AUTH_RE, e.g. "password: hunter2".
+# Applied AFTER _AUTH_RE so that "Authorization: Bearer=[redacted]" from the first pass also
+# gets cleaned up to "Authorization=[redacted]".
+_AUTH_COLON_RE = re.compile(r"(Authorization|Bearer|Basic|password|token|secret):\s+\S+", re.IGNORECASE)
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
 
 
 def _sanitize_str(s: str) -> str:
     """Apply URL/host/auth/JWT redactions to a plain string (max 2000 chars).
 
-    Order is load-bearing: JWT regex runs before _AUTH_RE so bare JWT-shaped
-    tokens (eyJ...) are redacted even when not preceded by "Bearer".
+    Order is load-bearing: JWT runs first (bare eyJ... tokens), then _AUTH_RE
+    (space/equals delimiter), then _AUTH_COLON_RE (colon-space delimiter, second
+    pass catches "password: value" and any "Authorization: Bearer=[redacted]" left
+    by the first pass).
     """
     s = s[:2000]
     s = _URL_RE.sub("[url]", s)
     s = _HOSTPORT_RE.sub("[host]", s)
     s = _JWT_RE.sub("[redacted-jwt]", s)
     s = _AUTH_RE.sub(r"\1=[redacted]", s)
+    s = _AUTH_COLON_RE.sub(r"\1=[redacted]", s)
     return s
 
 
@@ -50,8 +63,11 @@ def sanitize_url(url: str) -> str:
         cleaned = urlunparse(parsed._replace(netloc=netloc, query=query))
     except Exception:
         cleaned = "[url-parse-error]"
-    # Strip Docker-style internal hostnames (e.g. hapi-fhir-measure:8080)
-    cleaned = _HOSTPORT_RE.sub("[host]", cleaned)
+    # Strip internal Docker hostnames (no dots = single-label, likely internal service).
+    # External domains (e.g. example.com:8080) are NOT redacted here — they've already
+    # had credentials stripped by the urlunparse rebuild above.
+    if "." not in host:
+        cleaned = _HOSTPORT_RE.sub("[host]", cleaned)
     return cleaned
 
 

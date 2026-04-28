@@ -38,7 +38,19 @@ class JSONFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         # Merge structlog-style extra keys
-        for key in ("job_id", "batch_id", "patient_id", "url", "count", "error", "cdr_url"):
+        _EXTRA_KEYS = (
+            "job_id",
+            "batch_id",
+            "patient_id",
+            "url",
+            "count",
+            "error",
+            "cdr_url",
+            "status_code",
+            "latency_ms",
+            "hint",
+        )
+        for key in _EXTRA_KEYS:
             val = getattr(record, key, None)
             if val is not None:
                 log_entry[key] = val
