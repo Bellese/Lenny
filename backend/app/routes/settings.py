@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
 from app.models.config import AuthType, CDRConfig
+from app.models.job import Job, JobStatus
 from app.services.fhir_client import _validate_ssrf_url, verify_fhir_connection
 from app.services.fhir_errors import (
     HINT_BY_STATUS,
@@ -180,6 +181,10 @@ async def create_connection(
     session.add(cfg)
     await session.commit()
     await session.refresh(cfg)
+    logger.info(
+        "cdr_credentials_changed",
+        extra={"event": "cdr_credentials_changed", "action": "create", "cdr_id": cfg.id, "cdr_name": cfg.name},
+    )
     return _cfg_to_response(cfg)
 
 
@@ -246,6 +251,10 @@ async def update_connection(
     cfg.is_read_only = body.is_read_only
     await session.commit()
     await session.refresh(cfg)
+    logger.info(
+        "cdr_credentials_changed",
+        extra={"event": "cdr_credentials_changed", "action": "update", "cdr_id": cfg.id, "cdr_name": cfg.name},
+    )
     return _cfg_to_response(cfg)
 
 
@@ -294,8 +303,35 @@ async def delete_connection(
             },
         )
 
+    active_jobs = await session.execute(
+        select(Job.id).where(
+            Job.cdr_id == connection_id,
+            Job.status.in_([JobStatus.queued, JobStatus.running]),
+        )
+    )
+    if active_jobs.first() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "conflict",
+                        "diagnostics": "Cannot delete a connection with queued or running jobs. "
+                        "Wait for jobs to complete or cancel them first.",
+                    }
+                ],
+            },
+        )
+
+    cdr_name = cfg.name
     await session.delete(cfg)
     await session.commit()
+    logger.info(
+        "cdr_credentials_changed",
+        extra={"event": "cdr_credentials_changed", "action": "delete", "cdr_id": connection_id, "cdr_name": cdr_name},
+    )
 
 
 @router.post("/connections/{connection_id}/activate", response_model=CDRConnectionResponse)

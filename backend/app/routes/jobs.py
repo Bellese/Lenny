@@ -200,7 +200,7 @@ async def create_job(
         cdr_name=cdr.name,
         cdr_read_only=cdr.is_read_only,
         cdr_auth_type=cdr.auth_type.value if cdr.auth_type else None,
-        cdr_auth_credentials=cdr.auth_credentials,
+        cdr_id=cdr.id if cdr.id else None,
     )
     session.add(job)
     await session.commit()
