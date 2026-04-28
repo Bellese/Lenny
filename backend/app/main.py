@@ -49,6 +49,15 @@ class JSONFormatter(logging.Formatter):
             "status_code",
             "latency_ms",
             "hint",
+            "matched",
+            "null_remaining",
+            "null_job_count",
+            "legacy_rows_seen",
+            "encrypted_now",
+            "event",
+            "action",
+            "cdr_id",
+            "cdr_name",
         )
         for key in _EXTRA_KEYS:
             val = getattr(record, key, None)
