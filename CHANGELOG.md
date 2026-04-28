@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.8.1] - 2026-04-27
+
+### Added
+- **Structured FHIR error surfacing (PR-1 — connection/auth, issue #74)** — when a CDR connection test fails, the backend now returns a structured `OperationOutcome` with `error_details` containing the HTTP status code, probed URL, latency, and a user-facing hint (e.g. "Authentication failed. Re-check your bearer token or username/password."). Network errors (unreachable host, TLS/SSL, timeout) include network-layer hints. SSRF attempts return HTTP 400 instead of 502.
+- **`fhir_errors` shared module** (`backend/app/services/fhir_errors.py`) — `FhirOperationOutcome`, `FhirOperationError`, `build_error_envelope`, `redact_outcome`, `sanitize_url`, and `HINT_BY_STATUS` hint map. Foundation for PR-2 ($gather and MCS error surfacing).
+- **DB schema extensions** — `measure_results.error_details JSONB`, `measure_results.error_phase VARCHAR(32)`, and a unique index on `(job_id, patient_id)` (with dedup pre-flight) added via `_run_schema_migrations`. Populated by PR-2; nullable additive in this PR.
+- **`parseFhirError` helper** (`frontend/src/api/fhirError.js`) — parses `detail.issue[]` and `detail.error_details` from API error bodies into `{issues, errorDetails}`. Now consumed by `client.js`; ready for `OperationOutcomeView` in the next PR.
+- **Integration tests** (`backend/tests/integration/test_connection_errors.py`) — bearer-token 401, unreachable-URL 502, and success `response_time_ms` scenarios against a live HAPI CDR.
+
+### Changed
+- **`/settings/test-connection` response** — success responses now include `response_time_ms` (int) and a sanitized `url` field. Error responses carry the full `error_details` envelope. Closes #74.
+
 ## [0.0.8.0] - 2026-04-27
 
 ### Changed

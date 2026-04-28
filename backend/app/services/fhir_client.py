@@ -847,18 +847,42 @@ async def verify_fhir_connection(
     auth_credentials: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Test connectivity to a FHIR server by fetching its metadata."""
+    from app.services.fhir_errors import FhirOperationError, FhirOperationOutcome, sanitize_url
+
     _validate_ssrf_url(fhir_url, label="cdr_url")
     headers = await _build_auth_headers(auth_type, auth_credentials)
     url = f"{fhir_url}/metadata"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        t0 = time.monotonic()
-        resp = await client.get(url, headers=headers)
-        response_time_ms = round((time.monotonic() - t0) * 1000)
-        resp.raise_for_status()
-        data = resp.json()
-        return {
-            "status": "connected",
-            "fhir_version": data.get("fhirVersion", "unknown"),
-            "software": data.get("software", {}).get("name", "unknown"),
-            "response_time": response_time_ms,
-        }
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(url, headers=headers)
+            latency_ms = round((time.monotonic() - t0) * 1000)
+            if not resp.is_success:
+                outcome = FhirOperationOutcome.from_response(resp)
+                raise FhirOperationError(
+                    operation="test-connection",
+                    url=url,
+                    status_code=resp.status_code,
+                    outcome=outcome,
+                    latency_ms=latency_ms,
+                )
+            data = resp.json()
+            return {
+                "status": "connected",
+                "fhir_version": data.get("fhirVersion", "unknown"),
+                "software": data.get("software", {}).get("name", "unknown"),
+                "response_time_ms": latency_ms,
+                "url": sanitize_url(url),
+            }
+    except FhirOperationError:
+        raise
+    except Exception as exc:
+        latency_ms = round((time.monotonic() - t0) * 1000)
+        raise FhirOperationError(
+            operation="test-connection",
+            url=url,
+            status_code=None,
+            outcome=None,
+            latency_ms=latency_ms,
+            cause=exc,
+        )

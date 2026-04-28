@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import styles from './ConnectionModal.module.css';
 import { createConnection, updateConnection, testConnection } from '../api/client';
+import OperationOutcomeView from './OperationOutcomeView';
+import ErrorBanner from './ErrorBanner';
 
 export default function ConnectionModal({ connection, onClose, onSaved }) {
   const isEdit = !!connection;
@@ -67,9 +69,15 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
         auth_type: form.auth_type,
         auth_credentials: buildAuthCredentials(),
       });
-      setTestResult({ success: true, message: result.message || 'Connected successfully', response_time: result.response_time });
+      setTestResult({ success: true, response_time_ms: result.response_time_ms });
     } catch (err) {
-      setTestResult({ success: false, message: err.message || 'Connection failed' });
+      const parsed = err.body?.parsed;
+      setTestResult({
+        success: false,
+        message: err.message || 'Connection failed',
+        issues: parsed?.issues,
+        errorDetails: parsed?.errorDetails,
+      });
     } finally {
       setTesting(false);
     }
@@ -110,7 +118,7 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
         </div>
 
         <form onSubmit={handleSave} className={styles.form}>
-          {error && <div className={styles.errorBanner} role="alert">{error}</div>}
+          {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
 
           <div className={styles.formGroup}>
             <label htmlFor="conn-name" className={styles.label}>Name</label>
@@ -180,8 +188,13 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
             <div className={`${styles.testResult} ${testResult.success ? styles.testSuccess : styles.testFailure}`} role="status">
               <span aria-hidden="true">{testResult.success ? '\u2713' : '\u2717'}</span>
               <div className={styles.testContent}>
-                <p className={styles.testMessage}>{testResult.message}</p>
-                {testResult.response_time && <p className={styles.testDetail}>Response time: {testResult.response_time}ms</p>}
+                {testResult.success
+                  ? <p className={styles.testMessage}>Connected{testResult.response_time_ms != null ? ` in ${testResult.response_time_ms}ms` : ' successfully'}</p>
+                  : <>
+                      {testResult.message && <p className={styles.testMessage}>{testResult.message}</p>}
+                      <OperationOutcomeView issues={testResult.issues} errorDetails={testResult.errorDetails} />
+                    </>
+                }
               </div>
               <button className={styles.testDismiss} onClick={() => setTestResult(null)} aria-label="Dismiss">&#x2715;</button>
             </div>

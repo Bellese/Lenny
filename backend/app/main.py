@@ -38,7 +38,19 @@ class JSONFormatter(logging.Formatter):
             "message": record.getMessage(),
         }
         # Merge structlog-style extra keys
-        for key in ("job_id", "batch_id", "patient_id", "url", "count", "error", "cdr_url"):
+        _EXTRA_KEYS = (
+            "job_id",
+            "batch_id",
+            "patient_id",
+            "url",
+            "count",
+            "error",
+            "cdr_url",
+            "status_code",
+            "latency_ms",
+            "hint",
+        )
+        for key in _EXTRA_KEYS:
             val = getattr(record, key, None)
             if val is not None:
                 log_entry[key] = val
@@ -209,6 +221,37 @@ async def _run_schema_migrations(conn) -> None:
               AND (name IS NULL OR name = '')
         """)
         )
+
+        # Dedup measure_results before adding the unique index — the batch-retry
+        # loop can create duplicate rows. Keep the newest row per (job_id, patient_id).
+        # Guard so the DELETE only runs once (before the index is created).
+        index_exists = (
+            await conn.execute(
+                text("SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_measure_results_job_patient')")
+            )
+        ).scalar()
+        if not index_exists:
+            await conn.execute(
+                text("""
+                DELETE FROM measure_results a USING measure_results b
+                WHERE a.id < b.id
+                  AND a.job_id = b.job_id
+                  AND a.patient_id = b.patient_id
+                """)
+            )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_measure_results_job_patient"
+                " ON measure_results (job_id, patient_id)"
+            )
+        )
+
+        # Error context columns added for #74/#75/#76 observability
+        for stmt in [
+            "ALTER TABLE measure_results ADD COLUMN IF NOT EXISTS error_details JSONB",
+            "ALTER TABLE measure_results ADD COLUMN IF NOT EXISTS error_phase VARCHAR(32)",
+        ]:
+            await conn.execute(text(stmt))
 
 
 @asynccontextmanager

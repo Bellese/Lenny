@@ -1,3 +1,5 @@
+import { parseFhirError } from './fhirError';
+
 const BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 class ApiError extends Error {
@@ -53,14 +55,18 @@ async function request(path, { _timeout = 20000, ...options } = {}) {
       message = `Request failed: ${response.status} ${response.statusText}`;
     } else if (typeof raw === 'string') {
       message = raw;
-    } else if (raw?.issue?.[0]?.diagnostics) {
-      // FHIR OperationOutcome
-      message = raw.issue[0].diagnostics;
+    } else if (raw?.issue?.length) {
+      // FHIR OperationOutcome — use first issue with diagnostics
+      const first = raw.issue.find(i => i.diagnostics);
+      message = first?.diagnostics || `Request failed: ${response.status} ${response.statusText}`;
     } else if (Array.isArray(raw)) {
       // FastAPI validation error array
       message = raw.map(e => e.msg || JSON.stringify(e)).join('; ');
     } else {
       message = `Request failed: ${response.status} ${response.statusText}`;
+    }
+    if (body && typeof body === 'object' && !body.parsed) {
+      body.parsed = parseFhirError(body);
     }
     throw new ApiError(message, response.status, body);
   }
