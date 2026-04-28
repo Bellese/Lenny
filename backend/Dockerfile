@@ -12,6 +12,9 @@ COPY app/ app/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+RUN useradd --create-home --uid 1000 app
+USER app
+
 EXPOSE 8000
 
 ENTRYPOINT ["docker-entrypoint.sh"]

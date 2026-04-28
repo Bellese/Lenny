@@ -22,6 +22,7 @@ from app.services.fhir_client import (
     trigger_reindex_and_wait,
     wipe_patient_data,
 )
+from app.services.fhir_errors import sanitize_url
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -146,7 +147,7 @@ async def run_job(job_id: int) -> None:
             patients = await get_group_members(cdr_url, group_id, auth_headers)
         else:
             strategy = BatchQueryStrategy()
-            logger.info("Gathering patients from CDR", extra={"job_id": job_id, "cdr_url": cdr_url})
+            logger.info("Gathering patients from CDR", extra={"job_id": job_id, "cdr_url": sanitize_url(cdr_url)})
             patients = await strategy.gather_patients(cdr_url, auth_headers)
 
         if not patients:

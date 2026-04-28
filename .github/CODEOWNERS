@@ -1,8 +1,8 @@
 # Security-sensitive files — require maintainer review
-scripts/deploy-prod.sh @msutton
-scripts/fetch-prod-secrets.sh @msutton
-scripts/reconcile-db-password.sh @msutton
-.github/workflows/deploy.yml @msutton
-iam/ @msutton
-ssm/ @msutton
-deploy/ @msutton
+scripts/deploy-prod.sh @msutton @blakenan-bellese
+scripts/fetch-prod-secrets.sh @msutton @blakenan-bellese
+scripts/reconcile-db-password.sh @msutton @blakenan-bellese
+.github/workflows/ @msutton @blakenan-bellese
+iam/ @msutton @blakenan-bellese
+ssm/ @msutton @blakenan-bellese
+deploy/ @msutton @blakenan-bellese
