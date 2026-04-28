@@ -56,7 +56,9 @@ class Job(Base):
     cdr_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     cdr_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     cdr_auth_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
-    cdr_auth_credentials: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    cdr_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("cdr_configs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     batches: Mapped[list["Batch"]] = relationship(
         "Batch", back_populates="job", cascade="all, delete-orphan", lazy="selectin"
