@@ -847,7 +847,7 @@ async def verify_fhir_connection(
     auth_credentials: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Test connectivity to a FHIR server by fetching its metadata."""
-    from app.services.fhir_errors import FhirOperationError, FhirOperationOutcome
+    from app.services.fhir_errors import FhirOperationError, FhirOperationOutcome, sanitize_url
 
     _validate_ssrf_url(fhir_url, label="cdr_url")
     headers = await _build_auth_headers(auth_type, auth_credentials)
@@ -872,7 +872,7 @@ async def verify_fhir_connection(
                 "fhir_version": data.get("fhirVersion", "unknown"),
                 "software": data.get("software", {}).get("name", "unknown"),
                 "response_time_ms": latency_ms,
-                "url": url,
+                "url": sanitize_url(url),
             }
     except FhirOperationError:
         raise

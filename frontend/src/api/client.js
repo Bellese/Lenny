@@ -1,3 +1,5 @@
+import { parseFhirError } from './fhirError';
+
 const BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
 
 class ApiError extends Error {
@@ -64,17 +66,7 @@ async function request(path, { _timeout = 20000, ...options } = {}) {
       message = `Request failed: ${response.status} ${response.statusText}`;
     }
     if (body && typeof body === 'object' && !body.parsed) {
-      const detail = body?.detail;
-      if (detail && typeof detail === 'object') {
-        body.parsed = {
-          issues: (detail.issue || []).map(i => ({
-            severity: i.severity || 'error',
-            code: i.code || 'exception',
-            diagnostics: i.diagnostics || null,
-          })),
-          errorDetails: detail.error_details || null,
-        };
-      }
+      body.parsed = parseFhirError(body);
     }
     throw new ApiError(message, response.status, body);
   }
