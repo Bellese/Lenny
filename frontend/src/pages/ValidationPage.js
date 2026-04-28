@@ -192,6 +192,28 @@ export default function ValidationPage() {
         </div>
       )}
 
+      {/* Upload result banners — show failed/warned uploads */}
+      {uploads.filter(u => u.status === 'failed' || u.warning_message).slice(0, 3).map(u => (
+        <div key={u.id} className={`${styles.errorBanner} ${u.status !== 'failed' ? styles.warnBanner : ''}`} role="alert">
+          <strong>{u.filename}</strong>
+          {u.status === 'failed'
+            ? ` — Upload failed: ${u.error_message || 'Unknown error'}`
+            : ` — ${u.warning_message}`}
+          {u.error_details?.failed_entries?.length > 0 && (
+            <ul className={styles.uploadErrorList}>
+              {u.error_details.failed_entries.map((fe, i) => (
+                <li key={i}>
+                  <span className={styles.uploadErrorType}>{fe.resource_type}{fe.resource_id ? `/${fe.resource_id}` : ''}</span>
+                  {' '}
+                  <span className={styles.uploadErrorStatus}>{fe.status}</span>
+                  {fe.diagnostics && <span className={styles.uploadErrorDiag}> — {fe.diagnostics}</span>}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      ))}
+
       {/* KPI cards */}
       <div className={styles.kpiRow}>
         {[

@@ -267,6 +267,45 @@
 .iconOk { color: var(--ok); }
 .iconWarn { color: var(--warn); }
 .iconDim { color: var(--text-dim); }
+.iconErr { color: var(--err); }
+
+.errorBadge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--err) 12%, transparent);
+  color: var(--err);
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.errorPhaseLabel {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-left: 4px;
+}
+
+.patientRowError td {
+  background: color-mix(in srgb, var(--err) 4%, transparent);
+}
+
+.patientRowError:hover td {
+  background: color-mix(in srgb, var(--err) 8%, transparent);
+}
+
+.warnBadge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: color-mix(in srgb, #b08000 10%, transparent);
+  color: #7a5c00;
+  margin-left: 6px;
+  vertical-align: middle;
+}
 
 .emptyRow {
   text-align: center;

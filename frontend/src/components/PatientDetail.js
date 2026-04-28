@@ -45,6 +45,7 @@ function translateResource(resource) {
 }
 
 import { syntaxHighlightJson } from '../utils/json';
+import OperationOutcomeView from './OperationOutcomeView';
 
 const POPULATIONS = [
   { key: 'initial_population', label: 'Initial population' },
@@ -93,6 +94,11 @@ export default function PatientDetail({ result, onClose }) {
   const activePops = POPULATIONS.filter(p => result[p.key] !== undefined);
   const resourceList = Array.isArray(resources) ? resources : resources?.resources || [];
 
+  const measureReport = result.measure_report;
+  const isOoReport = measureReport?.resourceType === 'OperationOutcome';
+  const ooIssues = isOoReport ? (measureReport.issue || []) : [];
+  const errorDetails = result.error_details || null;
+
   return (
     <div className={styles.overlay} onClick={onClose} role="dialog" aria-modal="true" aria-label={`Patient details: ${patientName}`}>
       <div className={styles.drawer} onClick={(e) => e.stopPropagation()}>
@@ -138,12 +144,33 @@ export default function PatientDetail({ result, onClose }) {
             </div>
           </section>
 
+          {(isOoReport || errorDetails) && (
+            <section className={styles.section}>
+              <h3 className={styles.sectionTitle}>Calculation error</h3>
+              <OperationOutcomeView issues={ooIssues} errorDetails={errorDetails} />
+              {isOoReport && (
+                <div className={styles.rawFhir} style={{ marginTop: 8 }}>
+                  <button className={styles.fhirToggle} onClick={() => setShowRawFhir(v => !v)} aria-expanded={showRawFhir}>
+                    <span>{showRawFhir ? '▾' : '▸'}</span>
+                    <span>Raw OperationOutcome</span>
+                  </button>
+                  {showRawFhir && (
+                    /* syntaxHighlightJson escapes all content via escapeHtml — safe for dangerouslySetInnerHTML */
+                    <pre className={styles.fhirJson} dangerouslySetInnerHTML={{ __html: syntaxHighlightJson(measureReport) }} />
+                  )}
+                </div>
+              )}
+            </section>
+          )}
+
           <section className={styles.section}>
             <div className={styles.sectionHeader}>
               <h3 className={styles.sectionTitle}>Evaluated resources</h3>
-              <button className={styles.toggleBtn} onClick={() => setShowRawFhir(!showRawFhir)} aria-pressed={showRawFhir}>
-                {showRawFhir ? 'Clinical view' : 'Raw FHIR'}
-              </button>
+              {!isOoReport && (
+                <button className={styles.toggleBtn} onClick={() => setShowRawFhir(!showRawFhir)} aria-pressed={showRawFhir}>
+                  {showRawFhir ? 'Clinical view' : 'Raw FHIR'}
+                </button>
+              )}
             </div>
 
             {loading && (

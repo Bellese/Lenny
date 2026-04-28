@@ -57,6 +57,7 @@ async def get_results(
     for mr in results:
         populations = mr.populations or {}
         is_error = bool(populations.get("error"))
+        is_partial = mr.error_phase == "gather_partial"
         if is_error:
             failed_patients += 1
         else:
@@ -71,6 +72,8 @@ async def get_results(
                 "populations": populations,
                 "status": "error" if is_error else "success",
                 "error_message": populations.get("error_message") if is_error else None,
+                "error_phase": mr.error_phase if (is_error or is_partial) else None,
+                "error_details": mr.error_details if (is_error or is_partial) else None,
             }
         )
 
@@ -112,6 +115,8 @@ async def get_result(
             },
         )
 
+    is_error = bool((mr.populations or {}).get("error"))
+    is_partial = mr.error_phase == "gather_partial"
     return {
         "id": mr.id,
         "job_id": mr.job_id,
@@ -119,8 +124,10 @@ async def get_result(
         "patient_name": mr.patient_name,
         "measure_report": mr.measure_report,
         "populations": mr.populations,
-        "status": "error" if (mr.populations or {}).get("error") else "success",
+        "status": "error" if is_error else "success",
         "error_message": (mr.populations or {}).get("error_message"),
+        "error_phase": mr.error_phase if (is_error or is_partial) else None,
+        "error_details": mr.error_details if (is_error or is_partial) else None,
         "created_at": mr.created_at.isoformat() if mr.created_at else None,
     }
 

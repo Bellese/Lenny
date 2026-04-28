@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.9.0] - 2026-04-28
+
+### Added
+- **Structured FHIR error surfacing (PR-2 — $gather + bundle upload + MCS OperationOutcome, issues #75 #76)** — three previously-silent failure classes now surface actionable context to the user.
+- **MCS `OperationOutcome` preservation (#76)** — when the Measure Calculation Server returns a non-2xx response or a 200-with-`OperationOutcome` body, `evaluate_measure` raises `FhirOperationError` carrying the full parsed OO. The orchestrator persists the server-returned OO (not a synthetic one) in `measure_report` via a FHIR `Extension`, along with `error_details` (status_code, url, latency_ms, raw_outcome). Per-patient error rows show the MCS OO in the `PatientDetail` drawer alongside existing results.
+- **Partial CDR gather surfaced (#75 AT-2)** — when `DataRequirementsStrategy` fails to fetch one or more resource types from the CDR but succeeds on others, `gather_patient_data` now returns a `GatherResult` with `failed_types: list[FailedResourceFetch]`. The orchestrator continues to evaluate with available data (does NOT skip the patient), annotates the `MeasureResult` with `error_phase="gather_partial"` and `error_details` listing failed/succeeded types. The ResultsPage shows an amber **Partial data** badge for these rows so attendees know results may be incomplete.
+- **Full CDR gather failure surfaced (#75 AT-1)** — when gather/push raises an exception (CDR unreachable, 401, etc.), the patient is recorded with `error_phase="gather"`, `error_details` with upstream status_code/url/latency, and is skipped in the evaluate phase.
+- **Bundle upload partial failures surfaced (#75 AT-3/AT-4)** — `push_resources` now parses the HAPI batch-response Bundle and returns a `BundleUploadResult` with per-entry success/failure breakdown. A 200-OK-with-OperationOutcome body (transaction-level HAPI rejection) is treated as a failure. The ValidationPage upload result shows a per-entry failure list. `BundleUpload.error_details JSONB` column added.
+- **`ValidationResult.error_details JSONB` column** — `evaluate_and_compare` catches `FhirOperationError` and persists the MCS OO in `error_details`.
+- **New dataclasses** — `GatherResult`, `FailedResourceFetch`, `BundleUploadResult`, `BundleEntryResult` in `fhir_client.py`.
+
+### Changed
+- **`PatientDetail` drawer** — when `measure_report.resourceType === "OperationOutcome"`, renders an `OperationOutcomeView` above the raw JSON toggle. Closes #76.
+- **ResultsPage patient table** — tri-state: `error` rows show a red **Error** badge with error phase; `gather_partial` rows show an amber **Partial data** badge.
+- **ValidationPage upload result** — per-entry failure list when `error_details.failed_entries` is non-empty.
+- **`_error_measure_report`** — embeds MCS-returned OO via FHIR Extension instead of synthesizing from `str(exc)`. Deep-copies upstream dict to prevent cross-patient mutation. `populations["error_message"]` still written for back-compat.
+
+### Fixed
+- **MCS OO discarded on 4xx/5xx** — `evaluate_measure` now parses and preserves the server-returned OperationOutcome. Closes #76.
+- **Partial gather silent pass** — patients with partial CDR data now annotated with `gather_partial` phase instead of evaluating against missing resources. Closes #75.
+- **HAPI 200-with-OperationOutcome body** — transaction-level HAPI bundle rejection returning HTTP 200 with OO body now raises `FhirOperationError`.
+
 ## [0.0.8.1] - 2026-04-27
 
 ### Added

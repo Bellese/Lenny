@@ -365,19 +365,44 @@ export default function ResultsPage() {
                         : 'No individual patient results available.'}
                   </td></tr>
                 ) : (
-                  filteredPatients.map((patient, i) => (
-                    <tr
-                      key={patient.patient_id || patient.id || i}
-                      className={styles.patientRow}
-                      onClick={() => handleViewPatient(patient)}
-                    >
-                      <td data-label="Patient ID"><span className={styles.mono}>{patient.patient_id || patient.id || '--'}</span></td>
-                      <td data-label="Name" className={styles.patientName}>{patient.patient_name || patient.name || '--'}</td>
-                      <td data-label="Denom" className={styles.popCell}>{patient.populations?.denominator ? <CheckIcon className={styles.iconOk} /> : <XIcon className={styles.iconDim} />}</td>
-                      <td data-label="Numer" className={styles.popCell}>{patient.populations?.numerator ? <CheckIcon className={styles.iconOk} /> : <XIcon className={styles.iconDim} />}</td>
-                      <td data-label="Excl." className={styles.popCell}>{patient.populations?.denominator_exclusion ? <CheckIcon className={styles.iconWarn} /> : <XIcon className={styles.iconDim} />}</td>
-                    </tr>
-                  ))
+                  filteredPatients.map((patient, i) => {
+                    const isError = patient.populations?.error === true || patient.status === 'error';
+                    const phase = patient.error_phase;
+                    const phaseLabel = phase === 'gather' ? 'gather failed'
+                      : phase === 'gather_partial' ? 'partial data'
+                      : phase === 'evaluate' ? 'eval failed'
+                      : isError ? 'error' : null;
+                    return (
+                      <tr
+                        key={patient.patient_id || patient.id || i}
+                        className={`${styles.patientRow} ${isError ? styles.patientRowError : ''}`}
+                        onClick={() => handleViewPatient(patient)}
+                      >
+                        <td data-label="Patient ID"><span className={styles.mono}>{patient.patient_id || patient.id || '--'}</span></td>
+                        <td data-label="Name" className={styles.patientName}>
+                          {patient.patient_name || patient.name || '--'}
+                          {isError && <span className={styles.errorBadge}>Error</span>}
+                          {isError && phaseLabel && <span className={styles.errorPhaseLabel}>{phaseLabel}</span>}
+                          {!isError && phase === 'gather_partial' && <span className={styles.warnBadge}>Partial data</span>}
+                        </td>
+                        {isError ? (
+                          <>
+                            <td data-label="Denom" className={styles.popCell} colSpan={3}>
+                              <span className={styles.errorPhaseLabel} title={patient.error_message || ''}>
+                                {patient.error_message ? patient.error_message.slice(0, 60) : 'See details'}
+                              </span>
+                            </td>
+                          </>
+                        ) : (
+                          <>
+                            <td data-label="Denom" className={styles.popCell}>{patient.populations?.denominator ? <CheckIcon className={styles.iconOk} /> : <XIcon className={styles.iconDim} />}</td>
+                            <td data-label="Numer" className={styles.popCell}>{patient.populations?.numerator ? <CheckIcon className={styles.iconOk} /> : <XIcon className={styles.iconDim} />}</td>
+                            <td data-label="Excl." className={styles.popCell}>{patient.populations?.denominator_exclusion ? <CheckIcon className={styles.iconWarn} /> : <XIcon className={styles.iconDim} />}</td>
+                          </>
+                        )}
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
