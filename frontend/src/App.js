@@ -11,6 +11,7 @@ import {
   MeasuresIcon, JobsIcon, ResultsIcon, ValidateIcon,
   SettingsIcon, SearchIcon, XIcon, SunIcon, MoonIcon,
 } from './components/Icons';
+import HealthIndicator from './components/HealthIndicator';
 import SearchContext from './contexts/SearchContext';
 
 const NAV_ITEMS = [
@@ -50,6 +51,7 @@ export default function App() {
   const [navOpen, setNavOpen] = useState(false);
   const [cdrStatus, setCdrStatus] = useState('unknown');
   const [cdrName, setCdrName] = useState('');
+  const [cdrErrorDetails, setCdrErrorDetails] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem('mct2-theme') || 'light');
   const [query, setQuery] = useState('');
   const searchRef = useRef(null);
@@ -72,9 +74,11 @@ export default function App() {
       const health = await getHealth();
       setCdrStatus(health?.cdr?.status ?? 'unknown');
       setCdrName(health?.cdr?.name ?? '');
+      setCdrErrorDetails(health?.cdr?.error_details ?? null);
     } catch {
       setCdrStatus('unknown');
       setCdrName('');
+      setCdrErrorDetails(null);
     }
   }, []);
 
@@ -149,10 +153,7 @@ export default function App() {
           <span className={styles.crumb}>{pageTitle}</span>
           <div className={styles.spacer} />
           <div className={styles.topbarRight}>
-            <div className={styles.cdrChip} title={cdrName || 'Local CDR'}>
-              <span className={`${styles.cdrDot} ${cdrOk ? styles.cdrDotOk : styles.cdrDotErr}`} />
-              {cdrName || 'Local CDR'}
-            </div>
+            <HealthIndicator status={cdrStatus} name={cdrName} errorDetails={cdrErrorDetails} />
             <div className={styles.searchWrap}>
               <SearchIcon className={styles.searchIcon} />
               <input
@@ -220,7 +221,10 @@ export default function App() {
           </NavLink>
 
           <div className={styles.statusFooter}>
-            <div className={styles.statusRow}>
+            <div
+              className={styles.statusRow}
+              title={!cdrOk && cdrErrorDetails?.hint ? cdrErrorDetails.hint : undefined}
+            >
               <span className={`${styles.statusDot} ${cdrOk ? styles.statusDotOk : ''}`} />
               {cdrOk ? 'All services healthy' : 'CDR unavailable'}
             </div>

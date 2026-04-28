@@ -1,6 +1,7 @@
 """Health check endpoint."""
 
 import logging
+import time
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -10,10 +11,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_session
 from app.dependencies import CDRContext, get_active_cdr
+from app.services.fhir_errors import HINT_BY_STATUS, hint_for_network_exception, sanitize_url
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["health"])
+
+
+def _http_error_details(url: str, status_code: int, latency_ms: int) -> dict:
+    return {
+        "operation": "health-check",
+        "url": sanitize_url(url),
+        "status_code": status_code,
+        "latency_ms": latency_ms,
+        "hint": HINT_BY_STATUS.get(status_code),
+    }
+
+
+def _network_error_details(url: str, exc: Exception, latency_ms: int) -> dict:
+    return {
+        "operation": "health-check",
+        "url": sanitize_url(url),
+        "status_code": None,
+        "latency_ms": latency_ms,
+        "hint": hint_for_network_exception(exc),
+    }
 
 
 @router.get("/health")
@@ -38,25 +60,37 @@ async def health_check(
         status["status"] = "degraded"
 
     # Measure engine check
+    me_url = f"{settings.MEASURE_ENGINE_URL}/metadata"
+    t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(f"{settings.MEASURE_ENGINE_URL}/metadata")
+            resp = await client.get(me_url)
+            latency_ms = round((time.monotonic() - t0) * 1000)
             if resp.status_code == 200:
                 status["measure_engine"] = {"status": "connected"}
             else:
                 status["measure_engine"] = {
                     "status": "disconnected",
                     "error": f"HTTP {resp.status_code}",
+                    "error_details": _http_error_details(me_url, resp.status_code, latency_ms),
                 }
                 status["status"] = "degraded"
     except Exception as exc:
-        status["measure_engine"] = {"status": "disconnected", "error": sanitize_error(exc)[:200]}
+        latency_ms = round((time.monotonic() - t0) * 1000)
+        status["measure_engine"] = {
+            "status": "disconnected",
+            "error": sanitize_error(exc)[:200],
+            "error_details": _network_error_details(me_url, exc, latency_ms),
+        }
         status["status"] = "degraded"
 
     # CDR check
+    cdr_url = f"{cdr.cdr_url}/metadata"
+    t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(f"{cdr.cdr_url}/metadata")
+            resp = await client.get(cdr_url)
+            latency_ms = round((time.monotonic() - t0) * 1000)
             if resp.status_code == 200:
                 status["cdr"] = {"status": "connected", "name": cdr.name, "is_read_only": cdr.is_read_only}
             else:
@@ -65,14 +99,17 @@ async def health_check(
                     "name": cdr.name,
                     "is_read_only": cdr.is_read_only,
                     "error": f"HTTP {resp.status_code}",
+                    "error_details": _http_error_details(cdr_url, resp.status_code, latency_ms),
                 }
                 status["status"] = "degraded"
     except Exception as exc:
+        latency_ms = round((time.monotonic() - t0) * 1000)
         status["cdr"] = {
             "status": "disconnected",
             "name": cdr.name,
             "is_read_only": cdr.is_read_only,
             "error": sanitize_error(exc)[:200],
+            "error_details": _network_error_details(cdr_url, exc, latency_ms),
         }
         status["status"] = "degraded"
 

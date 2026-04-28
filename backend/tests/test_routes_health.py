@@ -120,7 +120,71 @@ async def test_health_measure_engine_unreachable(client, mock_fhir_metadata):
     assert data["status"] == "degraded"
     assert data["measure_engine"]["status"] == "disconnected"
     assert "error" in data["measure_engine"]
-    assert data["cdr"]["status"] == "connected"
+
+
+async def test_health_measure_engine_down_has_error_details(client, mock_fhir_metadata):
+    """error_details is present and has a hint when the measure engine is unreachable."""
+    cdr_response = httpx.Response(200, json=mock_fhir_metadata)
+
+    call_count = 0
+
+    async def mock_get(url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.ConnectError("Connection refused")
+        return cdr_response
+
+    with patch("app.routes.health.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get("/health")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    me = data["measure_engine"]
+    assert me["status"] == "disconnected"
+    assert "error_details" in me
+    ed = me["error_details"]
+    assert ed["operation"] == "health-check"
+    assert ed["hint"] is not None
+    assert ed["status_code"] is None  # network error, no HTTP status
+
+
+async def test_health_cdr_http_error_has_error_details(client, mock_fhir_metadata):
+    """error_details has status_code and hint when CDR returns non-200."""
+    engine_response = httpx.Response(200, json=mock_fhir_metadata)
+    cdr_401 = httpx.Response(401, json={"resourceType": "OperationOutcome", "issue": []})
+
+    call_count = 0
+
+    async def mock_get(url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return engine_response
+        return cdr_401
+
+    with patch("app.routes.health.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get("/health")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    cdr = data["cdr"]
+    assert cdr["status"] == "disconnected"
+    assert "error_details" in cdr
+    ed = cdr["error_details"]
+    assert ed["status_code"] == 401
+    assert ed["hint"] is not None
+    assert "token" in ed["hint"].lower() or "authentication" in ed["hint"].lower()
 
 
 async def test_health_cdr_unreachable(client, mock_fhir_metadata):

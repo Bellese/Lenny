@@ -292,6 +292,25 @@
   font-family: var(--font-mono);
 }
 
+.statusItem {
+  display: flex;
+  flex-direction: column;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.statusItem:last-child {
+  border-bottom: none;
+}
+
+.statusItem .statusRow {
+  border-bottom: none;
+}
+
+.statusErrorDetails {
+  padding: 8px 20px 12px;
+  background: var(--bg-sunken);
+}
+
 @media (max-width: 820px) {
   .page {
     max-width: none;

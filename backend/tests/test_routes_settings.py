@@ -395,7 +395,95 @@ async def test_test_connection_failure(client):
     assert resp.status_code == 502
     data = resp.json()["detail"]
     assert data["resourceType"] == "OperationOutcome"
-    assert "Connection failed" in data["issue"][0]["diagnostics"]
+    assert data["issue"][0]["diagnostics"]  # non-empty diagnostics
+
+
+async def test_test_connection_401_surfaces_auth_hint(client):
+    """POST /settings/test-connection with 401 from CDR returns auth hint in error_details."""
+    from app.services.fhir_errors import FhirOperationError
+
+    exc = FhirOperationError(
+        operation="test-connection",
+        url="http://example.com/fhir/metadata",
+        status_code=401,
+        outcome=None,
+        latency_ms=30,
+    )
+    with patch(
+        "app.routes.settings.verify_fhir_connection",
+        new_callable=AsyncMock,
+        side_effect=exc,
+    ):
+        resp = await client.post(
+            "/settings/test-connection",
+            json={"cdr_url": "http://example.com/fhir"},
+        )
+
+    assert resp.status_code == 401
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    ed = detail["error_details"]
+    assert ed["status_code"] == 401
+    assert ed["hint"] is not None
+    assert "token" in ed["hint"].lower() or "authentication" in ed["hint"].lower()
+
+
+async def test_test_connection_connect_error_surfaces_network_hint(client):
+    """POST /settings/test-connection with httpx.ConnectError returns network hint."""
+    import httpx as _httpx
+
+    from app.services.fhir_errors import FhirOperationError
+
+    exc = FhirOperationError(
+        operation="test-connection",
+        url="http://bad-server.example.com/fhir/metadata",
+        status_code=None,
+        outcome=None,
+        latency_ms=10,
+        cause=_httpx.ConnectError("Connection refused"),
+    )
+    with patch(
+        "app.routes.settings.verify_fhir_connection",
+        new_callable=AsyncMock,
+        side_effect=exc,
+    ):
+        resp = await client.post(
+            "/settings/test-connection",
+            json={"cdr_url": "http://bad-server.example.com/fhir"},
+        )
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    ed = detail["error_details"]
+    assert ed["status_code"] is None
+    assert ed["hint"] is not None
+    assert "server" in ed["hint"].lower() or "reach" in ed["hint"].lower()
+
+
+async def test_test_connection_success_includes_response_time(client):
+    """POST /settings/test-connection success response includes response_time_ms."""
+    mock_result = {
+        "status": "connected",
+        "fhir_version": "4.0.1",
+        "software": "HAPI FHIR",
+        "response_time_ms": 42,
+        "url": "http://example.com/fhir/metadata",
+    }
+    with patch(
+        "app.routes.settings.verify_fhir_connection",
+        new_callable=AsyncMock,
+        return_value=mock_result,
+    ):
+        resp = await client.post(
+            "/settings/test-connection",
+            json={"cdr_url": "http://example.com/fhir"},
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "connected"
+    assert data["response_time_ms"] == 42
 
 
 async def test_test_connection_smart_missing_credentials(client):

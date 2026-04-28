@@ -341,6 +341,13 @@ async def activate_connection(
 @router.post("/test-connection")
 async def test_cdr_connection(body: TestConnectionRequest) -> dict:
     """Test connectivity to a FHIR server."""
+    from app.services.fhir_errors import (
+        HINT_BY_STATUS,
+        FhirOperationError,
+        build_error_envelope,
+        hint_for_network_exception,
+    )
+
     _validate_auth_type(body.auth_type)
     _validate_smart_credentials(body.auth_type, body.auth_credentials)
     try:
@@ -350,21 +357,36 @@ async def test_cdr_connection(body: TestConnectionRequest) -> dict:
             auth_credentials=body.auth_credentials,
         )
         return result
+    except FhirOperationError as exc:
+        logger.warning(
+            "CDR connection test failed",
+            extra={"cdr_url": body.cdr_url, "status_code": exc.status_code, "error": sanitize_error(exc)},
+        )
+        if exc.status_code is not None:
+            hint = HINT_BY_STATUS.get(exc.status_code)
+        else:
+            hint = hint_for_network_exception(exc.__cause__) if exc.__cause__ else None
+        http_status = exc.status_code if exc.status_code and exc.status_code >= 400 else 502
+        raise HTTPException(
+            status_code=http_status,
+            detail=build_error_envelope(
+                operation="test-connection",
+                url=body.cdr_url,
+                status_code=exc.status_code,
+                outcome=exc.outcome,
+                latency_ms=exc.latency_ms,
+                hint=hint,
+            ),
+        )
     except Exception as exc:
         logger.warning(
             "CDR connection test failed",
-            extra={"cdr_url": body.cdr_url, "error": sanitize_error(str(exc))},
+            extra={"cdr_url": body.cdr_url, "error": sanitize_error(exc)},
         )
         raise HTTPException(
             status_code=502,
             detail={
                 "resourceType": "OperationOutcome",
-                "issue": [
-                    {
-                        "severity": "error",
-                        "code": "exception",
-                        "diagnostics": f"Connection failed: {sanitize_error(exc)}",
-                    }
-                ],
+                "issue": [{"severity": "error", "code": "exception", "diagnostics": sanitize_error(exc)}],
             },
         )

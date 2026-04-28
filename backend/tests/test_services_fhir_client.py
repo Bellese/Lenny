@@ -23,6 +23,7 @@ from app.services.fhir_client import (
 from app.services.fhir_client import (
     verify_fhir_connection as fhir_test_connection,
 )
+from app.services.fhir_errors import FhirOperationError
 
 pytestmark = pytest.mark.asyncio
 
@@ -484,19 +485,21 @@ async def test_fhir_test_connection_success(mock_fhir_metadata):
 
 
 async def test_fhir_test_connection_failed():
-    """test_connection raises when the server is unreachable."""
+    """test_connection raises FhirOperationError when the server is unreachable."""
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
         mock_ctx = AsyncMock()
         mock_ctx.get = AsyncMock(side_effect=httpx.ConnectError("Connection refused"))
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with pytest.raises(httpx.ConnectError):
+        with pytest.raises(FhirOperationError) as exc_info:
             await fhir_test_connection("https://bad-server/fhir")
+        assert exc_info.value.status_code is None
+        assert isinstance(exc_info.value.__cause__, httpx.ConnectError)
 
 
 async def test_fhir_test_connection_401():
-    """test_connection raises on 401 Unauthorized."""
+    """test_connection raises FhirOperationError with status_code=401."""
     mock_response = httpx.Response(
         401,
         json={"error": "unauthorized"},
@@ -509,12 +512,13 @@ async def test_fhir_test_connection_401():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(FhirOperationError) as exc_info:
             await fhir_test_connection("https://example.com/fhir")
+        assert exc_info.value.status_code == 401
 
 
 async def test_fhir_test_connection_500():
-    """test_connection raises on 500 Internal Server Error."""
+    """test_connection raises FhirOperationError with status_code=500."""
     mock_response = httpx.Response(
         500,
         json={"error": "server error"},
@@ -527,20 +531,23 @@ async def test_fhir_test_connection_500():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(FhirOperationError) as exc_info:
             await fhir_test_connection("https://example.com/fhir")
+        assert exc_info.value.status_code == 500
 
 
 async def test_fhir_test_connection_timeout():
-    """test_connection raises on timeout."""
+    """test_connection raises FhirOperationError wrapping a timeout."""
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
         mock_ctx = AsyncMock()
         mock_ctx.get = AsyncMock(side_effect=httpx.TimeoutException("timed out"))
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with pytest.raises(httpx.TimeoutException):
+        with pytest.raises(FhirOperationError) as exc_info:
             await fhir_test_connection("https://slow-server/fhir")
+        assert exc_info.value.status_code is None
+        assert isinstance(exc_info.value.__cause__, httpx.TimeoutException)
 
 
 # ---------------------------------------------------------------------------

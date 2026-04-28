@@ -210,6 +210,30 @@ async def _run_schema_migrations(conn) -> None:
         """)
         )
 
+        # Dedup measure_results before adding the unique index — the batch-retry
+        # loop can create duplicate rows. Keep the newest row per (job_id, patient_id).
+        await conn.execute(
+            text("""
+            DELETE FROM measure_results a USING measure_results b
+            WHERE a.id < b.id
+              AND a.job_id = b.job_id
+              AND a.patient_id = b.patient_id
+            """)
+        )
+        await conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_measure_results_job_patient"
+                " ON measure_results (job_id, patient_id)"
+            )
+        )
+
+        # Error context columns added for #74/#75/#76 observability
+        for stmt in [
+            "ALTER TABLE measure_results ADD COLUMN IF NOT EXISTS error_details JSONB",
+            "ALTER TABLE measure_results ADD COLUMN IF NOT EXISTS error_phase VARCHAR(32)",
+        ]:
+            await conn.execute(text(stmt))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

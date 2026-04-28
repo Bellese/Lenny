@@ -4,6 +4,7 @@ import { getConnections, deleteConnection, activateConnection, getHealth } from 
 import ConnectionModal from '../components/ConnectionModal';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
+import OperationOutcomeView from '../components/OperationOutcomeView';
 
 function DotStatus({ ok }) {
   return <span className={`${styles.statusDot} ${ok ? styles.statusDotOk : styles.statusDotErr}`} />;
@@ -78,10 +79,23 @@ export default function SettingsPage() {
   ];
 
   const statusServices = [
-    { label: 'Backend', ok: !!health, detail: null },
-    { label: 'Measure Engine', ok: health?.measure_engine?.status === 'healthy' || health?.measure_engine?.status === 'connected', detail: health?.measure_engine?.error || null },
-    { label: 'CDR', ok: health?.cdr?.status === 'healthy' || health?.cdr?.status === 'connected', detail: health?.cdr?.name || null },
-    { label: 'Database', ok: health?.database?.status === 'healthy' || health?.database?.status === 'connected', detail: null },
+    { label: 'Backend', ok: !!health, errorDetails: null },
+    {
+      label: 'Measure Engine',
+      ok: health?.measure_engine?.status === 'healthy' || health?.measure_engine?.status === 'connected',
+      errorDetails: health?.measure_engine?.error_details || null,
+    },
+    {
+      label: 'CDR',
+      ok: health?.cdr?.status === 'healthy' || health?.cdr?.status === 'connected',
+      detail: health?.cdr?.name || null,
+      errorDetails: health?.cdr?.error_details || null,
+    },
+    {
+      label: 'Database',
+      ok: health?.database?.status === 'healthy' || health?.database?.status === 'connected',
+      errorDetails: health?.database?.error_details || null,
+    },
   ];
 
   return (
@@ -169,13 +183,20 @@ export default function SettingsPage() {
               </div>
               <div className={styles.statusList}>
                 {statusServices.map(s => (
-                  <div key={s.label} className={styles.statusRow}>
-                    <DotStatus ok={s.ok} />
-                    <span className={styles.statusLabel}>{s.label}</span>
-                    <span className={`${styles.statusText} ${s.ok ? styles.statusOk : styles.statusErr}`}>
-                      {s.ok ? 'Connected' : 'Unavailable'}
-                    </span>
-                    {s.detail && <span className={styles.statusDetail}>{s.detail}</span>}
+                  <div key={s.label} className={styles.statusItem}>
+                    <div className={styles.statusRow}>
+                      <DotStatus ok={s.ok} />
+                      <span className={styles.statusLabel}>{s.label}</span>
+                      <span className={`${styles.statusText} ${s.ok ? styles.statusOk : styles.statusErr}`}>
+                        {s.ok ? 'Connected' : 'Unavailable'}
+                      </span>
+                      {s.detail && <span className={styles.statusDetail}>{s.detail}</span>}
+                    </div>
+                    {!s.ok && s.errorDetails && (
+                      <div className={styles.statusErrorDetails}>
+                        <OperationOutcomeView errorDetails={s.errorDetails} />
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>
