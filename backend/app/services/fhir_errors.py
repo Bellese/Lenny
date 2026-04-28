@@ -40,12 +40,14 @@ def sanitize_url(url: str) -> str:
 
     https://user:pass@cdr.example.com/fhir → https://cdr.example.com/fhir
     http://hapi-fhir-measure:8080/fhir    → http://[host]/fhir
+    https://host/fhir?token=abc123        → https://host/fhir?token=[redacted]
     """
     try:
         parsed = urlparse(url)
         host = parsed.hostname or ""
         netloc = f"{host}:{parsed.port}" if parsed.port else host
-        cleaned = urlunparse(parsed._replace(netloc=netloc))
+        query = _AUTH_RE.sub(r"\1=[redacted]", parsed.query) if parsed.query else parsed.query
+        cleaned = urlunparse(parsed._replace(netloc=netloc, query=query))
     except Exception:
         cleaned = url
     # Strip Docker-style internal hostnames (e.g. hapi-fhir-measure:8080)
@@ -154,18 +156,25 @@ def hint_for_network_exception(exc: BaseException) -> str:
     return "Network error. Check the server is running and reachable."
 
 
-def redact_outcome(oo: dict) -> dict:
-    """Deep-copy an OperationOutcome and strip tokens from issue[].diagnostics.
+def _sanitize_json(v: Any) -> Any:
+    """Recursively sanitize all string leaves in a JSON-like value."""
+    if isinstance(v, str):
+        return _sanitize_str(v)
+    if isinstance(v, dict):
+        return {k: _sanitize_json(val) for k, val in v.items()}
+    if isinstance(v, list):
+        return [_sanitize_json(item) for item in v]
+    return v
 
-    HAPI sometimes echoes failed request bodies into diagnostics — those may
-    contain Authorization headers or bare JWT tokens.
+
+def redact_outcome(oo: dict) -> dict:
+    """Return a sanitized copy of an OperationOutcome with tokens stripped from all string leaves.
+
+    HAPI sometimes echoes failed request bodies into diagnostics, narrative text,
+    and extension fields — those may contain Authorization headers or bare JWT tokens.
+    Sanitizes recursively rather than only issue[].diagnostics.
     """
-    redacted = copy.deepcopy(oo)
-    for issue in redacted.get("issue", []) or []:
-        diag = issue.get("diagnostics")
-        if isinstance(diag, str):
-            issue["diagnostics"] = _sanitize_str(diag)
-    return redacted
+    return _sanitize_json(copy.deepcopy(oo))
 
 
 def _fhir_code_for_status(status_code: int | None) -> str:

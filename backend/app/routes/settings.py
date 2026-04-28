@@ -346,6 +346,7 @@ async def test_cdr_connection(body: TestConnectionRequest) -> dict:
         FhirOperationError,
         build_error_envelope,
         hint_for_network_exception,
+        sanitize_url,
     )
 
     _validate_auth_type(body.auth_type)
@@ -360,7 +361,7 @@ async def test_cdr_connection(body: TestConnectionRequest) -> dict:
     except FhirOperationError as exc:
         logger.warning(
             "CDR connection test failed",
-            extra={"cdr_url": body.cdr_url, "status_code": exc.status_code, "error": sanitize_error(exc)},
+            extra={"cdr_url": sanitize_url(body.cdr_url), "status_code": exc.status_code, "error": sanitize_error(exc)},
         )
         if exc.status_code is not None:
             hint = HINT_BY_STATUS.get(exc.status_code)
@@ -378,10 +379,22 @@ async def test_cdr_connection(body: TestConnectionRequest) -> dict:
                 hint=hint,
             ),
         )
+    except ValueError as exc:
+        logger.warning(
+            "CDR connection test rejected",
+            extra={"cdr_url": sanitize_url(body.cdr_url), "error": sanitize_error(exc)},
+        )
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "security", "diagnostics": sanitize_error(exc)}],
+            },
+        )
     except Exception as exc:
         logger.warning(
             "CDR connection test failed",
-            extra={"cdr_url": body.cdr_url, "error": sanitize_error(exc)},
+            extra={"cdr_url": sanitize_url(body.cdr_url), "error": sanitize_error(exc)},
         )
         raise HTTPException(
             status_code=502,
