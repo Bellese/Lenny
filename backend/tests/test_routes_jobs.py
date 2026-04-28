@@ -294,10 +294,11 @@ async def test_create_job_stamps_cdr_auth_type_as_string_value(client, test_sess
         name="Auth CDR",
         is_default=False,
         is_read_only=False,
-        auth_credentials="my-token",
+        auth_credentials={"token": "my-token"},
     )
     test_session.add(cdr)
     await test_session.commit()
+    await test_session.refresh(cdr)
 
     resp = await client.post(
         "/jobs",
@@ -309,7 +310,8 @@ async def test_create_job_stamps_cdr_auth_type_as_string_value(client, test_sess
     )
     assert resp.status_code == 201
 
-    # Verify the stamped value in the DB is the plain string "bearer", not "AuthType.bearer"
+    # Verify the stamped cdr_auth_type is the plain string "bearer"
+    # and cdr_id FK points at the active CDR config
     from sqlalchemy import select
 
     from app.models.job import Job
@@ -317,6 +319,7 @@ async def test_create_job_stamps_cdr_auth_type_as_string_value(client, test_sess
     result = await test_session.execute(select(Job).order_by(Job.id.desc()).limit(1))
     job = result.scalar_one()
     assert job.cdr_auth_type == "bearer"
+    assert job.cdr_id == cdr.id
 
 
 async def test_list_jobs_includes_batch_counts(client, test_session):
