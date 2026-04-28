@@ -12,6 +12,7 @@ services:
       ALLOWED_ORIGINS: https://${CADDY_HOST}
     secrets:
       - postgres_password
+      - cdr_fernet_key
     ulimits:
       core:
         soft: 0
@@ -50,6 +51,8 @@ services:
 secrets:
   postgres_password:
     file: /run/leonard/POSTGRES_PASSWORD
+  cdr_fernet_key:
+    file: /run/leonard/CDR_FERNET_KEY
 
 volumes:
   caddy_data:

@@ -44,6 +44,7 @@ COMPOSE=( docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_PROD" )
 readonly ENV_DIR="/run/leonard"
 readonly ENV_FILE="${ENV_DIR}/env"
 readonly SECRET_FILE="${ENV_DIR}/POSTGRES_PASSWORD"
+readonly FERNET_SECRET_FILE="${ENV_DIR}/CDR_FERNET_KEY"
 readonly FETCH_SCRIPT="${LEONARD_DIR}/scripts/fetch-prod-secrets.sh"
 readonly RECONCILE_SCRIPT="${LEONARD_DIR}/scripts/reconcile-db-password.sh"
 readonly HEALTH_URL="https://api.98-89-219-217.nip.io/health"
@@ -105,16 +106,22 @@ fi
 if ! grep -qE '^POSTGRES_PASSWORD=' "$ENV_FILE"; then
     die 1 "'${ENV_FILE}' does not contain a POSTGRES_PASSWORD= line"
 fi
+if ! grep -qE '^CDR_FERNET_KEY=' "$ENV_FILE"; then
+    die 1 "'${ENV_FILE}' does not contain a CDR_FERNET_KEY= line"
+fi
 
 # Extract POSTGRES_PASSWORD to the Docker-secrets file.
 # Use install(1) to write mode 0600 atomically — avoids a window where the
 # file is readable at umask permissions before chmod runs.
 # Note: grep+cut emits a trailing newline; postgres POSTGRES_PASSWORD_FILE
 # trims trailing whitespace so this is safe.
-printf '[+] Extracting Docker secret file...\n'
+printf '[+] Extracting Docker secret files...\n'
 grep -E '^POSTGRES_PASSWORD=' "$ENV_FILE" \
     | cut -d= -f2- \
     | install -o root -g root -m 0600 /dev/stdin "$SECRET_FILE"
+grep -E '^CDR_FERNET_KEY=' "$ENV_FILE" \
+    | cut -d= -f2- \
+    | install -o root -g root -m 0600 /dev/stdin "$FERNET_SECRET_FILE"
 
 # ── docker login to GHCR (if token was staged by the deploy workflow) ─────────
 # The deploy workflow writes GITHUB_TOKEN to /leonard/prod/GHCR_TOKEN as a
