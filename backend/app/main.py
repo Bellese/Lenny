@@ -336,8 +336,8 @@ async def lifespan(app: FastAPI):
     # Idempotent: rows already wrapped in {v, ct} envelope are skipped by the TypeDecorator.
     if engine.dialect.name == "postgresql":
         try:
-            from sqlalchemy import text
             from sqlalchemy.ext.asyncio import AsyncSession
+            from sqlalchemy.orm.attributes import flag_modified
 
             from app.models.config import CDRConfig
             from app.services.credential_crypto import self_check
@@ -357,8 +357,9 @@ async def lifespan(app: FastAPI):
                     for cdr_id in ids:
                         cfg = await session.get(CDRConfig, cdr_id)
                         if cfg is not None and cfg.auth_credentials is not None:
-                            # Trigger re-save — TypeDecorator encrypts on flush.
-                            session.add(cfg)
+                            # flag_modified forces SQLAlchemy to mark the attribute dirty so
+                            # EncryptedJSON.process_bind_param fires on flush and encrypts the value.
+                            flag_modified(cfg, "auth_credentials")
                             await session.flush()
                             encrypted_count += 1
                     await session.commit()

@@ -71,7 +71,6 @@ def test_envelope_shape():
     assert envelope["v"] == 1
     assert isinstance(envelope["ct"], str)
     # ct must be a valid urlsafe-b64 Fernet token (decodable)
-    Fernet(Fernet.generate_key()).decrypt  # sanity: Fernet is importable
     _ = bytes(envelope["ct"], "ascii")  # no exception
 
 
@@ -155,7 +154,7 @@ def test_secret_file_takes_priority_over_env():
         assert fernet.decrypt(token) == plaintext
 
         # Env var should still be present (file path took priority; env var was NOT popped)
-        assert "CDR_FERNET_KEY" in os.environ or True  # env pop only on env-path branch
+        assert "CDR_FERNET_KEY" in os.environ
     finally:
         secret_path.unlink(missing_ok=True)
         _reset_fernet()

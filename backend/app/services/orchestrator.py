@@ -276,7 +276,6 @@ async def _get_cdr_auth_headers(job_id: int) -> dict[str, str]:
         if cfg is None:
             raise RuntimeError(f"CDR config {job.cdr_id} referenced by job {job_id} no longer exists.")
         return await _build_auth_headers(cfg.auth_type, cfg.auth_credentials)
-    return {}
 
 
 async def _get_cdr_url(job_id: int) -> str:
