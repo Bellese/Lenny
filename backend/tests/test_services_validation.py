@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import func, select
 
 from app.models.validation import ExpectedResult, ValidationResult, ValidationRun, ValidationStatus
+from app.services.fhir_client import BundleUploadResult
 from app.services.validation import (
     _classify_bundle_entries,
     _extract_patient_name,
@@ -512,7 +513,9 @@ class TestExtractPatientName:
 class TestTriageTestBundle:
     async def test_happy_path_default_cdr(self, test_session, mock_test_bundle_with_expected):
         """Measure defs and clinical data pushed when CDR is default; expected result upserted."""
-        with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+        with patch(
+            "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
+        ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
                 mock_settings.HAPI_SYNC_AFTER_UPLOAD = False
@@ -542,7 +545,9 @@ class TestTriageTestBundle:
         test_session.add(external_cdr)
         await test_session.commit()
 
-        with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+        with patch(
+            "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
+        ) as mock_push:
             result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         # clinical data IS pushed to the external CDR
@@ -577,7 +582,9 @@ class TestTriageTestBundle:
         test_session.add(external_cdr)
         await test_session.commit()
 
-        with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+        with patch(
+            "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
+        ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
                 mock_settings.HAPI_SYNC_AFTER_UPLOAD = False
@@ -628,7 +635,9 @@ class TestTriageTestBundle:
                 },  # noqa: E501
             ],
         }
-        with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+        with patch(
+            "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
+        ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
                 mock_settings.HAPI_SYNC_AFTER_UPLOAD = False
@@ -652,7 +661,9 @@ class TestTriageTestBundle:
         }
         stub = {"resourceType": "ValueSet", "id": "stub-vs", "url": "http://example.com/vs"}
 
-        with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+        with patch(
+            "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
+        ) as mock_push:
             with patch(
                 "app.services.validation._prepare_measure_support_resources",
                 new_callable=AsyncMock,
@@ -693,7 +704,7 @@ class TestTriageTestBundle:
         )
         await test_session.commit()
 
-        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         rows = (
@@ -731,7 +742,7 @@ class TestTriageTestBundle:
         test_session.add_all(stale_rows)
         await test_session.commit()
 
-        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         refreshed_count = await test_session.scalar(
@@ -773,7 +784,7 @@ class TestTriageTestBundle:
         )
         await test_session.commit()
 
-        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             await triage_test_bundle(mock_test_bundle_with_expected, "bundle_v2.json", test_session)
 
         all_rows = (
@@ -819,7 +830,7 @@ class TestTriageTestBundle:
         monkeypatch.setattr("app.services.validation.settings.MEASURE_ENGINE_URL", "http://measure/fhir")
 
         with (
-            patch("app.services.validation.push_resources", new_callable=AsyncMock),
+            patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()),
             patch(
                 "app.services.validation._prepare_measure_support_resources",
                 new_callable=AsyncMock,
@@ -842,7 +853,7 @@ class TestTriageTestBundle:
         monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False)
 
         with (
-            patch("app.services.validation.push_resources", new_callable=AsyncMock),
+            patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()),
             patch("app.services.validation.trigger_reindex_and_wait") as mock_reindex,
             patch("app.services.validation.wait_for_valueset_expansion") as mock_wait,
         ):
@@ -862,7 +873,7 @@ class TestTriageTestBundle:
         async def record_progress(field: str, value: int) -> None:
             calls.append((field, value))
 
-        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             await triage_test_bundle(
                 mock_test_bundle_with_expected, "test.json", test_session, progress_fn=record_progress
             )
@@ -883,7 +894,7 @@ class TestTriageTestBundle:
         """Omitting progress_fn (None) does not raise and returns correct summary."""
         monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False)
 
-        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         assert result["measures_loaded"] == 1
@@ -1089,7 +1100,7 @@ class TestRunValidation:
                 return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
             ),
             patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
-            patch("app.services.validation.push_resources", new_callable=AsyncMock),
+            patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()),
             patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
             patch(
                 "app.services.validation.evaluate_measure",
@@ -1201,7 +1212,11 @@ class TestRunValidation:
                     return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
                 ):
                     with patch("app.services.validation.BatchQueryStrategy", return_value=strategy):
-                        with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+                        with patch(
+                            "app.services.validation.push_resources",
+                            new_callable=AsyncMock,
+                            return_value=BundleUploadResult(),
+                        ) as mock_push:
                             with patch(
                                 "app.services.validation.wipe_patient_data",
                                 new_callable=AsyncMock,
@@ -1340,7 +1355,11 @@ class TestRunValidation:
                     return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
                 ):
                     with patch("app.services.validation.BatchQueryStrategy", return_value=strategy):
-                        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+                        with patch(
+                            "app.services.validation.push_resources",
+                            new_callable=AsyncMock,
+                            return_value=BundleUploadResult(),
+                        ):
                             with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock):
                                 with patch(
                                     "app.services.validation.evaluate_measure",
@@ -1421,7 +1440,7 @@ class TestRunValidation:
                 return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
             ),
             patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
-            patch("app.services.validation.push_resources", new_callable=AsyncMock),
+            patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()),
             patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
             patch(
                 "app.services.validation.evaluate_measure",
@@ -1528,7 +1547,11 @@ class TestRunValidation:
                     return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
                 ):
                     with patch("app.services.validation.BatchQueryStrategy", return_value=strategy):
-                        with patch("app.services.validation.push_resources", new_callable=AsyncMock):
+                        with patch(
+                            "app.services.validation.push_resources",
+                            new_callable=AsyncMock,
+                            return_value=BundleUploadResult(),
+                        ):
                             with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock):
                                 with patch(
                                     "app.services.validation.evaluate_measure",

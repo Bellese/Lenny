@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.job import Job, JobStatus, MeasureResult
+from app.services.fhir_client import FailedResourceFetch, GatherResult
 from app.services.orchestrator import (
     _error_measure_report,
     _extract_patient_name,
@@ -86,6 +87,49 @@ def test_error_measure_report_sanitizes_internal_urls():
     assert "8080" not in diagnostics
 
 
+def test_error_measure_report_preserves_upstream_outcome_via_extension():
+    """When upstream OO is provided, it is embedded with a FHIR Extension (not synthetic)."""
+    from app.services.orchestrator import LENNY_ERROR_EXT
+
+    upstream = {
+        "resourceType": "OperationOutcome",
+        "issue": [{"severity": "error", "code": "not-found", "diagnostics": "Measure not found"}],
+    }
+    report = _error_measure_report("p2", Exception("evaluate failed"), upstream_outcome=upstream)
+
+    assert report["resourceType"] == "OperationOutcome"
+    assert report["subject"]["reference"] == "Patient/p2"
+    # Original issue preserved
+    assert report["issue"][0]["diagnostics"] == "Measure not found"
+    # Extension added with sanitized error string
+    extensions = report.get("extension", [])
+    assert any(e["url"] == LENNY_ERROR_EXT for e in extensions)
+
+
+def test_error_measure_report_deep_copies_upstream_outcome():
+    """Two patients with the same upstream OO must produce independent dicts (no mutation)."""
+    upstream = {
+        "resourceType": "OperationOutcome",
+        "issue": [{"severity": "error", "code": "processing", "diagnostics": "shared error"}],
+    }
+    report_p1 = _error_measure_report("p1", Exception("fail"), upstream_outcome=upstream)
+    report_p2 = _error_measure_report("p2", Exception("fail"), upstream_outcome=upstream)
+
+    # Mutating one report must not affect the other
+    report_p1["issue"][0]["diagnostics"] = "mutated"
+    assert report_p2["issue"][0]["diagnostics"] == "shared error"
+    assert report_p1 is not report_p2
+
+
+def test_error_measure_report_falls_back_to_synthetic_without_upstream():
+    """Without upstream OO, a synthetic OperationOutcome is produced."""
+    report = _error_measure_report("p3", Exception("connection refused"))
+
+    assert report["resourceType"] == "OperationOutcome"
+    assert "extension" not in report
+    assert report["issue"][0]["code"] == "processing"
+
+
 # ---------------------------------------------------------------------------
 # Integration tests for run_job
 # ---------------------------------------------------------------------------
@@ -136,10 +180,12 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
             __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
             "gather_patient_data",
             new_callable=AsyncMock,
-            return_value=[
-                {"resourceType": "Patient", "id": "p1"},
-                {"resourceType": "Condition", "id": "c1"},
-            ],
+            return_value=GatherResult(
+                resources=[
+                    {"resourceType": "Patient", "id": "p1"},
+                    {"resourceType": "Condition", "id": "c1"},
+                ]
+            ),
         ),
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
         patch(
@@ -273,7 +319,7 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
             __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
             "gather_patient_data",
             new_callable=AsyncMock,
-            return_value=[{"resourceType": "Patient", "id": "p1"}],
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]),
         ),
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
         patch(
@@ -327,7 +373,7 @@ async def test_run_job_all_patient_failures_marks_job_failed(test_session, sessi
             __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
             "gather_patient_data",
             new_callable=AsyncMock,
-            return_value=[{"resourceType": "Patient", "id": "p1"}],
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]),
         ),
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
         patch(
@@ -469,7 +515,9 @@ async def test_process_batch_uses_everything_strategy(test_session, session_fact
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
     ):
         mock_strategy = MagicMock()
-        mock_strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p1"}])
+        mock_strategy.gather_patient_data = AsyncMock(
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}])
+        )
         mock_strategy_cls.return_value = mock_strategy
 
         await _process_single_batch(
@@ -543,7 +591,9 @@ async def test_process_batch_uses_data_requirements_strategy_when_configured(
         ),
     ):
         mock_strategy = MagicMock()
-        mock_strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p1"}])
+        mock_strategy.gather_patient_data = AsyncMock(
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}])
+        )
         mock_strategy_cls.return_value = mock_strategy
 
         await _process_single_batch(
@@ -607,7 +657,9 @@ async def test_process_batch_hapi_sync_calls_trigger_reindex(test_session, sessi
         ),
     ):
         mock_strategy = MagicMock()
-        mock_strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "p1"}])
+        mock_strategy.gather_patient_data = AsyncMock(
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}])
+        )
         mock_strategy_cls.return_value = mock_strategy
 
         await _process_single_batch(
@@ -619,3 +671,177 @@ async def test_process_batch_hapi_sync_calls_trigger_reindex(test_session, sessi
         )
 
     mock_reindex.assert_called_once_with("http://mcs/fhir")
+
+
+# ---------------------------------------------------------------------------
+# Gather failure / evaluate skip invariants (PR-2 new behaviors)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_job_gather_failure_prevents_evaluate_call(test_session, session_factory):
+    """When gather raises for a patient, evaluate_measure is NOT called for that patient."""
+
+    job_id = await _setup_job(test_session)
+    patients = [
+        {"resourceType": "Patient", "id": "p1", "name": [{"given": ["Alice"], "family": "Test"}]},
+    ]
+
+    evaluate_mock = AsyncMock()
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patients",
+            new_callable=AsyncMock,
+            return_value=patients,
+        ),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patient_data",
+            new_callable=AsyncMock,
+            side_effect=Exception("CDR connection refused"),
+        ),
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch("app.services.orchestrator.evaluate_measure", evaluate_mock),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
+    ):
+        await run_job(job_id)
+
+    # evaluate_measure must NOT have been called for the failed-gather patient
+    evaluate_mock.assert_not_awaited()
+
+    # A MeasureResult error row must still exist (full exception → gather phase)
+    async with session_factory() as session:
+        result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
+        results = result.scalars().all()
+        assert len(results) == 1
+        assert results[0].populations["error"] is True
+        assert results[0].populations["error_message"]  # back-compat field populated
+        assert results[0].error_phase == "gather"
+
+
+async def test_run_job_partial_gather_continues_to_evaluate(test_session, session_factory, mock_measure_report):
+    """Partial gather (some resource types failed) proceeds to evaluate — AT-2."""
+
+    job_id = await _setup_job(test_session)
+    patients = [
+        {"resourceType": "Patient", "id": "p1", "name": [{"given": ["Alice"], "family": "Test"}]},
+    ]
+    partial_result = GatherResult(
+        resources=[{"resourceType": "Patient", "id": "p1"}, {"resourceType": "Condition", "id": "c1"}],
+        failed_types=[FailedResourceFetch(resource_type="Observation", error="500 Internal Server Error")],
+    )
+
+    evaluate_mock = AsyncMock(return_value=mock_measure_report)
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patients",
+            new_callable=AsyncMock,
+            return_value=patients,
+        ),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patient_data",
+            new_callable=AsyncMock,
+            return_value=partial_result,
+        ),
+        patch(
+            "app.services.orchestrator.push_resources",
+            new_callable=AsyncMock,
+        ),
+        patch("app.services.orchestrator.evaluate_measure", evaluate_mock),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
+    ):
+        await run_job(job_id)
+
+    # evaluate_measure MUST have been called despite partial gather
+    evaluate_mock.assert_awaited_once()
+
+    async with session_factory() as session:
+        result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
+        results = result.scalars().all()
+        assert len(results) == 1
+        mr = results[0]
+        # populations come from evaluate (real data, not all-False error row)
+        assert mr.populations is not None
+        assert mr.populations.get("error") is not True
+        # partial gather warning annotated on the result
+        assert mr.error_phase == "gather_partial"
+        assert mr.error_details is not None
+        assert "Observation" in mr.error_details["failed_types"]
+        assert "Patient" in mr.error_details["succeeded_types"] or "Condition" in mr.error_details["succeeded_types"]
+
+
+async def test_run_job_evaluate_failure_persists_error_details_and_back_compat(
+    test_session, session_factory, mock_measure_report
+):
+    """Evaluate phase failures persist error_details AND back-compat error_message."""
+    from app.services.fhir_errors import FhirOperationError
+
+    job_id = await _setup_job(test_session)
+    patients = [
+        {"resourceType": "Patient", "id": "p1", "name": [{"given": ["Alice"], "family": "Test"}]},
+    ]
+
+    fhir_err = FhirOperationError(
+        operation="evaluate-measure",
+        url="http://mcs/fhir/Measure/m1/$evaluate-measure",
+        status_code=404,
+        outcome=None,
+        latency_ms=42,
+    )
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patients",
+            new_callable=AsyncMock,
+            return_value=patients,
+        ),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patient_data",
+            new_callable=AsyncMock,
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]),
+        ),
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            side_effect=fhir_err,
+        ),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
+    ):
+        await run_job(job_id)
+
+    async with session_factory() as session:
+        result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
+        results = result.scalars().all()
+        assert len(results) == 1
+        mr = results[0]
+        assert mr.populations["error"] is True
+        # Back-compat: sanitized string still written
+        assert mr.populations["error_message"]
+        # Structured details written
+        assert mr.error_details is not None
+        assert mr.error_details["operation"] == "evaluate-measure"
+        assert mr.error_details["status_code"] == 404
+        # error_phase set to evaluate
+        assert mr.error_phase == "evaluate"

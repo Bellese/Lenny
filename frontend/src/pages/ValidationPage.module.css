@@ -190,9 +190,10 @@
 /* Error / status banners */
 .errorBanner {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 8px 12px;
   padding: 10px 14px;
   background: var(--err-wash);
   color: var(--err);
@@ -209,6 +210,37 @@
   cursor: pointer;
   text-decoration: underline;
   flex-shrink: 0;
+}
+
+.warnBanner {
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+  color: var(--warn-text, var(--warn));
+}
+
+.uploadErrorList {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  font-size: 12px;
+  width: 100%;
+}
+
+.uploadErrorList li {
+  padding: 2px 0;
+  border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+}
+
+.uploadErrorType {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.uploadErrorStatus {
+  opacity: 0.8;
+}
+
+.uploadErrorDiag {
+  opacity: 0.75;
 }
 
 .runningBanner {
