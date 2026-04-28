@@ -121,7 +121,7 @@ grep -E '^POSTGRES_PASSWORD=' "$ENV_FILE" \
     | install -o root -g root -m 0600 /dev/stdin "$SECRET_FILE"
 grep -E '^CDR_FERNET_KEY=' "$ENV_FILE" \
     | cut -d= -f2- \
-    | install -o root -g root -m 0600 /dev/stdin "$FERNET_SECRET_FILE"
+    | install -o root -g root -m 0644 /dev/stdin "$FERNET_SECRET_FILE"
 
 # ── docker login to GHCR (if token was staged by the deploy workflow) ─────────
 # The deploy workflow writes GITHUB_TOKEN to /leonard/prod/GHCR_TOKEN as a
