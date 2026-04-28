@@ -56,7 +56,17 @@ async def health_check(
         await session.execute(text("SELECT 1"))
         status["database"] = {"status": "connected"}
     except Exception as exc:
-        status["database"] = {"status": "disconnected", "error": sanitize_error(exc)[:200]}
+        status["database"] = {
+            "status": "disconnected",
+            "error": sanitize_error(exc)[:200],
+            "error_details": {
+                "operation": "health-check",
+                "url": None,
+                "status_code": None,
+                "latency_ms": None,
+                "hint": None,
+            },
+        }
         status["status"] = "degraded"
 
     # Measure engine check

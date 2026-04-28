@@ -49,7 +49,7 @@ def sanitize_url(url: str) -> str:
         query = _AUTH_RE.sub(r"\1=[redacted]", parsed.query) if parsed.query else parsed.query
         cleaned = urlunparse(parsed._replace(netloc=netloc, query=query))
     except Exception:
-        cleaned = url
+        cleaned = "[url-parse-error]"
     # Strip Docker-style internal hostnames (e.g. hapi-fhir-measure:8080)
     cleaned = _HOSTPORT_RE.sub("[host]", cleaned)
     return cleaned
@@ -151,8 +151,7 @@ def hint_for_network_exception(exc: BaseException) -> str:
     if isinstance(exc, httpx.ReadTimeout):
         return "The server accepted the connection but did not respond in time."
     if isinstance(exc, ssl.SSLError):
-        reason = str(exc)[:80]
-        return f"TLS/SSL error: {reason}. Check that the server's certificate is valid."
+        return "TLS/SSL error. Check that the server's certificate is valid and trusted."
     return "Network error. Check the server is running and reachable."
 
 
@@ -199,7 +198,7 @@ def _issues_for_envelope(
                 for k, v in {
                     "severity": i.severity,
                     "code": i.code,
-                    "diagnostics": i.diagnostics,
+                    "diagnostics": _sanitize_str(i.diagnostics) if i.diagnostics else None,
                 }.items()
                 if v is not None
             }

@@ -14,6 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import get_session
 from app.models.config import AuthType, CDRConfig
 from app.services.fhir_client import _validate_ssrf_url, verify_fhir_connection
+from app.services.fhir_errors import (
+    HINT_BY_STATUS,
+    FhirOperationError,
+    build_error_envelope,
+    hint_for_network_exception,
+    sanitize_url,
+)
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -107,7 +114,7 @@ def _check_cdr_url(url: str) -> None:
             status_code=400,
             detail={
                 "resourceType": "OperationOutcome",
-                "issue": [{"severity": "error", "code": "security", "diagnostics": str(exc)}],
+                "issue": [{"severity": "error", "code": "security", "diagnostics": sanitize_error(exc)}],
             },
         )
 
@@ -341,14 +348,6 @@ async def activate_connection(
 @router.post("/test-connection")
 async def test_cdr_connection(body: TestConnectionRequest) -> dict:
     """Test connectivity to a FHIR server."""
-    from app.services.fhir_errors import (
-        HINT_BY_STATUS,
-        FhirOperationError,
-        build_error_envelope,
-        hint_for_network_exception,
-        sanitize_url,
-    )
-
     _validate_auth_type(body.auth_type)
     _validate_smart_credentials(body.auth_type, body.auth_credentials)
     try:

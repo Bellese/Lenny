@@ -212,14 +212,21 @@ async def _run_schema_migrations(conn) -> None:
 
         # Dedup measure_results before adding the unique index — the batch-retry
         # loop can create duplicate rows. Keep the newest row per (job_id, patient_id).
-        await conn.execute(
-            text("""
-            DELETE FROM measure_results a USING measure_results b
-            WHERE a.id < b.id
-              AND a.job_id = b.job_id
-              AND a.patient_id = b.patient_id
-            """)
-        )
+        # Guard so the DELETE only runs once (before the index is created).
+        index_exists = (
+            await conn.execute(
+                text("SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE indexname = 'uq_measure_results_job_patient')")
+            )
+        ).scalar()
+        if not index_exists:
+            await conn.execute(
+                text("""
+                DELETE FROM measure_results a USING measure_results b
+                WHERE a.id < b.id
+                  AND a.job_id = b.job_id
+                  AND a.patient_id = b.patient_id
+                """)
+            )
         await conn.execute(
             text(
                 "CREATE UNIQUE INDEX IF NOT EXISTS uq_measure_results_job_patient"
