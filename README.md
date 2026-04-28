@@ -63,6 +63,8 @@ By default, MCT2 uses a bundled CDR with test data. To connect to your organizat
 4. Click "Test Connection" to verify
 5. Save
 
+Auth credentials (passwords, bearer tokens) are encrypted at rest using Fernet (AES-128-CBC + HMAC-SHA256). The encryption key is set via `CDR_FERNET_KEY` — see `.env.example` for the local dev setup and `docs/architecture.md` for the production SSM/Docker-secrets pipeline.
+
 ## Connectathon Measures
 
 MCT2 ships with the 12 measures targeted for the MADiE May 2026 Connectathon, pre-loaded into the bundled CDR for immediate testing. Per-measure pass/fail status, excluded bundles with root-cause notes, and resource baselines (Patient: 568, Measure: ≥12, Library: 24, ValueSet: ≈123) are tracked in [docs/connectathon-measures-status.md](docs/connectathon-measures-status.md). The nightly **Connectathon Measures** GitHub Actions workflow runs the source-of-truth suite (golden + connectathon-measures + full-workflow tests) against pre-baked HAPI images and surfaces drift.
