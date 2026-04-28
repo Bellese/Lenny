@@ -121,18 +121,24 @@ grep -E '^POSTGRES_PASSWORD=' "$ENV_FILE" \
 # SecureString just before invoking this script and deletes it after. Manual
 # runs without that staging step skip login and will fail loudly at compose
 # pull time if the prebaked overlay references private GHCR images.
+# NOTE: ghcr.io/bellese/mct2-hapi-* packages are currently public; login is
+# best-effort. If it fails we log the real error and continue — the subsequent
+# `docker compose pull` will succeed without auth for public images.
 if grep -qE '^GHCR_TOKEN=' "$ENV_FILE"; then
     printf '[+] Logging in to GHCR for pre-baked HAPI image pulls...\n'
     GHCR_TOKEN_VALUE=$(grep -E '^GHCR_TOKEN=' "$ENV_FILE" | cut -d= -f2- | tr -d '\r\n')
     # Username can be any non-empty string when the password is a GitHub token;
     # GHCR ignores it. Use a label that's recognizable in `docker logout` output.
+    _ghcr_err=$(mktemp)
     if ! printf '%s' "$GHCR_TOKEN_VALUE" \
-        | docker login ghcr.io --username leonard-deploy --password-stdin >/dev/null 2>&1; then
-        unset GHCR_TOKEN_VALUE
-        die 1 "docker login ghcr.io failed — check workflow packages:read scope"
+        | docker login ghcr.io --username leonard-deploy --password-stdin >"$_ghcr_err" 2>&1; then
+        printf '[!] docker login ghcr.io failed (non-fatal — images are public):\n' >&2
+        cat "$_ghcr_err" >&2
+    else
+        printf '[+] GHCR login OK\n'
     fi
+    rm -f "$_ghcr_err"
     unset GHCR_TOKEN_VALUE
-    printf '[+] GHCR login OK\n'
 else
     printf '[!] GHCR_TOKEN not in %s — skipping ghcr.io login.\n' "$ENV_FILE"
     printf '    Manual deploys cannot pull the private pre-baked HAPI images.\n'
