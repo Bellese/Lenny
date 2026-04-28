@@ -31,6 +31,7 @@ from app.models.validation import (
 )
 from app.services.fhir_client import (
     BatchQueryStrategy,
+    FhirOperationError,
     _build_auth_headers,
     evaluate_measure,
     push_resources,
@@ -39,6 +40,7 @@ from app.services.fhir_client import (
     wait_for_valueset_expansion,
     wipe_patient_data,
 )
+from app.services.fhir_errors import redact_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -758,17 +760,47 @@ async def triage_test_bundle(
 
     # Push clinical data to active CDR (default or external)
     patients_loaded = 0
+    cdr_upload_error_details: dict[str, Any] | None = None
     if clinical:
         cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         active_cdr = cdr_result.scalar_one_or_none()
         cdr_url = active_cdr.cdr_url if active_cdr else settings.DEFAULT_CDR_URL
         cdr_auth = await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials) if active_cdr else {}
-        await push_resources(clinical, target_url=cdr_url, auth_headers=cdr_auth)
+        cdr_push_result = await push_resources(clinical, target_url=cdr_url, auth_headers=cdr_auth)
         patients_loaded = sum(1 for r in clinical if r.get("resourceType") == "Patient")
         logger.info(
             "Clinical resources loaded to CDR",
             extra={"count": len(clinical), "cdr_url": cdr_url},
         )
+        if cdr_push_result.has_failures:
+            failed_types: dict[str, int] = {}
+            for fe in cdr_push_result.failed:
+                failed_types[fe.resource_type] = failed_types.get(fe.resource_type, 0) + 1
+            type_summary = ", ".join(f"{count} {rt}" for rt, count in sorted(failed_types.items()))
+            total_failed = len(cdr_push_result.failed)
+            total_entries = len(cdr_push_result.succeeded) + total_failed
+            cdr_upload_error_details = {
+                "operation": "push-resources",
+                "total_entries": total_entries,
+                "failed_count": total_failed,
+                "succeeded_count": len(cdr_push_result.succeeded),
+                "failed_entries": [
+                    {
+                        "resource_type": fe.resource_type,
+                        "resource_id": fe.resource_id,
+                        "status": fe.status,
+                        "diagnostics": fe.outcome.primary_diagnostic() if fe.outcome else None,
+                    }
+                    for fe in cdr_push_result.failed
+                ],
+            }
+            logger.warning(
+                "CDR bundle push partial failure: %d of %d entries failed (%s)",
+                total_failed,
+                total_entries,
+                type_summary,
+                extra={"failed_types": failed_types},
+            )
 
     if progress_fn:
         await progress_fn("patients_loaded", patients_loaded)
@@ -791,11 +823,18 @@ async def triage_test_bundle(
     else:
         logger.info("HAPI sync skipped (HAPI_SYNC_AFTER_UPLOAD=False)")
 
+    warning_message = None
+    if cdr_upload_error_details:
+        fc = cdr_upload_error_details["failed_count"]
+        tc = cdr_upload_error_details["total_entries"]
+        warning_message = f"{fc} of {tc} CDR upload entries failed"
+
     return {
         "measures_loaded": sum(1 for r in measure_defs if r.get("resourceType") == "Measure"),
         "patients_loaded": patients_loaded,
         "expected_results_loaded": len(test_cases),
-        "warning_message": None,
+        "warning_message": warning_message,
+        "cdr_upload_error_details": cdr_upload_error_details,
     }
 
 
@@ -832,6 +871,7 @@ async def process_bundle_upload(upload_id: int) -> None:
             upload.patients_loaded = summary["patients_loaded"]
             upload.expected_results_loaded = summary["expected_results_loaded"]
             upload.warning_message = summary.get("warning_message")
+            upload.error_details = summary.get("cdr_upload_error_details")
             upload.status = ValidationStatus.complete
             upload.completed_at = datetime.now(timezone.utc)
             await session.commit()
@@ -843,11 +883,22 @@ async def process_bundle_upload(upload_id: int) -> None:
 
     except Exception as exc:
         logger.exception("Bundle upload failed", extra={"upload_id": upload_id})
+        upload_error_details: dict[str, Any] | None = None
+        if isinstance(exc, FhirOperationError):
+            upload_error_details = {
+                "operation": exc.operation,
+                "url": exc.url,
+                "status_code": exc.status_code,
+                "latency_ms": exc.latency_ms,
+            }
+            if exc.outcome:
+                upload_error_details["raw_outcome"] = redact_outcome(exc.outcome.raw)
         async with async_session() as session:
             upload = await session.get(BundleUpload, upload_id)
             if upload:
                 upload.status = ValidationStatus.failed
                 upload.error_message = sanitize_error(exc)
+                upload.error_details = upload_error_details
                 upload.completed_at = datetime.now(timezone.utc)
                 await session.commit()
 
@@ -1291,6 +1342,17 @@ async def run_validation(validation_run_id: int) -> None:
                         mismatches=mismatches if mismatches else [],
                     )
                 except Exception as exc:
+                    sanitized = sanitize_error(exc)
+                    eval_error_details: dict[str, Any] | None = None
+                    if isinstance(exc, FhirOperationError):
+                        eval_error_details = {
+                            "operation": exc.operation,
+                            "url": exc.url,
+                            "status_code": exc.status_code,
+                            "latency_ms": exc.latency_ms,
+                        }
+                        if exc.outcome:
+                            eval_error_details["raw_outcome"] = redact_outcome(exc.outcome.raw)
                     return ValidationResult(
                         validation_run_id=validation_run_id,
                         measure_url=er.measure_url,
@@ -1299,7 +1361,8 @@ async def run_validation(validation_run_id: int) -> None:
                         expected_populations=er.expected_populations,
                         actual_populations=None,
                         status="error",
-                        error_message=sanitize_error(exc),
+                        error_message=sanitized,
+                        error_details=eval_error_details,
                         mismatches=[],
                     )
 

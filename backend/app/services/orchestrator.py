@@ -5,9 +5,12 @@ evaluates the measure, and stores results.
 """
 
 import asyncio
+import copy
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
+
+from sqlalchemy import select
 
 from app.config import settings
 from app.db import async_session
@@ -15,6 +18,7 @@ from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
 from app.services.fhir_client import (
     BatchQueryStrategy,
     DataRequirementsStrategy,
+    FhirOperationError,
     _build_auth_headers,
     evaluate_measure,
     get_group_members,
@@ -22,9 +26,12 @@ from app.services.fhir_client import (
     trigger_reindex_and_wait,
     wipe_patient_data,
 )
+from app.services.fhir_errors import redact_outcome
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
+
+LENNY_ERROR_EXT = "https://lenny.bellese.io/fhir/StructureDefinition/synthesized-error"
 
 
 def _extract_populations(measure_report: dict[str, Any]) -> dict[str, bool]:
@@ -69,8 +76,22 @@ def _extract_patient_name(patient_resource: dict[str, Any]) -> Optional[str]:
     return None
 
 
-def _error_measure_report(patient_id: str, exc: Exception) -> dict[str, Any]:
-    """Build a persisted per-patient error result for failed evaluations."""
+def _error_measure_report(
+    patient_id: str,
+    exc: Exception,
+    upstream_outcome: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a persisted per-patient error result for failed evaluations.
+
+    When upstream_outcome is an OperationOutcome from the MCS, embed it directly
+    (sanitized) with the synthesized error string attached as a FHIR Extension.
+    Deep-copies to prevent cross-patient mutation when two patients share an OO.
+    """
+    if upstream_outcome and upstream_outcome.get("resourceType") == "OperationOutcome":
+        oo = copy.deepcopy(redact_outcome(upstream_outcome))
+        oo["subject"] = {"reference": f"Patient/{patient_id}"}
+        oo.setdefault("extension", []).append({"url": LENNY_ERROR_EXT, "valueString": sanitize_error(exc)})
+        return oo
     return {
         "resourceType": "OperationOutcome",
         "issue": [
@@ -313,28 +334,121 @@ async def _process_single_batch(
             # ----------------------------------------------------------
             # Phase 1: Gather all patient data and push to measure engine
             # ----------------------------------------------------------
+            # Track patients that FULLY failed gather so they are skipped in evaluate.
+            # Partial-gather patients proceed to evaluate with available data (AT-2).
+            # Per-patient exceptions MUST stay swallowed here — letting them escape
+            # would trigger the outer batch-retry handler and re-push healthy patients.
+            gather_failed_patients: set[str] = set()
+            # Partial-gather: some resource types failed but data was pushed.
+            # Mapped to error_details dict for annotation after evaluate succeeds.
+            partial_gather_patients: dict[str, dict] = {}
+
             for patient_id in patient_ids:
                 if await _stop_or_delete_job(job_id):
                     return
 
                 try:
-                    resources = await strategy.gather_patient_data(cdr_url, patient_id, auth_headers)
-                    if resources:
-                        await push_resources(resources)
+                    gather_result = await strategy.gather_patient_data(cdr_url, patient_id, auth_headers)
+                    if gather_result.resources:
+                        await push_resources(gather_result.resources)
                     logger.info(
-                        f"Pushed {len(resources)} resources for {patient_id[:8]}",
+                        f"Pushed {len(gather_result.resources)} resources for {patient_id[:8]}",
                         extra={"job_id": job_id, "patient_id": patient_id},
                     )
+
+                    if gather_result.has_partial_failure:
+                        # Partial gather — continue to evaluate with available data (AT-2).
+                        # Record which types failed so we can annotate the result after evaluate.
+                        failed_type_names = [f.resource_type for f in gather_result.failed_types]
+                        succeeded_type_names = sorted(
+                            {r.get("resourceType") for r in gather_result.resources if r.get("resourceType")}
+                        )
+                        partial_gather_patients[patient_id] = {
+                            "operation": "gather",
+                            "failed_types": failed_type_names,
+                            "succeeded_types": succeeded_type_names,
+                        }
+                        logger.warning(
+                            "Partial CDR gather — continuing evaluation with available data",
+                            extra={
+                                "job_id": job_id,
+                                "patient_id": patient_id,
+                                "failed_types": failed_type_names,
+                            },
+                        )
+
                 except Exception as push_exc:
+                    gather_failed_patients.add(patient_id)
+                    patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
+                    sanitized_msg = sanitize_error(push_exc)
+                    error_details: dict[str, Any] = {"operation": "gather", "error": sanitized_msg}
+                    if isinstance(push_exc, FhirOperationError):
+                        error_details["url"] = push_exc.url
+                        error_details["status_code"] = push_exc.status_code
+                        error_details["latency_ms"] = push_exc.latency_ms
+                        if push_exc.outcome:
+                            error_details["raw_outcome"] = redact_outcome(push_exc.outcome.raw)
+                    error_report = _error_measure_report(
+                        patient_id,
+                        push_exc,
+                        push_exc.outcome.raw if isinstance(push_exc, FhirOperationError) and push_exc.outcome else None,
+                    )
                     logger.warning(
                         "Failed to gather/push patient data",
                         extra={
                             "job_id": job_id,
                             "batch_id": batch_id,
                             "patient_id": patient_id,
-                            "error": str(push_exc),
+                            "error": sanitized_msg,
                         },
                     )
+                    if await _stop_or_delete_job(job_id):
+                        return
+                    async with async_session() as session:
+                        existing_row = (
+                            await session.execute(
+                                select(MeasureResult).where(
+                                    MeasureResult.job_id == job_id,
+                                    MeasureResult.patient_id == patient_id,
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if existing_row:
+                            existing_row.measure_report = error_report
+                            existing_row.populations = {
+                                "initial_population": False,
+                                "denominator": False,
+                                "numerator": False,
+                                "denominator_exclusion": False,
+                                "numerator_exclusion": False,
+                                "error": True,
+                                "error_message": sanitized_msg,
+                                "error_phase": "gather",
+                            }
+                            existing_row.error_details = error_details
+                            existing_row.error_phase = "gather"
+                        else:
+                            result = MeasureResult(
+                                job_id=job_id,
+                                patient_id=patient_id,
+                                patient_name=patient_name,
+                                measure_report=error_report,
+                                populations={
+                                    "initial_population": False,
+                                    "denominator": False,
+                                    "numerator": False,
+                                    "denominator_exclusion": False,
+                                    "numerator_exclusion": False,
+                                    "error": True,
+                                    "error_message": sanitized_msg,
+                                    "error_phase": "gather",
+                                },
+                                error_details=error_details,
+                                error_phase="gather",
+                            )
+                            session.add(result)
+                        await session.commit()
+                    failed += 1
 
             # Wait for HAPI FHIR search indexes to catch up.
             # CQL evaluation relies on FHIR search internally; HAPI
@@ -365,6 +479,9 @@ async def _process_single_batch(
             # Phase 2: Evaluate each patient
             # ----------------------------------------------------------
             for patient_id in patient_ids:
+                if patient_id in gather_failed_patients:
+                    continue  # Already persisted error row in Phase 1
+
                 if await _stop_or_delete_job(job_id):
                     return
 
@@ -377,14 +494,32 @@ async def _process_single_batch(
                     if await _stop_or_delete_job(job_id):
                         return
                     async with async_session() as session:
-                        result = MeasureResult(
-                            job_id=job_id,
-                            patient_id=patient_id,
-                            patient_name=patient_name,
-                            measure_report=measure_report,
-                            populations=populations,
-                        )
-                        session.add(result)
+                        existing_row = (
+                            await session.execute(
+                                select(MeasureResult).where(
+                                    MeasureResult.job_id == job_id,
+                                    MeasureResult.patient_id == patient_id,
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        gather_partial_details = partial_gather_patients.get(patient_id)
+                        if existing_row:
+                            existing_row.measure_report = measure_report
+                            existing_row.populations = populations
+                            existing_row.patient_name = patient_name
+                            existing_row.error_details = gather_partial_details
+                            existing_row.error_phase = "gather_partial" if gather_partial_details else None
+                        else:
+                            result = MeasureResult(
+                                job_id=job_id,
+                                patient_id=patient_id,
+                                patient_name=patient_name,
+                                measure_report=measure_report,
+                                populations=populations,
+                                error_details=gather_partial_details,
+                                error_phase="gather_partial" if gather_partial_details else None,
+                            )
+                            session.add(result)
                         await session.commit()
 
                     processed += 1
@@ -392,16 +527,36 @@ async def _process_single_batch(
                 except Exception as patient_exc:
                     patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
                     sanitized_error = sanitize_error(patient_exc)
-                    error_report = _error_measure_report(patient_id, patient_exc)
+
+                    upstream_outcome_raw: dict[str, Any] | None = None
+                    eval_error_details: dict[str, Any] = {
+                        "operation": "evaluate-measure",
+                        "error": sanitized_error,
+                        "error_phase": "evaluate",
+                    }
+                    if isinstance(patient_exc, FhirOperationError):
+                        eval_error_details["url"] = patient_exc.url
+                        eval_error_details["status_code"] = patient_exc.status_code
+                        eval_error_details["latency_ms"] = patient_exc.latency_ms
+                        if patient_exc.outcome:
+                            upstream_outcome_raw = patient_exc.outcome.raw
+                            eval_error_details["raw_outcome"] = redact_outcome(patient_exc.outcome.raw)
+
+                    error_report = _error_measure_report(patient_id, patient_exc, upstream_outcome_raw)
                     if await _stop_or_delete_job(job_id):
                         return
                     async with async_session() as session:
-                        result = MeasureResult(
-                            job_id=job_id,
-                            patient_id=patient_id,
-                            patient_name=patient_name,
-                            measure_report=error_report,
-                            populations={
+                        existing_row = (
+                            await session.execute(
+                                select(MeasureResult).where(
+                                    MeasureResult.job_id == job_id,
+                                    MeasureResult.patient_id == patient_id,
+                                )
+                            )
+                        ).scalar_one_or_none()
+                        if existing_row:
+                            existing_row.measure_report = error_report
+                            existing_row.populations = {
                                 "initial_population": False,
                                 "denominator": False,
                                 "numerator": False,
@@ -409,9 +564,30 @@ async def _process_single_batch(
                                 "numerator_exclusion": False,
                                 "error": True,
                                 "error_message": sanitized_error,
-                            },
-                        )
-                        session.add(result)
+                                "error_phase": "evaluate",
+                            }
+                            existing_row.error_details = eval_error_details
+                            existing_row.error_phase = "evaluate"
+                        else:
+                            result = MeasureResult(
+                                job_id=job_id,
+                                patient_id=patient_id,
+                                patient_name=patient_name,
+                                measure_report=error_report,
+                                populations={
+                                    "initial_population": False,
+                                    "denominator": False,
+                                    "numerator": False,
+                                    "denominator_exclusion": False,
+                                    "numerator_exclusion": False,
+                                    "error": True,
+                                    "error_message": sanitized_error,
+                                    "error_phase": "evaluate",
+                                },
+                                error_details=eval_error_details,
+                                error_phase="evaluate",
+                            )
+                            session.add(result)
                         await session.commit()
 
                     logger.warning(

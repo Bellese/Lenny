@@ -119,7 +119,8 @@ async def test_gather_patients(cdr_url):
 async def test_gather_patient_data(cdr_url):
     """Gathering clinical data for one patient should return Condition and Observation resources."""
     strategy = BatchQueryStrategy()
-    resources = await strategy.gather_patient_data(cdr_url, "6f0553ac-e12a-4af5-ad27-05339f4b4ec0", auth_headers={})
+    result = await strategy.gather_patient_data(cdr_url, "6f0553ac-e12a-4af5-ad27-05339f4b4ec0", auth_headers={})
+    resources = result.resources
 
     assert len(resources) > 0, "Expected at least some resources for pt-001"
     resource_types = {r["resourceType"] for r in resources}
@@ -187,11 +188,11 @@ async def test_evaluate_measure(measure_url, cdr_url):
 
     # First push a patient + data to the measure engine
     strategy = BatchQueryStrategy()
-    resources = await strategy.gather_patient_data(cdr_url, "6f0553ac-e12a-4af5-ad27-05339f4b4ec0", auth_headers={})
+    gather_result = await strategy.gather_patient_data(cdr_url, "6f0553ac-e12a-4af5-ad27-05339f4b4ec0", auth_headers={})
 
     with patch("app.config.settings.MEASURE_ENGINE_URL", measure_url):
-        if resources:
-            await push_resources(resources)
+        if gather_result.resources:
+            await push_resources(gather_result.resources)
 
         try:
             report = await evaluate_measure(

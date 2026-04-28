@@ -11,6 +11,7 @@ import ipaddress
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -18,8 +19,52 @@ import httpx
 
 from app.config import settings
 from app.models.config import AuthType
+from app.services.fhir_errors import (
+    FhirOperationError,
+    FhirOperationOutcome,
+    sanitize_url,
+)
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class FailedResourceFetch:
+    resource_type: str
+    error: str
+
+
+@dataclass
+class GatherResult:
+    """Outcome of a per-patient data gather from the CDR."""
+
+    resources: list[dict] = field(default_factory=list)
+    failed_types: list[FailedResourceFetch] = field(default_factory=list)
+
+    @property
+    def has_partial_failure(self) -> bool:
+        return bool(self.failed_types)
+
+
+@dataclass
+class BundleEntryResult:
+    resource_type: str
+    resource_id: str | None
+    status: str
+    outcome: FhirOperationOutcome | None
+
+
+@dataclass
+class BundleUploadResult:
+    """Per-entry outcome from a HAPI batch Bundle upload."""
+
+    succeeded: list[BundleEntryResult] = field(default_factory=list)
+    failed: list[BundleEntryResult] = field(default_factory=list)
+
+    @property
+    def has_failures(self) -> bool:
+        return bool(self.failed)
+
 
 # Hosts explicitly allowed for local dev even though they're loopback/private.
 _LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
@@ -146,10 +191,10 @@ class DataAcquisitionStrategy(abc.ABC):
         cdr_url: str,
         patient_id: str,
         auth_headers: dict[str, str],
-    ) -> list[dict[str, Any]]:
+    ) -> GatherResult:
         """Return all clinical resources for a single patient.
 
-        Returns a list of FHIR resources (Condition, Observation, etc.).
+        Returns a GatherResult with resources and any partial-failure metadata.
         """
         ...
 
@@ -189,7 +234,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
         cdr_url: str,
         patient_id: str,
         auth_headers: dict[str, str],
-    ) -> list[dict[str, Any]]:
+    ) -> GatherResult:
         """Fetch all resources for a patient using $everything."""
         resources: list[dict[str, Any]] = []
         url: Optional[str] = f"{cdr_url}/Patient/{patient_id}/$everything?_count=200"
@@ -219,7 +264,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
             "Gathered patient data",
             extra={"patient_id": patient_id, "resource_count": len(resources)},
         )
-        return resources
+        return GatherResult(resources=resources)
 
 
 class DataRequirementsStrategy(DataAcquisitionStrategy):
@@ -250,7 +295,7 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
         cdr_url: str,
         patient_id: str,
         auth_headers: dict[str, str],
-    ) -> list[dict[str, Any]]:
+    ) -> GatherResult:
         """Fetch only the resources the measure needs, using $data-requirements."""
         try:
             requirements = await self._get_data_requirements()
@@ -270,9 +315,9 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
 
         try:
             return await self._fetch_by_requirements(cdr_url, patient_id, auth_headers, requirements)
-        except Exception as exc:
+        except RuntimeError as exc:
             logger.warning(
-                "CDR fetch by requirements failed, falling back to $everything",
+                "All CDR resource-type fetches failed, falling back to $everything",
                 extra={"measure_id": self._measure_id, "patient_id": patient_id, "error": str(exc)},
             )
             return await self._fallback.gather_patient_data(cdr_url, patient_id, auth_headers)
@@ -292,16 +337,17 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
         patient_id: str,
         auth_headers: dict[str, str],
         requirements: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
+    ) -> GatherResult:
         """Translate dataRequirement entries to CDR REST queries and collect resources.
 
         Translates codeFilter[].valueSet into code:in={valueSetUrl} search parameters.
-        Per-type failures are logged and skipped; only raises if all types fail (triggering
-        the outer $everything fallback).
+        Per-type failures are captured in GatherResult.failed_types.
+        Raises RuntimeError only when ALL types fail (triggers outer $everything fallback).
         """
         resources: list[dict[str, Any]] = []
         seen_types: set[str] = set()
-        failed_types: set[str] = set()
+        failed_types: list[FailedResourceFetch] = []
+        failed_type_names: set[str] = set()
 
         async with httpx.AsyncClient(timeout=60.0) as client:
             for req in requirements:
@@ -329,7 +375,11 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                         while page_url:
                             resp = await client.get(page_url, headers=auth_headers)
                             if resp.status_code != 200:
-                                break
+                                raise httpx.HTTPStatusError(
+                                    f"CDR returned {resp.status_code} for {resource_type}",
+                                    request=resp.request,
+                                    response=resp,
+                                )
                             bundle = resp.json()
                             for entry in bundle.get("entry", []):
                                 resource = entry.get("resource")
@@ -341,7 +391,8 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                                     page_url = link.get("url")
                                     break
                 except Exception as exc:
-                    failed_types.add(resource_type)
+                    failed_type_names.add(resource_type)
+                    failed_types.append(FailedResourceFetch(resource_type=resource_type, error=str(exc)))
                     logger.warning(
                         "CDR fetch failed for resource type %s, skipping — %s",
                         resource_type,
@@ -350,19 +401,29 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                     )
 
         # Only propagate failure (triggering outer $everything fallback) when all types fail
-        if seen_types and failed_types == seen_types:
-            raise RuntimeError(f"All resource types failed CDR fetch: {sorted(failed_types)}")
+        if seen_types and failed_type_names == seen_types:
+            raise RuntimeError(f"All resource types failed CDR fetch: {sorted(failed_type_names)}")
 
-        logger.info(
-            "Fetched patient data via $data-requirements",
-            extra={
-                "measure_id": self._measure_id,
-                "patient_id": patient_id,
-                "resource_count": len(resources),
-                "requirement_types": list(seen_types),
-            },
-        )
-        return resources
+        if failed_types:
+            logger.warning(
+                "Partial CDR fetch — some resource types failed",
+                extra={
+                    "measure_id": self._measure_id,
+                    "patient_id": patient_id,
+                    "failed_types": [f.resource_type for f in failed_types],
+                },
+            )
+        else:
+            logger.info(
+                "Fetched patient data via $data-requirements",
+                extra={
+                    "measure_id": self._measure_id,
+                    "patient_id": patient_id,
+                    "resource_count": len(resources),
+                    "requirement_types": list(seen_types),
+                },
+            )
+        return GatherResult(resources=resources, failed_types=failed_types)
 
 
 # ---------------------------------------------------------------------------
@@ -537,11 +598,40 @@ def _normalize_measure_def(r: dict[str, Any]) -> dict[str, Any]:
     return r
 
 
+def _parse_bundle_upload_result(
+    response_bundle: dict[str, Any],
+    request_entries: list[dict[str, Any]],
+) -> BundleUploadResult:
+    """Parse a HAPI batch-response Bundle into succeeded/failed entry lists."""
+    succeeded: list[BundleEntryResult] = []
+    failed: list[BundleEntryResult] = []
+    response_entries = response_bundle.get("entry", []) or []
+    for i, resp_entry in enumerate(response_entries):
+        req_resource = request_entries[i]["resource"] if i < len(request_entries) else {}
+        resource_type = req_resource.get("resourceType", "Unknown")
+        resource_id = req_resource.get("id")
+        resp_status = (resp_entry.get("response") or {}).get("status", "")
+        outcome_body = (resp_entry.get("response") or {}).get("outcome")
+        outcome = FhirOperationOutcome.from_dict(outcome_body) if isinstance(outcome_body, dict) else None
+        entry_result = BundleEntryResult(
+            resource_type=resource_type,
+            resource_id=resource_id,
+            status=resp_status,
+            outcome=outcome,
+        )
+        # Status starts with "2" = success; anything else = failure
+        if resp_status.startswith("2"):
+            succeeded.append(entry_result)
+        else:
+            failed.append(entry_result)
+    return BundleUploadResult(succeeded=succeeded, failed=failed)
+
+
 async def push_resources(
     resources: list[dict[str, Any]],
     target_url: str | None = None,
     auth_headers: dict[str, str] | None = None,
-) -> None:
+) -> BundleUploadResult:
     """POST a batch Bundle of resources to the target FHIR server.
 
     Uses batch (not transaction) so HAPI does not validate cross-references
@@ -562,32 +652,64 @@ async def push_resources(
     ordered = [r for r in valid if r.get("resourceType") == "Patient"] + [
         r for r in valid if r.get("resourceType") != "Patient"
     ]
-    bundle = {
-        "resourceType": "Bundle",
-        "type": "batch",
-        "entry": [
-            {
-                "resource": _normalize_measure_def(r),
-                "request": {
-                    "method": "PUT",
-                    "url": f"{r['resourceType']}/{r['id']}",
-                },
-            }
-            for r in ordered
-        ],
-    }
+    request_entries = [
+        {
+            "resource": _normalize_measure_def(r),
+            "request": {
+                "method": "PUT",
+                "url": f"{r['resourceType']}/{r['id']}",
+            },
+        }
+        for r in ordered
+    ]
+    bundle = {"resourceType": "Bundle", "type": "batch", "entry": request_entries}
     if not bundle["entry"]:
         logger.warning("No valid resources to push")
-        return
+        return BundleUploadResult()
     headers = {"Content-Type": "application/fhir+json", **(auth_headers or {})}
+    start_ms = int(time.monotonic() * 1000)
     async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(
-            base,
-            json=bundle,
-            headers=headers,
-        )
-        resp.raise_for_status()
-    logger.info("Pushed resources", extra={"count": len(bundle["entry"]), "target": base})
+        resp = await client.post(base, json=bundle, headers=headers)
+        latency_ms = int(time.monotonic() * 1000) - start_ms
+        try:
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            outcome = FhirOperationOutcome.from_response(resp)
+            raise FhirOperationError(
+                operation="push-resources",
+                url=base,
+                status_code=resp.status_code,
+                outcome=outcome,
+                latency_ms=latency_ms,
+                cause=exc,
+            ) from exc
+
+        # 200 OK but the body is an OperationOutcome — entire-batch rejection
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        if isinstance(body, dict) and body.get("resourceType") == "OperationOutcome":
+            outcome = FhirOperationOutcome.from_dict(body)
+            raise FhirOperationError(
+                operation="push-resources",
+                url=base,
+                status_code=resp.status_code,
+                outcome=outcome,
+                latency_ms=latency_ms,
+            )
+
+    result = _parse_bundle_upload_result(body, request_entries)
+    logger.info(
+        "Pushed resources",
+        extra={
+            "count": len(request_entries),
+            "succeeded": len(result.succeeded),
+            "failed": len(result.failed),
+            "target": base,
+        },
+    )
+    return result
 
 
 async def evaluate_measure(
@@ -596,7 +718,12 @@ async def evaluate_measure(
     period_start: str,
     period_end: str,
 ) -> dict[str, Any]:
-    """Call $evaluate-measure on the measure engine for a single patient."""
+    """Call $evaluate-measure on the measure engine for a single patient.
+
+    Raises FhirOperationError (with the MCS OperationOutcome preserved) on
+    4xx/5xx responses and on 200 OK where the body is an OperationOutcome
+    instead of a MeasureReport.
+    """
     url = (
         f"{settings.MEASURE_ENGINE_URL}/Measure/{measure_id}"
         f"/$evaluate-measure"
@@ -610,24 +737,47 @@ async def evaluate_measure(
                 "Evaluating measure",
                 extra={"measure_id": measure_id, "patient_id": patient_id, "attempt": attempt + 1},
             )
+            start_ms = int(time.monotonic() * 1000)
             resp = await client.get(url)
+            latency_ms = int(time.monotonic() * 1000) - start_ms
             try:
                 resp.raise_for_status()
-                return resp.json()
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code
-                if status_code < 500 or attempt == 2:
-                    raise
-                logger.warning(
-                    "Transient measure evaluation failure — retrying",
-                    extra={
-                        "measure_id": measure_id,
-                        "patient_id": patient_id,
-                        "status_code": status_code,
-                        "attempt": attempt + 1,
-                    },
+                if status_code >= 500 and attempt < 2:
+                    logger.warning(
+                        "Transient measure evaluation failure — retrying",
+                        extra={
+                            "measure_id": measure_id,
+                            "patient_id": patient_id,
+                            "status_code": status_code,
+                            "attempt": attempt + 1,
+                        },
+                    )
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                outcome = FhirOperationOutcome.from_response(resp)
+                raise FhirOperationError(
+                    operation="evaluate-measure",
+                    url=url,
+                    status_code=status_code,
+                    outcome=outcome,
+                    latency_ms=latency_ms,
+                    cause=exc,
+                ) from exc
+
+            body = resp.json()
+            # 200 OK but MCS returned OperationOutcome instead of MeasureReport
+            if isinstance(body, dict) and body.get("resourceType") == "OperationOutcome":
+                outcome = FhirOperationOutcome.from_dict(body)
+                raise FhirOperationError(
+                    operation="evaluate-measure",
+                    url=url,
+                    status_code=resp.status_code,
+                    outcome=outcome,
+                    latency_ms=latency_ms,
                 )
-                await asyncio.sleep(0.5 * (attempt + 1))
+            return body
 
     raise RuntimeError("Measure evaluation failed without a response")
 
@@ -847,8 +997,6 @@ async def verify_fhir_connection(
     auth_credentials: Optional[dict] = None,
 ) -> dict[str, Any]:
     """Test connectivity to a FHIR server by fetching its metadata."""
-    from app.services.fhir_errors import FhirOperationError, FhirOperationOutcome, sanitize_url
-
     _validate_ssrf_url(fhir_url, label="cdr_url")
     headers = await _build_auth_headers(auth_type, auth_credentials)
     url = f"{fhir_url}/metadata"
