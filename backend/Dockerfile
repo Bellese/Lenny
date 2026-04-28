@@ -12,8 +12,12 @@ COPY app/ app/
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# gosu: privilege-drop helper used by entrypoint to read root-owned Docker
+# secrets before dropping to the app user. Pattern from official postgres/redis images.
+RUN apt-get update && apt-get install -y --no-install-recommends gosu \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN useradd --create-home --uid 1000 app && chown -R app:app /app
-USER app
 
 EXPOSE 8000
 
