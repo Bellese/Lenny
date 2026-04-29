@@ -126,10 +126,7 @@ async def upload_measure(request: Request, file: UploadFile = File(...)) -> dict
 
     try:
         result = await upload_measure_bundle(bundle_json)
-        logger.info(
-            "Measure bundle uploaded",
-            extra={"filename": file.filename},
-        )
+        logger.info("Measure bundle uploaded: %s", file.filename)
         return {
             "status": "success",
             "message": "Measure bundle uploaded successfully",

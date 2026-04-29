@@ -782,12 +782,53 @@ async def evaluate_measure(
     raise RuntimeError("Measure evaluation failed without a response")
 
 
+async def _remap_valueset_ids_for_hapi(
+    entries: list[dict[str, Any]], client: httpx.AsyncClient
+) -> list[dict[str, Any]]:
+    """Rewrite ValueSet resource IDs to match existing HAPI resources.
+
+    HAPI enforces unique (url, version) pairs.  If the bundle contains a ValueSet
+    with a bare OID id (e.g. "…1014") but HAPI already holds the same url+version
+    under a versioned id (e.g. "…1014-20240112"), the POST fails with HAPI-0902.
+    Querying by URL and remapping the id turns the create into an in-place update.
+    """
+    for entry in entries:
+        resource = entry.get("resource", {})
+        if resource.get("resourceType") != "ValueSet" or not resource.get("url"):
+            continue
+        try:
+            resp = await client.get(
+                f"{settings.MEASURE_ENGINE_URL}/ValueSet",
+                params={"url": resource["url"], "_count": "1"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                existing = resp.json().get("entry", [])
+                if existing:
+                    hapi_id = existing[0]["resource"]["id"]
+                    if hapi_id != resource.get("id"):
+                        resource["id"] = hapi_id
+                        # Also rewrite the transaction request URL so HAPI PUTs
+                        # to the existing resource instead of creating a new one.
+                        req = entry.get("request", {})
+                        if req.get("url", "").startswith("ValueSet/"):
+                            req["url"] = f"ValueSet/{hapi_id}"
+        except httpx.RequestError:
+            pass
+    return entries
+
+
 async def upload_measure_bundle(bundle_json: dict[str, Any]) -> dict[str, Any]:
     """POST a Measure bundle to the measure engine."""
     async with httpx.AsyncClient(timeout=60.0) as client:
+        # Remap ValueSet IDs to avoid HAPI-0902 url+version conflicts with
+        # resources already loaded by seed or prior uploads.
+        entries = list(bundle_json.get("entry", []))
+        entries = await _remap_valueset_ids_for_hapi(entries, client)
+        bundle = {**bundle_json, "entry": entries}
         resp = await client.post(
             settings.MEASURE_ENGINE_URL,
-            json=bundle_json,
+            json=bundle,
             headers={"Content-Type": "application/fhir+json"},
         )
         resp.raise_for_status()
