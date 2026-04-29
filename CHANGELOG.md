@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.11.0] - 2026-04-29
+
+### Fixed
+- **Measure bundle upload no longer fails with HTTP 422 (HAPI-0902)** — Uploading a QI-Core 6 measure bundle now succeeds even when the measure engine already holds a ValueSet under a different resource ID than what the bundle contains. The upload service now queries HAPI by canonical URL before posting and rewrites conflicting IDs in-place, turning a failed create into a clean update.
+- **Backend log no longer raises `KeyError` on measure upload** — Using `filename` as a structured log key collided with Python's reserved `LogRecord.filename` field. Fixed by switching to a format-string log call.
+
 ## [0.0.10.0] - 2026-04-28
 
 ### Added
