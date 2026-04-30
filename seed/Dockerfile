@@ -4,6 +4,7 @@ RUN pip install --no-cache-dir httpx
 
 COPY patient-bundle.json /seed/patient-bundle.json
 COPY measure-bundle.json /seed/measure-bundle.json
-COPY load-seed-data.py /seed/load-seed-data.py
+COPY __init__.py /seed/__init__.py
+COPY load_seed_data.py /seed/load_seed_data.py
 
-ENTRYPOINT ["python3", "/seed/load-seed-data.py"]
+ENTRYPOINT ["python3", "/seed/load_seed_data.py"]

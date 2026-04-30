@@ -7,7 +7,7 @@
 | Lint | `cd backend && ruff check app/ tests/ && ruff format --check app/ tests/` | every PR + before push |
 | Unit | `cd backend && python3 -m pytest tests/ --ignore=tests/integration -v` | every PR + before push |
 | Coverage (≥70% floor) | `cd backend && python3 -m pytest tests/ --ignore=tests/integration --cov=app --cov-report=term-missing` | optional locally; CI reports |
-| Integration (CI-equivalent, what `pr-checks.yml` runs) | `./scripts/run-integration-tests.sh --ignore=tests/integration/test_golden_measures.py --ignore=tests/integration/test_connectathon_measures.py --ignore=tests/integration/test_full_workflow.py` | **every PR + before push** (most-flaky-in-CI suite, ~3–5 min) |
+| Integration (CI-equivalent, what `pr-checks.yml` runs) | `./scripts/run-integration-tests.sh --ignore=tests/integration/test_golden_measures.py --ignore=tests/integration/test_connectathon_measures.py --ignore=tests/integration/test_full_workflow.py --ignore=tests/integration/test_groups_dropdown.py` | **every PR + before push** (most-flaky-in-CI suite, ~3–5 min) |
 | Full workflow only | `./scripts/run-integration-tests.sh tests/integration/test_full_workflow.py` | before merging any change to the measure pipeline / FHIR data flow / job orchestration |
 | Integration (full / connectathon source-of-truth) | `./scripts/run-integration-tests.sh` (no flags — adds 600+ connectathon-measure patient tests CI skips on PRs) — or trigger nightly via Actions → Connectathon Measures | nightly automatic + manual pre-merge for measure-engine or HAPI-bump changes |
 | Frontend dev server | `cd frontend && npm start` (port 3001) | local dev only |
