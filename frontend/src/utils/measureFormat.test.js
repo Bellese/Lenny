@@ -1,4 +1,4 @@
-import { extractCmsId, cleanMeasureName, measureOptionLabel } from './measureFormat';
+import { extractCmsId, cleanMeasureName, measureOptionLabel, findMatchingGroup } from './measureFormat';
 
 describe('extractCmsId', () => {
   it('returns null for null input', () => expect(extractCmsId(null)).toBeNull());
@@ -34,4 +34,35 @@ describe('measureOptionLabel', () => {
     expect(measureOptionLabel('EXM-529', '')).toBe('EXM-529'));
   it('returns empty string when all args are empty', () =>
     expect(measureOptionLabel('', '')).toBe(''));
+});
+
+describe('findMatchingGroup', () => {
+  const groups = [
+    { id: 5, name: 'CMS122-cohort' },
+    { id: 6, name: 'CMS155-cohort' },
+  ];
+
+  it('returns null when measureId is empty', () =>
+    expect(findMatchingGroup('', groups)).toBeNull());
+
+  it('returns null when groups array is empty', () =>
+    expect(findMatchingGroup('CMS122FHIR-something', [])).toBeNull());
+
+  it('returns null when measureId has no CMS pattern', () =>
+    expect(findMatchingGroup('EXM-122', groups)).toBeNull());
+
+  it('returns the group whose name shares the CMS number with the measure', () =>
+    expect(findMatchingGroup('CMS122FHIRBreastCancer', groups)).toEqual({ id: 5, name: 'CMS122-cohort' }));
+
+  it('returns null when no group CMS number matches the measure', () =>
+    expect(findMatchingGroup('CMS529FHIRDiabetes', groups)).toBeNull());
+
+  it('returns the first match when multiple groups share the CMS number', () => {
+    const dupes = [{ id: 10, name: 'CMS122-first' }, { id: 11, name: 'CMS122-second' }];
+    expect(findMatchingGroup('CMS122v1', dupes)).toEqual({ id: 10, name: 'CMS122-first' });
+  });
+
+  it('falls back to matching on group.id when group.name is absent', () =>
+    expect(findMatchingGroup('CMS122FHIR', [{ id: 'CMS122', name: undefined }]))
+      .toEqual({ id: 'CMS122', name: undefined }));
 });

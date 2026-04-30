@@ -9,7 +9,7 @@ import PulseDot from '../components/PulseDot';
 import { TrashIcon, ViewIcon, SparkIcon, PlusIcon, XIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
 import PeriodPicker from '../components/PeriodPicker';
-import { extractCmsId, cleanMeasureName, measureOptionLabel } from '../utils/measureFormat';
+import { extractCmsId, cleanMeasureName, measureOptionLabel, findMatchingGroup } from '../utils/measureFormat';
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '--';
@@ -123,6 +123,12 @@ export default function JobsPage() {
     const y = new Date().getFullYear();
     setFormData(p => ({ ...p, period_start: `${y}-01-01`, period_end: `${y}-12-31` }));
   }, [showModal]);
+
+  useEffect(() => {
+    if (!formData.measure_id || !groups.length) return;
+    const match = findMatchingGroup(formData.measure_id, groups);
+    setFormData(p => ({ ...p, group_id: match != null ? String(match.id) : '' }));
+  }, [formData.measure_id, groups]);
 
   const handleCreateJob = async (e) => {
     e.preventDefault();
