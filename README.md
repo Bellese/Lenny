@@ -5,10 +5,16 @@ A free, open-source utility for calculating FHIR-based digital quality measures 
 ## Quick Start
 
 ```bash
+cp .env.example .env
+# Edit .env: set CDR_FERNET_KEY (see comment for the one-liner to generate one).
+# If you have GHCR access (Bellese org), the prebaked images and COMPOSE_FILE are
+# already set in .env.example — just docker login ghcr.io first.
 docker compose up
 ```
 
-Open http://localhost:3001. A demo measure and test patients are pre-loaded — you can run your first calculation immediately.
+Open http://localhost:3001. All 12 connectathon measures and their test patients are pre-loaded via the prebaked HAPI images — ready to run calculations immediately.
+
+**No GHCR access?** Remove or comment out `HAPI_CDR_IMAGE`, `HAPI_MEASURE_IMAGE`, and `COMPOSE_FILE` in `.env`. Lenny will use vanilla HAPI images and the seed loader will populate data at startup (~10–15 min first run).
 
 ## Architecture
 

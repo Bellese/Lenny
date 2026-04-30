@@ -63,7 +63,7 @@ PRs #142, #155, #159, #161, #167+ each patched a slice of this same disease.
 1. **Lint** (Build & Test table, "Lint" row) — clean.
 2. **Unit suite** ("Unit" row) — passes.
 3. **CI-equivalent integration suite** ("Integration (CI-equivalent…)" row) — **passes against real HAPI containers.** This is the suite that fails most often in CI; it MUST pass locally first (~3–5 min). The full integration suite (no `--ignore` flags) runs 600+ connectathon-measure patient tests CI skips on PRs — only run those when changing the measure evaluation pipeline or before a nightly run.
-4. End-to-end smoke against a local stack (`docker compose up -d` with `HAPI_CDR_IMAGE` and `HAPI_MEASURE_IMAGE` set in `.env` for the fast path — see `.env.example`; falls back to vanilla `hapiproject/hapi:v8.8.0-1` if vars are unset) for any change touching:
+4. End-to-end smoke against a local stack (`cp .env.example .env && docker compose up -d` — `.env.example` sets `COMPOSE_FILE=docker-compose.yml:docker-compose.prebaked.yml` plus the prebaked HAPI image vars so the fast path is the default; falls back to vanilla `hapiproject/hapi:v8.8.0-1` if those vars are removed) for any change touching:
    - The data flow (`fhir_client.py`, `validation.py`, `orchestrator.py`)
    - HAPI behavior or configuration
    - Bundle import / `$everything` / `$evaluate-measure` paths
