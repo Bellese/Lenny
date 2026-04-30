@@ -1,6 +1,6 @@
 """Validation service — bundle triage, expected result extraction, and measure validation.
 
-Handles uploading test bundles (triaging resources to measure engine, CDR, and MCT2 DB),
+Handles uploading test bundles (triaging resources to measure engine, CDR, and Lenny DB),
 running validation against expected results, and comparing population counts.
 """
 

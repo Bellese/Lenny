@@ -407,7 +407,7 @@ async def lifespan(app: FastAPI):
 # ---------------------------------------------------------------------------
 
 app = FastAPI(
-    title="MCT2 — Measure Calculation Tool v2",
+    title="Lenny — Measure Calculation Tool",
     description="Healthcare quality measure calculation orchestrator",
     version="0.1.0",
     lifespan=lifespan,

@@ -66,7 +66,7 @@ async def upload_bundle(
     """Upload a FHIR test bundle for validation.
 
     Triages resources asynchronously: measure definitions to engine,
-    clinical data to CDR, expected results to MCT2 DB.
+    clinical data to CDR, expected results to Lenny DB.
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="File must have a filename")

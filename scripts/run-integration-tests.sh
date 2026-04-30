@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Run MCT2 integration tests against real HAPI FHIR instances.
+# Run Lenny integration tests against real HAPI FHIR instances.
 #
 # Usage:
 #   ./scripts/run-integration-tests.sh

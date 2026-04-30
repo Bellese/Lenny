@@ -120,7 +120,7 @@ export default function App() {
   }, [navigate]);
 
   const basePath = '/' + location.pathname.split('/')[1];
-  const pageTitle = PAGE_TITLE[basePath] || 'MCT2';
+  const pageTitle = PAGE_TITLE[basePath] || 'Lenny';
   const searchPlaceholder = SEARCH_PLACEHOLDER[basePath] || 'Search…';
   const cdrOk = cdrStatus === 'connected' || cdrStatus === 'healthy';
 
@@ -135,8 +135,8 @@ export default function App() {
         />
         {/* Brand */}
         <div className={styles.brand}>
-          <div className={styles.brandMark}>M</div>
-          <span className={styles.brandName}>MCT2</span>
+          <div className={styles.brandMark}>L</div>
+          <span className={styles.brandName}>Lenny</span>
         </div>
 
         {/* Topbar */}
@@ -228,7 +228,7 @@ export default function App() {
               <span className={`${styles.statusDot} ${cdrOk ? styles.statusDotOk : ''}`} />
               {cdrOk ? 'All services healthy' : 'CDR unavailable'}
             </div>
-            <div className={styles.statusVersion}>MCT2 · v0.0.3</div>
+            <div className={styles.statusVersion}>Lenny · v0.0.3</div>
           </div>
         </nav>
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare connectathon validation results between local and production MCT2 APIs.
+"""Compare connectathon validation results between local and production Lenny APIs.
 
 For each manifest measure, this script:
   1. Uploads the current bundle to both environments.
@@ -262,12 +262,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--local-api-base",
         default="http://localhost:8000",
-        help="Local MCT2 API base URL (default: http://localhost:8000)",
+        help="Local Lenny API base URL (default: http://localhost:8000)",
     )
     parser.add_argument(
         "--production-api-base",
         default="https://api.98-89-219-217.nip.io",
-        help="Production MCT2 API base URL",
+        help="Production Lenny API base URL",
     )
     parser.add_argument(
         "--manifest",

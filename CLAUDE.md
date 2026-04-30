@@ -1,4 +1,4 @@
-# MCT2 (Leonard)
+# Lenny
 
 ## Build & Test
 

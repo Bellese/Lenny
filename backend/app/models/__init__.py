@@ -1,4 +1,4 @@
-"""SQLAlchemy models for MCT2."""
+"""SQLAlchemy models for Lenny."""
 
 from app.models.base import Base
 from app.models.config import CDRConfig

@@ -1,4 +1,4 @@
-# TODOS — MCT2
+# TODOS — Lenny
 
 > **FROZEN 2026-04-27** — Work tracking moved to GitHub Issues
 > ([project board](https://github.com/orgs/Bellese/projects/33/views/3))

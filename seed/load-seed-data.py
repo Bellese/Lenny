@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""MCT2 seed data loader.
+"""Lenny seed data loader.
 
 Loads all seed data into HAPI FHIR in the correct order:
   1. patient-bundle.json  → CDR + measure engine (demo patients for CMS122 1.0.000)
@@ -270,7 +270,7 @@ def trigger_reindex(base_url: str, patient_id: str, encounter_id: str, timeout: 
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    log("Starting MCT2 seed data loader...")
+    log("Starting Lenny seed data loader...")
     log(f"CDR:            {CDR_URL}")
     log(f"Measure engine: {MEASURE_URL}")
     log(f"Seed dir:       {SEED_DIR}")
@@ -384,7 +384,7 @@ def main() -> None:
         trigger_reindex(CDR_URL, probe_patient_id, probe_encounter_id)
 
     log("============================================")
-    log("  MCT2 seed data loaded successfully!")
+    log("  Lenny seed data loaded successfully!")
     log(f"  CDR:     patient-bundle + connectathon clinical data")
     log(f"  Engine:  measure-bundle + {len(list(BUNDLE_DIR.glob('*.json'))) - 1 if MANIFEST_PATH.exists() else 0} connectathon bundles")
     log("============================================")

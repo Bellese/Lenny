@@ -1,4 +1,4 @@
-# Design: MCT2 — Measure Calculation Tool v2
+# Design: Lenny — Measure Calculation Tool v2
 
 > **APPROVED DESIGN (2026-03-22, last sync 2026-04-07).** Reflects original
 > architecture intent. Current implementation: see `docs/architecture.md`.
@@ -14,7 +14,7 @@ Last updated: 2026-04-07 Branch: master (reflects PR #2 — feat: validation pip
 
 Healthcare organizations — particularly ACOs participating in Medicare Shared Savings Program (MSSP) — are required to calculate digital quality measures (dQMs) defined as FHIR Measure resources using Clinical Quality Language (CQL). Most organizations lack the technical infrastructure or expertise to perform these calculations in-house, forcing them to pay vendors $300–$4,000 per provider annually. For organizations with 500–4,000 providers, this adds up to $1–3 million per year in recurring costs.
 
-MCT2 provides a free, open-source orchestration utility that sits between an organization's clinical data repository (FHIR server) and a measure calculation engine (HAPI FHIR with $evaluate-measure), enabling quality improvement staff to calculate dQMs without vendor dependency.
+Lenny provides a free, open-source orchestration utility that sits between an organization's clinical data repository (FHIR server) and a measure calculation engine (HAPI FHIR with $evaluate-measure), enabling quality improvement staff to calculate dQMs without vendor dependency.
 
 ## Demand Evidence
 
@@ -45,7 +45,7 @@ This wedge replaces the most expensive part of the vendor relationship — the a
 ## Constraints
 
 1. **Single docker compose command** — installation and startup must be trivially simple  
-2. **MCT2 does NOT calculate measures** — it delegates to an external HAPI FHIR instance (bundled by default) that performs $evaluate-measure  
+2. **Lenny does NOT calculate measures** — it delegates to an external HAPI FHIR instance (bundled by default) that performs $evaluate-measure  
 3. **Two responsibilities only:** orchestration ($gather-like pattern — see Recommended Approach for definition) and result inspection  
 4. **Free and open source** — the entire value proposition depends on this  
 5. **Non-technical users** — the UI must be usable by quality improvement staff, not developers
@@ -96,7 +96,7 @@ Single Go binary with embedded SQLite, React frontend. Smallest Docker image, fa
 
 ### What "$gather-like" Means
 
-The original MCT implements a FHIR `$gather` operation pattern: it collects (gathers) patient clinical data from a source FHIR server, packages it appropriately, and submits it to a measure calculation engine for evaluation. MCT2 follows this same pattern — it acts as the intermediary that pulls data from the clinical data repository, forwards it to HAPI FHIR for `$evaluate-measure`, and collects the resulting MeasureReport resources. The user never interacts with either FHIR server directly.
+The original MCT implements a FHIR `$gather` operation pattern: it collects (gathers) patient clinical data from a source FHIR server, packages it appropriately, and submits it to a measure calculation engine for evaluation. Lenny follows this same pattern — it acts as the intermediary that pulls data from the clinical data repository, forwards it to HAPI FHIR for `$evaluate-measure`, and collects the resulting MeasureReport resources. The user never interacts with either FHIR server directly.
 
 ### Prerequisites
 
@@ -127,7 +127,7 @@ docker compose up
   +-- hapi-fhir-cdr (HAPI FHIR JPA Server — Default CDR)
   |     Bundled clinical data repository
   |     Pre-loaded with test data for out-of-box experience
-  |     Users configure MCT2 to point to their own CDR in production
+  |     Users configure Lenny to point to their own CDR in production
   |
   +-- hapi-fhir-measure (HAPI FHIR JPA Server — Measure Engine)
         Measure calculation engine
@@ -137,7 +137,7 @@ docker compose up
 
 **Two HAPI FHIR instances, two distinct roles:**
 
-- **hapi-fhir-cdr:** Acts as the default clinical data repository. Ships with sample patient data so users can run their first measure calculation immediately after `docker compose up`. In production, users configure MCT2 to point to their organization's real CDR instead — the bundled instance becomes unused or can be stopped.  
+- **hapi-fhir-cdr:** Acts as the default clinical data repository. Ships with sample patient data so users can run their first measure calculation immediately after `docker compose up`. In production, users configure Lenny to point to their organization's real CDR instead — the bundled instance becomes unused or can be stopped.  
 - **hapi-fhir-measure:** The measure calculation engine. Hosts FHIR Measure resources and CQL libraries, and performs `$evaluate-measure`. This instance is always used, regardless of which CDR is configured.
 
 ### Key Workflows
@@ -145,7 +145,7 @@ docker compose up
 **0\. FHIR Group-Based Patient Filtering**
 
 - When creating a calculation job, users can optionally select a FHIR Group resource from the connected CDR
-- When a Group is selected, MCT2 fetches only patients in that Group via `GET /Group/{id}/$members` instead of all patients in the CDR
+- When a Group is selected, Lenny fetches only patients in that Group via `GET /Group/{id}/$members` instead of all patients in the CDR
 - Use cases: scope calculations to a specific panel, care team, or payer cohort without changing CDR configuration
 - `group_id` is validated server-side (alphanumeric, hyphens, underscores, dots only) to prevent URL path injection
 - Group members are fetched in parallel using `asyncio.Semaphore(10)` to avoid overwhelming the CDR
@@ -153,7 +153,7 @@ docker compose up
 
 **1\. Configuration**
 
-- Out of the box, MCT2 points to the bundled CDR (hapi-fhir-cdr) — no configuration needed to start exploring  
+- Out of the box, Lenny points to the bundled CDR (hapi-fhir-cdr) — no configuration needed to start exploring  
 - User can reconfigure to point to their organization's CDR via the web UI (FHIR server endpoint URL \+ optional auth credentials)  
 - User selects Measure resources to evaluate (loaded into hapi-fhir-measure)  
 - User configures measurement period and subject parameters
@@ -161,14 +161,14 @@ docker compose up
 **2\. Measure Loading**
 
 - User obtains FHIR Measure bundles (Measure resource \+ CQL libraries) from the CMS eCQI Resource Center ([https://ecqi.healthit.gov/fhir](https://ecqi.healthit.gov/fhir)) or their quality program's measure repository  
-- User uploads these bundles to the measure engine (hapi-fhir-measure) via the MCT2 web UI  
-- MCT2 backend POSTs the resources as a FHIR Bundle to hapi-fhir-measure's REST API  
+- User uploads these bundles to the measure engine (hapi-fhir-measure) via the Lenny web UI  
+- Lenny backend POSTs the resources as a FHIR Bundle to hapi-fhir-measure's REST API  
 - Loaded measures persist across restarts (hapi-fhir-measure data is volume-mounted)  
 - UI displays currently loaded measures with status indicators
 
 **3\. Orchestration ($gather-like)**
 
-- MCT2 backend queries clinical data repository for patient resources matching the measure's data requirements  
+- Lenny backend queries clinical data repository for patient resources matching the measure's data requirements  
 - Invokes HAPI FHIR's `$evaluate-measure` once per patient per measure. For large populations, patients are processed in configurable batches (default: 100 patients per batch) with parallel workers (default: 4 concurrent `$evaluate-measure` calls). Back-of-envelope: at \~1 sec/patient with 4 workers, 4,000 patients takes \~17 minutes; with connection pooling and HAPI JPA warm cache, sub-15 minutes is achievable  
 - **Note on providers vs. patients:** The demand evidence cites costs per *provider* (physician). Each provider has a panel of patients; the actual patient volume per measure run depends on the measure and panel sizes. The 4,000-patient target is a reasonable starting point for a single measure run; larger populations may require longer runs  
 - Tracks job progress (queued, running, complete, failed) with per-batch granularity  
@@ -191,7 +191,7 @@ docker compose up
 
 - Target users: measure developers and quality teams who need to verify measure logic against known test cases before running against production data
 - User uploads a FHIR Bundle (JSON) containing test patients and a `Parameters` resource declaring expected population membership (`initialPopulation`, `denominator`, `numerator`, `denominatorExclusion`, `numeratorExclusion`)
-- MCT2 **triages** the bundle: measure definitions (Measure, Library, ValueSet, CodeSystem) go to the measure engine; clinical data (Patient, Encounter, Observation, etc.) go to the CDR; expected results go to the MCT2 database
+- Lenny **triages** the bundle: measure definitions (Measure, Library, ValueSet, CodeSystem) go to the measure engine; clinical data (Patient, Encounter, Observation, etc.) go to the CDR; expected results go to the Lenny database
 - A validation run calls `$evaluate-measure` against each test patient and compares actual population counts to expected
 - Results are displayed per patient: **pass** (actual matches expected), **fail** (mismatch with diff), or **error** (HAPI engine crash — logged separately from population mismatches)
 - Supports multiple bundles; runs can be filtered by measure URL
@@ -207,7 +207,7 @@ Two non-default HAPI settings are required and are set in `docker-compose.yml`:
 - `hapi.fhir.client_id_strategy=ANY` — CMS test bundles use numeric IDs (e.g., `Organization/123456`). HAPI's default `ALPHANUMERIC` strategy rejects these.
 - `hapi.fhir.allow_external_references=true` — Some CMS bundles contain Coverage resources that reference Organizations via absolute external URLs. HAPI blocks these by default.
 
-These are permanent configuration requirements, not temporary workarounds. CMS-published test bundles are the authoritative data source and MCT2 must accept whatever IDs and references they use.
+These are permanent configuration requirements, not temporary workarounds. CMS-published test bundles are the authoritative data source and Lenny must accept whatever IDs and references they use.
 
 ### Docker Compose Structure
 
@@ -257,12 +257,12 @@ volumes:
 ## Open Questions
 
 1. **Authentication:** ~~V1 should support at minimum static Bearer token and Basic Auth~~ — **Resolved.** Basic Auth and Bearer Token are implemented in v1. SMART on FHIR/OAuth2 deferred to a later release (see Deferred Work).  
-2. **Report submission:** Does MCT2 need to support submitting MeasureReports to a receiving system (e.g., CMS), or is inspection sufficient for v1? — Deferred (see Deferred Work).  
+2. **Report submission:** Does Lenny need to support submitting MeasureReports to a receiving system (e.g., CMS), or is inspection sufficient for v1? — Deferred (see Deferred Work).  
 3. **Historical runs:** Should users be able to run the same measure for multiple measurement periods (e.g., Q1 vs Q2) and compare results over time? This affects data model design. — Still open.
 
 ## Success Criteria
 
-- Quality improvement staffer can install MCT2 with a single `docker compose up` command  
+- Quality improvement staffer can install Lenny with a single `docker compose up` command  
 - Can configure a connection to their clinical data repository via the web UI  
 - Can trigger measure calculation for selected dQMs and a defined measurement period  
 - Can inspect aggregate and patient-level results through the web UI  
@@ -320,7 +320,7 @@ This is a data-dense utility tool, not a marketing site. Design rules: calm surf
 
 ```
 ┌──────────────────────────────────────────────────────┐
-│  MCT2            [CDR: Default ▼]       [⚙ Settings] │
+│  Lenny            [CDR: Default ▼]       [⚙ Settings] │
 ├───────────┬──────────────────────────────────────────┤
 │           │                                           │
 │ Measures  │   MAIN CONTENT AREA                       │
@@ -341,7 +341,7 @@ CDR indicator: always visible so user knows their data source
 
 ### Pre-loaded Demo Data
 
-MCT2 ships with demo data so the first experience is zero-setup:
+Lenny ships with demo data so the first experience is zero-setup:
 
 - **hapi-fhir-measure:** One MSSP measure bundle pre-loaded at startup (specific measure TBD during implementation — choose based on Synthea compatibility; diabetes or depression screening recommended for demo clarity)  
 - **hapi-fhir-cdr:** \~100 matching synthetic patients (Synthea-generated) pre-loaded at startup — small enough for \~2 minute demo calculation, large enough for meaningful population percentages  
@@ -570,7 +570,7 @@ The following items were identified during implementation and deferred to future
 
 7. **Sanitize Invalid References in Test Bundles** — Some CMS bundles contain resources with invalid reference types (e.g., `Encounter.partOf` pointing to `Location` instead of another `Encounter`). Add pre-processing to strip or skip these before pushing to avoid HAPI 422 rejections.
 
-8. **HAPI FHIR Upgrade to v7.6+** — v7.4.0's CQL engine crashes (`HAPI-0389: fhirType Reference`) when measure logic encounters a FHIR Reference where a CodeableConcept is expected. This affected 47% of test patients across 7 measures in initial validation testing. v7.6+ has this patch. Not an MCT2 code issue — a measure calculation engine limitation.
+8. **HAPI FHIR Upgrade to v7.6+** — v7.4.0's CQL engine crashes (`HAPI-0389: fhirType Reference`) when measure logic encounters a FHIR Reference where a CodeableConcept is expected. This affected 47% of test patients across 7 measures in initial validation testing. v7.6+ has this patch. Not an Lenny code issue — a measure calculation engine limitation.
 
 9. **Orchestrator Group Filtering Unit Test** — Add a unit test to `tests/test_services_orchestrator.py` verifying that `run_job` with `group_id` set calls `get_group_members()` instead of `gather_patients()`. Integration tests cover this path (12/12 pass) but explicit unit isolation is good practice. P3 priority.
 
@@ -590,6 +590,6 @@ Before writing a single line of code: **go back to the ACO that spent $250K with
 
 - You said "I have already decided the portion of the workflow I would like to service" — you've done the scoping work before this session. You came in with a clear boundary, not an open-ended vision. That's discipline.  
 - You had real numbers from real organizations ready: "$250,000 with Infor," "$300–$4,000 per provider," "500–4,000 providers." You didn't say "the market is big" — you said exactly how big and who confirmed it.  
-- You immediately clarified the architectural boundary — "MCT2 does not calculate measures" — before I could over-scope. You're protecting simplicity.  
+- You immediately clarified the architectural boundary — "Lenny does not calculate measures" — before I could over-scope. You're protecting simplicity.  
 - You chose the recommended approach without hesitation. You're here to build, not to deliberate.
 
