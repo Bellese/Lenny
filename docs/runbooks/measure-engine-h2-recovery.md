@@ -49,8 +49,8 @@ docker volume rm leonard_measuredata
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
 # 4. Wait for the seed service to finish
-docker logs -f leonard-seed-1 | grep -E "MCT2 seed data loaded successfully|ERROR"
-# Ctrl-C once you see "MCT2 seed data loaded successfully"
+docker logs -f leonard-seed-1 | grep -E "Lenny seed data loaded successfully|ERROR"
+# Ctrl-C once you see "Lenny seed data loaded successfully"
 ```
 
 Total downtime: ~5 min (seed completes in ~5 min on a t3.medium with the

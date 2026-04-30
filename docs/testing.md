@@ -1,8 +1,8 @@
-# MCT2 Testing Strategy
+# Lenny Testing Strategy
 
 ## Overview
 
-MCT2 has three test layers: **frontend component tests** (React Testing Library, run on every PR), **backend unit tests** (fast, mocked, run on every PR), and **integration tests** (real HAPI FHIR + PostgreSQL, run via Docker).
+Lenny has three test layers: **frontend component tests** (React Testing Library, run on every PR), **backend unit tests** (fast, mocked, run on every PR), and **integration tests** (real HAPI FHIR + PostgreSQL, run via Docker).
 
 Coverage floor: **70%** (enforced by CI). `app/main.py` and `app/services/worker.py` are excluded (startup/lifecycle code not suited for unit testing).
 
@@ -115,11 +115,11 @@ If `/jobs` reports lower initial population counts than the direct-HAPI integrat
 
 **Step 1 — confirm async-indexing is the cause.** Set `HAPI_SYNC_AFTER_UPLOAD=False`, restart the backend, and re-run the failing job. If the count *changes*, the symptom is the HAPI async-indexing race (see CLAUDE.md) — the reindex wait is masking or revealing it. If the count is *unchanged*, async-indexing is not the issue; continue to Step 2.
 
-**Step 2 — confirm the data-acquisition path.** Set `PATIENT_DATA_STRATEGY=data_requirements` (or `batch_query` if you were on `data_requirements`), restart, and re-run. If counts shift, MCT2 is fetching different resource sets between strategies — investigate which strategy is missing resources the measure CQL requires.
+**Step 2 — confirm the data-acquisition path.** Set `PATIENT_DATA_STRATEGY=data_requirements` (or `batch_query` if you were on `data_requirements`), restart, and re-run. If counts shift, Lenny is fetching different resource sets between strategies — investigate which strategy is missing resources the measure CQL requires.
 
 **Step 3 — confirm ValueSet expansion.** Set `VALUESET_RELOAD_MODE=remap`, restart, and re-run. If counts move, a ValueSet expansion is the culprit (typically a code-system version mismatch between bundle and HAPI's terminology cache).
 
-**Background.** HAPI indexes Encounter patient references and expands large ValueSets asynchronously after bundle upload, so MCT2 waits for reindex and `$expand` readiness before jobs can run against freshly uploaded Connectathon bundles. The validation dashboard path uses the same `HAPI_SYNC_AFTER_UPLOAD` reindex wait after the validation worker pushes patient data; upload-bundle and `/jobs` still wait for both reindex and ValueSet expansion readiness, but validation runs only need the reindex wait because they do not load new ValueSets. The full HAPI consistency model (and the structural fix tracked in #206) lives in the *Recurring bug: HAPI async-indexing race* section of `CLAUDE.md`.
+**Background.** HAPI indexes Encounter patient references and expands large ValueSets asynchronously after bundle upload, so Lenny waits for reindex and `$expand` readiness before jobs can run against freshly uploaded Connectathon bundles. The validation dashboard path uses the same `HAPI_SYNC_AFTER_UPLOAD` reindex wait after the validation worker pushes patient data; upload-bundle and `/jobs` still wait for both reindex and ValueSet expansion readiness, but validation runs only need the reindex wait because they do not load new ValueSets. The full HAPI consistency model (and the structural fix tracked in #206) lives in the *Recurring bug: HAPI async-indexing race* section of `CLAUDE.md`.
 
 ---
 

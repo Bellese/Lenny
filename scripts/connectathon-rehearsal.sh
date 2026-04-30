@@ -114,7 +114,7 @@ fail() { echo "    [FAIL] $*"; }
 # Preflight
 # ---------------------------------------------------------------------------
 
-header "MCT2 Connectathon Rehearsal — $(date '+%Y-%m-%d %H:%M:%S')"
+header "Lenny Connectathon Rehearsal — $(date '+%Y-%m-%d %H:%M:%S')"
 echo "  Project root : $PROJECT_ROOT"
 echo "  Manifest     : $MANIFEST"
 echo "  API base     : $API_BASE"

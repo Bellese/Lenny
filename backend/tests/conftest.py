@@ -1,4 +1,4 @@
-"""Shared pytest fixtures for MCT2 backend tests."""
+"""Shared pytest fixtures for Lenny backend tests."""
 
 import asyncio
 import os

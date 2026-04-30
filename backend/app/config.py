@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    """MCT2 backend configuration.
+    """Lenny backend configuration.
 
     All values can be overridden via environment variables.
     """

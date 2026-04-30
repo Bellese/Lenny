@@ -1,4 +1,4 @@
-# Architecture — MCT2
+# Architecture — Lenny
 
 ## Service Map
 

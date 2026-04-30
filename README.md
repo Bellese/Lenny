@@ -1,18 +1,24 @@
-# MCT2 — Measure Calculation Tool v2
+# Lenny — Measure Calculation Tool
 
-A free, open-source utility for calculating FHIR-based digital quality measures (dQMs). MCT2 sits between a clinical data repository and a measure calculation engine, orchestrating the evaluation workflow so quality improvement staff can compute measures without vendor dependency.
+A free, open-source utility for calculating FHIR-based digital quality measures (dQMs). Lenny sits between a clinical data repository and a measure calculation engine, orchestrating the evaluation workflow so quality improvement staff can compute measures without vendor dependency.
 
 ## Quick Start
 
 ```bash
+cp .env.example .env
+# Edit .env: set CDR_FERNET_KEY (see comment for the one-liner to generate one).
+# If you have GHCR access (Bellese org), the prebaked images and COMPOSE_FILE are
+# already set in .env.example — just docker login ghcr.io first.
 docker compose up
 ```
 
-Open http://localhost:3001. A demo measure and test patients are pre-loaded — you can run your first calculation immediately.
+Open http://localhost:3001. All 12 connectathon measures and their test patients are pre-loaded via the prebaked HAPI images — ready to run calculations immediately.
+
+**No GHCR access?** Remove or comment out `HAPI_CDR_IMAGE`, `HAPI_MEASURE_IMAGE`, and `COMPOSE_FILE` in `.env`. Lenny will use vanilla HAPI images and the seed loader will populate data at startup (~10–15 min first run).
 
 ## Architecture
 
-MCT2 runs 5 Docker containers:
+Lenny runs 5 Docker containers:
 
 | Service | Role | Port |
 |---------|------|------|
@@ -36,26 +42,26 @@ Local dev uses vanilla `docker-compose.yml` with runtime IG load; CI and prod us
 1. **Measures** — View loaded measures or upload new FHIR Measure bundles
 2. **Jobs** — Create a calculation job: select a measure, set the measurement period, optionally filter by FHIR Group, click Calculate
 3. **Results** — Inspect aggregate population summaries and drill into individual patient results
-4. **Validation** — Upload a FHIR test bundle with expected population results; MCT2 runs the measure and compares actual vs. expected populations, reporting pass/fail per patient
+4. **Validation** — Upload a FHIR test bundle with expected population results; Lenny runs the measure and compares actual vs. expected populations, reporting pass/fail per patient
 5. **Settings** — Configure your organization's clinical data repository (CDR) connection
 
 ## Validation Pipeline
 
-MCT2 includes a validation workflow for verifying measure logic against known test cases:
+Lenny includes a validation workflow for verifying measure logic against known test cases:
 
 1. Upload a FHIR Bundle containing test patients and a `Parameters` resource that declares expected population membership (`initialPopulation`, `denominator`, `numerator`, etc.)
-2. MCT2 runs `$evaluate-measure` against the test patients and compares results to the expected values
+2. Lenny runs `$evaluate-measure` against the test patients and compares results to the expected values
 3. Results are displayed per patient with pass/fail status and any discrepancies highlighted
 
 This is useful for measure developers and quality teams who need to confirm that a newly loaded measure produces correct output before running it against production data.
 
 ## FHIR Group-Based Patient Filtering
 
-When creating a calculation job, you can optionally select a FHIR Group resource from the connected CDR. When a Group is selected, MCT2 fetches only the patients in that Group rather than all patients in the CDR. Use this to scope calculations to a specific panel, care team, or cohort.
+When creating a calculation job, you can optionally select a FHIR Group resource from the connected CDR. When a Group is selected, Lenny fetches only the patients in that Group rather than all patients in the CDR. Use this to scope calculations to a specific panel, care team, or cohort.
 
 ## Connecting Your CDR
 
-By default, MCT2 uses a bundled CDR with test data. To connect to your organization's FHIR server:
+By default, Lenny uses a bundled CDR with test data. To connect to your organization's FHIR server:
 
 1. Go to Settings
 2. Enter your CDR URL
@@ -67,7 +73,7 @@ Auth credentials (passwords, bearer tokens) are encrypted at rest using Fernet (
 
 ## Connectathon Measures
 
-MCT2 ships with the 12 measures targeted for the MADiE May 2026 Connectathon, pre-loaded into the bundled CDR for immediate testing. Per-measure pass/fail status, excluded bundles with root-cause notes, and resource baselines (Patient: 568, Measure: ≥12, Library: 24, ValueSet: ≈123) are tracked in [docs/connectathon-measures-status.md](docs/connectathon-measures-status.md). The nightly **Connectathon Measures** GitHub Actions workflow runs the source-of-truth suite (golden + connectathon-measures + full-workflow tests) against pre-baked HAPI images and surfaces drift.
+Lenny ships with the 12 measures targeted for the MADiE May 2026 Connectathon, pre-loaded into the bundled CDR for immediate testing. Per-measure pass/fail status, excluded bundles with root-cause notes, and resource baselines (Patient: 568, Measure: ≥12, Library: 24, ValueSet: ≈123) are tracked in [docs/connectathon-measures-status.md](docs/connectathon-measures-status.md). The nightly **Connectathon Measures** GitHub Actions workflow runs the source-of-truth suite (golden + connectathon-measures + full-workflow tests) against pre-baked HAPI images and surfaces drift.
 
 ## Development
 

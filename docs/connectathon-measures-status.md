@@ -2,7 +2,7 @@
 
 **HAPI version:** v8.8.0-1
 **Target:** MADiE May 2026 Connectathon (12 measures)
-**Last updated:** 2026-04-27 (banner refresh during docs cleanup; per-measure status unchanged since 2026-04-24, when issue #140 root cause was confirmed — CMS122 DE divergence is HAPI upstream CQL bug, not MCT2 defect; `/jobs` hardcoded sleep replaced with `HAPI_SYNC_AFTER_UPLOAD` gate)
+**Last updated:** 2026-04-27 (banner refresh during docs cleanup; per-measure status unchanged since 2026-04-24, when issue #140 root cause was confirmed — CMS122 DE divergence is HAPI upstream CQL bug, not Lenny defect; `/jobs` hardcoded sleep replaced with `HAPI_SYNC_AFTER_UPLOAD` gate)
 
 > **Maintenance note:** This file is hand-edited and drifts within days of a connectathon-measures workflow run. Auto-generation from nightly output is tracked as a follow-up. Resource baselines listed below (Patient: 568, Measure: ≥12, etc.) are connectathon-seed counts, not arbitrary thresholds — they reflect the sum of all 12 bundles' test patients/resources, not a target for a deployed CDR.
 
@@ -185,15 +185,15 @@ Patients land in `numerator` when MADiE expects `denominator-exclusion`. The fai
 - **Dementia medications** during MP (CMS125 `0ced1e0c`, CMS130 `f9ef1fd1`)
 - **Mastectomy date boundary** — bilateral mastectomy or two unilateral mastectomies with period.end on 12/31 of MP (CMS125 `4cf81a94`, `857fec09`); HAPI appears to treat period.end as exclusive
 
-Status: Genuine HAPI vs. MADiE CQL evaluation differences — **not fixable in MCT2**. All 17 marked `xfail` in `test_connectathon_measures.py::_HAPI_DE_XFAIL`. Needs HAPI upstream issue filed at hapifhir/hapi-fhir (update `_HAPI_DE_XFAIL` comment with issue number when filed).
+Status: Genuine HAPI vs. MADiE CQL evaluation differences — **not fixable in Lenny**. All 17 marked `xfail` in `test_connectathon_measures.py::_HAPI_DE_XFAIL`. Needs HAPI upstream issue filed at hapifhir/hapi-fhir (update `_HAPI_DE_XFAIL` comment with issue number when filed).
 
 **Related issues (both closed):**
-- Issue #99 (CMS122/CMS125/CMS130 frailty exclusion mismatch) — closed 2026-04-25. MCT2 component (H1: missing ValueSet compose fix in production path) was already fixed when `_fix_valueset_compose_for_hapi` was moved into `validation.py:_prepare_measure_support_resources`. Remaining 17 failures are this HAPI upstream divergence.
-- Issue #140 (CMS122 denominator_exclusion not firing through /jobs) — closed 2026-04-24. Confirmed same HAPI CQL divergence; MCT2-side fix (wire `HAPI_SYNC_AFTER_UPLOAD` into `/jobs` path) shipped in same PR.
+- Issue #99 (CMS122/CMS125/CMS130 frailty exclusion mismatch) — closed 2026-04-25. Lenny component (H1: missing ValueSet compose fix in production path) was already fixed when `_fix_valueset_compose_for_hapi` was moved into `validation.py:_prepare_measure_support_resources`. Remaining 17 failures are this HAPI upstream divergence.
+- Issue #140 (CMS122 denominator_exclusion not firing through /jobs) — closed 2026-04-24. Confirmed same HAPI CQL divergence; Lenny-side fix (wire `HAPI_SYNC_AFTER_UPLOAD` into `/jobs` path) shipped in same PR.
 
 **Issue #112 verification (2026-04-22):** Fresh-container run with extended eval gate confirmed exactly 17 failures — the 69 extra failures from an earlier run were timing artifacts (IP=0 from VS expansion not complete). Root cause: the eval gate only probed CMS122 patient `9cba6cfa`; CMS125/CMS130 VSes take longer to expand on slower machines. Fix: added eval gate probes for CMS122 numerator path + CMS125 + CMS130 in `_load_connectathon_bundles_to_hapi`.
 
-**Issue #140 root cause (2026-04-24):** Separate investigation confirmed the CMS122 `denominator-exclusion` gap is a HAPI upstream CQL bug, not a MCT2 defect. Evidence: (1) the count of 19 actual vs. 25 expected exactly matches the 6 `_HAPI_DE_XFAIL` frailty patients; (2) Phase 3 testing showed adding `trigger_reindex_and_wait` to the `/jobs` path improved overall CMS122 accuracy (49/56 → 50/56) but left `denominator-exclusion` at 19 → 19, ruling out reference-index timing. The `/jobs` path hardcoded `asyncio.sleep(5.0)` was replaced with the `HAPI_SYNC_AFTER_UPLOAD` + `trigger_reindex_and_wait` gate (same pattern as the validation path) to fix the broader accuracy gap for other patients. See issue #140 for full findings.
+**Issue #140 root cause (2026-04-24):** Separate investigation confirmed the CMS122 `denominator-exclusion` gap is a HAPI upstream CQL bug, not a Lenny defect. Evidence: (1) the count of 19 actual vs. 25 expected exactly matches the 6 `_HAPI_DE_XFAIL` frailty patients; (2) Phase 3 testing showed adding `trigger_reindex_and_wait` to the `/jobs` path improved overall CMS122 accuracy (49/56 → 50/56) but left `denominator-exclusion` at 19 → 19, ruling out reference-index timing. The `/jobs` path hardcoded `asyncio.sleep(5.0)` was replaced with the `HAPI_SYNC_AFTER_UPLOAD` + `trigger_reindex_and_wait` gate (same pattern as the validation path) to fix the broader accuracy gap for other patients. See issue #140 for full findings.
 
 ### Class B: CMS71 — MADiE bundle export bug (strict=false)
 

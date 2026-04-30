@@ -1,6 +1,6 @@
 # Project Launch Pad — A dQM Starting Point
 
-(TUFKAMCT2 \= The utility formerly known as MCT2)
+(now known as Lenny)
 
 ## Executive Summary
 
@@ -14,15 +14,15 @@ The open-source landscape offers low-level CQL execution engines and one prototy
 
 ### The Solution
 
-MCT2 is a free, open-source utility that enables healthcare organizations to calculate digital quality measures without vendor dependency. It sits between an organization's clinical data repository (any FHIR-compliant server) and a measure calculation engine, orchestrating the entire evaluation workflow through a simple web interface designed for quality improvement staff — not software engineers.
+Lenny is a free, open-source utility that enables healthcare organizations to calculate digital quality measures without vendor dependency. It sits between an organization's clinical data repository (any FHIR-compliant server) and a measure calculation engine, orchestrating the entire evaluation workflow through a simple web interface designed for quality improvement staff — not software engineers.
 
-MCT2 ships ready to use: a single `docker compose up` command starts the application with a pre-loaded demo measure and synthetic patient data, allowing users to run their first calculation within minutes of installation. When ready for production, staff configure a connection to their organization's real clinical data repository through the web UI and begin calculating measures against live patient data.
+Lenny ships ready to use: a single `docker compose up` command starts the application with a pre-loaded demo measure and synthetic patient data, allowing users to run their first calculation within minutes of installation. When ready for production, staff configure a connection to their organization's real clinical data repository through the web UI and begin calculating measures against live patient data.
 
 Key capabilities include uploading FHIR Measure bundles, triggering measure calculations with live progress tracking, inspecting aggregate population results (initial population, numerator, denominator, exclusions, performance rate), and drilling into individual patient results to understand why each patient was included or excluded — with clinical data translated into plain language rather than raw FHIR JSON.
 
 ### Architecture
 
-MCT2 is deployed as five Docker containers managed by a single `docker compose` command:
+Lenny is deployed as five Docker containers managed by a single `docker compose` command:
 
 - **Web Interface** (React) — Administration, job management, and result inspection  
 - **Backend API** (Python/FastAPI) — Orchestrates the measure calculation workflow, manages jobs, and serves results  
@@ -34,7 +34,7 @@ The backend uses a pluggable data acquisition architecture, enabling future supp
 
 ### Value Proposition
 
-|  | Current State | With MCT2 |
+|  | Current State | With Lenny |
 | :---- | :---- | :---- |
 | **Annual cost** | $1-3M in vendor fees | $0 (open source) |
 | **Setup time** | Weeks of vendor onboarding | Minutes (single command) |
@@ -42,7 +42,7 @@ The backend uses a pluggable data acquisition architecture, enabling future supp
 | **Transparency** | Black-box calculation | Full patient-level result inspection |
 | **Flexibility** | Vendor's supported measures only | Any FHIR-based dQM |
 
-MCT2 eliminates the most expensive component of the vendor relationship — the actual measure computation and result inspection — while complementing existing investments in data ingestion, EHR integration, and measure submission workflows. It is designed for the organizations that need it most: those just beginning their transition to digital quality measures who face significant financial, technical, and staffing constraints.
+Lenny eliminates the most expensive component of the vendor relationship — the actual measure computation and result inspection — while complementing existing investments in data ingestion, EHR integration, and measure submission workflows. It is designed for the organizations that need it most: those just beginning their transition to digital quality measures who face significant financial, technical, and staffing constraints.
 
 **Requirements:** Docker Engine 24+, 16 GB RAM recommended, 4 CPU cores, 20 GB disk.
 
