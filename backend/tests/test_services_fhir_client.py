@@ -594,6 +594,46 @@ async def test_wipe_patient_data_includes_qi_core_types():
         assert expected_type in wiped_types, f"{expected_type} missing from wipe list"
 
 
+async def test_wipe_patient_data_patient_deleted_after_clinical_resources():
+    """Patient must be deleted AFTER clinical types to avoid HAPI 409 referential-integrity errors.
+
+    HAPI returns 409 when a DELETE targets Patient while Condition/Encounter/etc.
+    still reference it.  Regression test for issue #235.
+    """
+    mock_response = _make_response(200, {})
+    delete_order: list[str] = []
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+
+        async def capture_delete(url, **kwargs):
+            rt = url.split("/")[-1].split("?")[0]
+            delete_order.append(rt)
+            return mock_response
+
+        mock_ctx.delete = AsyncMock(side_effect=capture_delete)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await wipe_patient_data()
+
+    assert "Patient" in delete_order, "Patient must be in the wipe list"
+    patient_idx = delete_order.index("Patient")
+    clinical_types = {
+        "Condition",
+        "Observation",
+        "Encounter",
+        "Procedure",
+        "MedicationRequest",
+        "MedicationAdministration",
+    }
+    for rt in clinical_types:
+        assert rt in delete_order, f"{rt} missing from wipe list"
+        assert delete_order.index(rt) < patient_idx, (
+            f"{rt} must be deleted before Patient (got {rt} at {delete_order.index(rt)}, Patient at {patient_idx})"
+        )
+
+
 async def test_wipe_patient_data_strict_raises_after_consecutive_failures():
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
         mock_ctx = AsyncMock()
