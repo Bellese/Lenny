@@ -2,10 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.0.12.0] - 2026-04-30
+## [0.0.12.0] - 2026-05-01
 
 ### Added
 - **Auto-select patient group when measure is chosen (issue #228)** — Choosing a measure in the "Start Calculation" modal now automatically pre-fills the Patient Group field with the group whose CMS number matches the selected measure (e.g. selecting `CMS122FHIRDiabetes...` auto-selects `CMS122-cohort`). Uses `extractCmsId` as the join key. Manual group selection still works; the field clears if no match is found.
+- **FHIR Groups synthesized for all 12 connectathon measures (issue #232)** — Seeding the local stack now produces one FHIR `Group` resource per measure bundle on the CDR, so the Patient Group dropdown is populated on a fresh install without manual setup. CMS1017's curated `artifact-testArtifact` extension is preserved; the other 11 groups are synthesized from each bundle's Patient members.
+
+### Fixed
+- **Population counts no longer show 0 when running jobs against a patient group** — The reindex probe that gates CQL evaluation was inadvertently polling a pre-baked phantom patient from the HAPI measure engine Docker image instead of the patients just pushed to the engine. The probe now targets only patients with Encounters from the current batch, so CQL sees correctly indexed data. Batches with no Encounter-bearing patients fall back to a timed sleep rather than probing the wrong patient.
 
 ## [0.0.11.0] - 2026-04-29
 

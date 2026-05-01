@@ -24,7 +24,7 @@ from app.services.fhir_client import (
     evaluate_measure,
     get_group_members,
     push_resources,
-    trigger_reindex_and_wait,
+    trigger_reindex_and_wait_for_patients,
     wipe_patient_data,
 )
 from app.services.fhir_errors import redact_outcome, sanitize_url
@@ -346,6 +346,9 @@ async def _process_single_batch(
             # Partial-gather: some resource types failed but data was pushed.
             # Mapped to error_details dict for annotation after evaluate succeeds.
             partial_gather_patients: dict[str, dict] = {}
+            # Track patients with Encounters so the reindex probe uses them
+            # (not a phantom pre-baked patient from the measure engine image).
+            patients_with_encounters: list[str] = []
 
             for patient_id in patient_ids:
                 if await _stop_or_delete_job(job_id):
@@ -355,6 +358,8 @@ async def _process_single_batch(
                     gather_result = await strategy.gather_patient_data(cdr_url, patient_id, auth_headers)
                     if gather_result.resources:
                         await push_resources(gather_result.resources)
+                        if any(r.get("resourceType") == "Encounter" for r in gather_result.resources):
+                            patients_with_encounters.append(patient_id)
                     logger.info(
                         f"Pushed {len(gather_result.resources)} resources for {patient_id[:8]}",
                         extra={"job_id": job_id, "patient_id": patient_id},
@@ -462,13 +467,22 @@ async def _process_single_batch(
                     "All patient data pushed — waiting for HAPI reindex",
                     extra={"job_id": job_id, "batch_id": batch_id},
                 )
-                try:
-                    await asyncio.to_thread(trigger_reindex_and_wait, settings.MEASURE_ENGINE_URL)
-                except Exception as exc:
-                    logger.warning(
-                        "HAPI reindex failed during job — falling back to sleep",
-                        extra={"job_id": job_id, "batch_id": batch_id, "error": str(exc)},
-                    )
+                if patients_with_encounters:
+                    try:
+                        await asyncio.to_thread(
+                            trigger_reindex_and_wait_for_patients,
+                            settings.MEASURE_ENGINE_URL,
+                            patients_with_encounters,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "HAPI reindex failed during job — falling back to sleep",
+                            extra={"job_id": job_id, "batch_id": batch_id, "error": str(exc)},
+                        )
+                        await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
+                else:
+                    # No Encounter-bearing patients in this batch; can't use the
+                    # Encounter-probe strategy, so fall back to a timed sleep.
                     await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
             else:
                 logger.info(
