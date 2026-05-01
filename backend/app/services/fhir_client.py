@@ -855,9 +855,10 @@ async def wipe_patient_data(*, strict: bool = True) -> None:
     data over it causes the in-flight DELETE to wipe the freshly-pushed resources.
     The strict parameter is kept for API compatibility but no longer silences failures.
     """
+    # Delete clinical resources before Patient: HAPI returns 409 when Patient is
+    # referenced by Condition/Encounter/etc., so Patient must be last.
     resource_types = [
         "MeasureReport",
-        "Patient",
         "Condition",
         "Observation",
         "Encounter",
@@ -880,6 +881,7 @@ async def wipe_patient_data(*, strict: bool = True) -> None:
         "Location",
         "Practitioner",
         "Organization",
+        "Patient",
     ]
     _MAX_CONSECUTIVE_FAILURES = 3
     consecutive_failures = 0
