@@ -93,6 +93,7 @@ jobs:
             --ignore=tests/integration/test_golden_measures.py \
             --ignore=tests/integration/test_connectathon_measures.py \
             --ignore=tests/integration/test_full_workflow.py \
+            --ignore=tests/integration/test_groups_dropdown.py \
             --durations=25 \
             2>&1 | tee /tmp/test-output.txt
           STATUS=${PIPESTATUS[0]}

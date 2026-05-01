@@ -24,6 +24,7 @@ on:
       - 'docker/hapi-*-seeded.Dockerfile'
       - 'docker/seed-hapi.sh'
       - 'docker-compose.test.yml'
+      - 'scripts/load_connectathon_bundles.py'
 
 permissions:
   contents: read
@@ -52,6 +53,7 @@ jobs:
         run: |
           echo "hash=$(find seed/ docker/seed-hapi.sh docker-compose.test.yml \
             docker/hapi-cdr-seeded.Dockerfile docker/hapi-measure-seeded.Dockerfile \
+            scripts/load_connectathon_bundles.py \
             -type f 2>/dev/null | LC_ALL=C sort | xargs sha256sum | sha256sum | cut -c1-12)" \
             >> "$GITHUB_OUTPUT"
 

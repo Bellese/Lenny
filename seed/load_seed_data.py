@@ -14,7 +14,7 @@ Applies the same patches as the integration test suite so HAPI can evaluate corr
   - ValueSet ID conflicts remapped to existing HAPI resources (prevents HAPI-0902)
   - Duplicate Claim IDs deduplicated (CMS71 MADiE v0.3.x export bug)
 
-Environment variables:
+Environment variables (for the Docker ENTRYPOINT / docker compose seed service):
   CDR_URL     (default http://hapi-fhir-cdr:8080/fhir)
   MEASURE_URL (default http://hapi-fhir-measure:8080/fhir)
   SEED_DIR    (default /seed)
@@ -266,7 +266,140 @@ def trigger_reindex(base_url: str, patient_id: str, encounter_id: str, timeout: 
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Group synthesis
+# ---------------------------------------------------------------------------
+
+def synthesize_group_from_patients(bundle: dict, measure_id: str) -> dict | None:
+    """Return a FHIR Group for the bundle's patients, or None if one already exists.
+
+    Skips synthesis when:
+    - The bundle already contains a Group resource (preserves curated data, e.g.
+      CMS1017's artifact-testArtifact extension).
+    - The bundle has no Patient resources (empty Group would be meaningless).
+    """
+    entries = bundle.get("entry", [])
+    for entry in entries:
+        if entry.get("resource", {}).get("resourceType") == "Group":
+            return None
+
+    patient_ids = [
+        entry["resource"]["id"]
+        for entry in entries
+        if entry.get("resource", {}).get("resourceType") == "Patient"
+        and entry.get("resource", {}).get("id")
+    ]
+    if not patient_ids:
+        return None
+
+    return {
+        "resourceType": "Group",
+        "id": measure_id,
+        "name": measure_id,
+        "type": "person",
+        "actual": True,
+        "member": [{"entity": {"reference": f"Patient/{pid}"}} for pid in patient_ids],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Connectathon bundle loader (callable by shim and by main)
+# ---------------------------------------------------------------------------
+
+def load_connectathon_bundles(
+    cdr_url: str,
+    measure_url: str,
+    bundle_dir: pathlib.Path,
+) -> tuple[str | None, str | None]:
+    """Load all connectathon bundles to the measure engine and CDR.
+
+    Returns (probe_patient_id, probe_encounter_id) — the first Encounter-bearing
+    patient found, suitable for a subsequent $reindex probe.
+
+    Synthesizes a Group resource for each bundle that does not already include one
+    and PUTs it to the CDR only (Groups are not needed for measure evaluation on the
+    measure engine).
+    """
+    manifest_path = bundle_dir / "manifest.json"
+    if not manifest_path.exists():
+        log(f"No manifest found at {manifest_path} — skipping connectathon bundles")
+        return None, None
+
+    with open(manifest_path) as f:
+        manifest = json.load(f)
+
+    measures = manifest["measures"]
+    # CMS1017 last — scoring type causes HAPI-0902 on some HAPI versions
+    ordered = [m for m in measures if "CMS1017" not in m["id"]] + [
+        m for m in measures if "CMS1017" in m["id"]
+    ]
+    log(f"Found {len(ordered)} connectathon bundles to load")
+
+    # Pass 1: collect + deduplicate measure defs; store raw bundles for Group synthesis
+    all_measure_defs: dict[str, dict] = {}
+    clinical_per_bundle: list[tuple[str, list[dict], dict]] = []  # (id, clinical, raw_bundle)
+
+    for entry in ordered:
+        measure_id = entry["id"]
+        bundle_path = bundle_dir / entry["bundle_file"]
+        if not bundle_path.exists():
+            log(f"SKIP: {measure_id} bundle not found")
+            continue
+        log(f"Parsing {measure_id}...")
+        with open(bundle_path) as f:
+            bundle = json.load(f)
+        measure_defs, clinical = classify_bundle(bundle)
+        measure_defs = fix_valueset_compose(measure_defs)
+        measure_defs = fix_library_deps(measure_defs)
+        for r in measure_defs:
+            key = f"{r.get('resourceType')}/{r.get('id')}"
+            all_measure_defs[key] = r
+        if clinical:
+            clinical_per_bundle.append((measure_id, clinical, bundle))
+
+    deduped = list(all_measure_defs.values())
+    log(f"Total unique measure def resources: {len(deduped)}")
+
+    # Resolve ValueSet ID conflicts before loading
+    log("Resolving ValueSet ID conflicts with existing HAPI resources...")
+    deduped = resolve_valueset_id_conflicts(deduped, measure_url)
+
+    # Pass 2: load measure defs to measure engine
+    log("Loading measure definitions to measure engine...")
+    tx = make_put_bundle(deduped)
+    post_bundle(measure_url, tx, "connectathon measure defs → measure engine", timeout=300)
+
+    # Pass 3: load clinical data + synthesized Groups
+    probe_patient_id: str | None = None
+    probe_encounter_id: str | None = None
+
+    for measure_id, clinical, raw_bundle in clinical_per_bundle:
+        log(f"Loading clinical data: {measure_id} ({len(clinical)} resources)...")
+        clinical = fix_duplicate_claims(clinical)
+        tx = make_put_bundle(clinical)
+        post_bundle(cdr_url, tx, f"{measure_id} clinical → CDR")
+        post_bundle(measure_url, tx, f"{measure_id} clinical → measure engine")
+
+        # Synthesize a Group for this bundle if it doesn't already include one,
+        # and PUT it to the CDR only (not needed on the measure engine)
+        group = synthesize_group_from_patients(raw_bundle, measure_id)
+        if group:
+            log(f"  Synthesizing Group/{group['id']} ({len(group['member'])} members) → CDR")
+            group_tx = make_put_bundle([group])
+            post_bundle(cdr_url, group_tx, f"{measure_id} Group → CDR")
+
+        if not probe_patient_id:
+            enc_resources = [r for r in clinical if r.get("resourceType") == "Encounter"]
+            if enc_resources:
+                probe_encounter_id = enc_resources[0].get("id")
+                probe_patient_id = (
+                    enc_resources[0].get("subject", {}).get("reference", "").removeprefix("Patient/")
+                )
+
+    return probe_patient_id, probe_encounter_id
+
+
+# ---------------------------------------------------------------------------
+# Main (Docker ENTRYPOINT / docker compose seed service)
 # ---------------------------------------------------------------------------
 
 def main() -> None:
@@ -314,66 +447,10 @@ def main() -> None:
     # -----------------------------------------------------------------------
     # Step 3: Load connectathon bundles
     # -----------------------------------------------------------------------
-    if not MANIFEST_PATH.exists():
-        log(f"No manifest found at {MANIFEST_PATH} — skipping connectathon bundles")
-    else:
-        with open(MANIFEST_PATH) as f:
-            manifest = json.load(f)
-        measures = manifest["measures"]
-        # CMS1017 last — scoring type causes HAPI-0902 on some HAPI versions
-        ordered = [m for m in measures if "CMS1017" not in m["id"]] + [
-            m for m in measures if "CMS1017" in m["id"]
-        ]
-        log(f"Found {len(ordered)} connectathon bundles to load")
-
-        # Pass 1: collect + deduplicate measure defs
-        all_measure_defs: dict[str, dict] = {}
-        clinical_per_bundle: list[tuple[str, list[dict]]] = []
-
-        for entry in ordered:
-            measure_id = entry["id"]
-            bundle_path = BUNDLE_DIR / entry["bundle_file"]
-            if not bundle_path.exists():
-                log(f"SKIP: {measure_id} bundle not found")
-                continue
-            log(f"Parsing {measure_id}...")
-            with open(bundle_path) as f:
-                bundle = json.load(f)
-            measure_defs, clinical = classify_bundle(bundle)
-            measure_defs = fix_valueset_compose(measure_defs)
-            measure_defs = fix_library_deps(measure_defs)
-            for r in measure_defs:
-                key = f"{r.get('resourceType')}/{r.get('id')}"
-                all_measure_defs[key] = r
-            if clinical:
-                clinical_per_bundle.append((measure_id, clinical))
-
-        deduped = list(all_measure_defs.values())
-        log(f"Total unique measure def resources: {len(deduped)}")
-
-        # Resolve ValueSet ID conflicts before loading
-        log("Resolving ValueSet ID conflicts with existing HAPI resources...")
-        deduped = resolve_valueset_id_conflicts(deduped, MEASURE_URL)
-
-        # Pass 2: load measure defs
-        log("Loading measure definitions to measure engine...")
-        tx = make_put_bundle(deduped)
-        post_bundle(MEASURE_URL, tx, "connectathon measure defs → measure engine", timeout=300)
-
-        # Pass 3: load clinical data
-        for measure_id, clinical in clinical_per_bundle:
-            log(f"Loading clinical data: {measure_id} ({len(clinical)} resources)...")
-            clinical = fix_duplicate_claims(clinical)
-            tx = make_put_bundle(clinical)
-            post_bundle(CDR_URL, tx, f"{measure_id} clinical → CDR")
-            post_bundle(MEASURE_URL, tx, f"{measure_id} clinical → measure engine")
-            if not probe_patient_id:
-                enc_resources = [r for r in clinical if r.get("resourceType") == "Encounter"]
-                if enc_resources:
-                    probe_encounter_id = enc_resources[0].get("id")
-                    probe_patient_id = (
-                        enc_resources[0].get("subject", {}).get("reference", "").removeprefix("Patient/")
-                    )
+    conn_probe_pid, conn_probe_eid = load_connectathon_bundles(CDR_URL, MEASURE_URL, BUNDLE_DIR)
+    if not probe_patient_id:
+        probe_patient_id = conn_probe_pid
+        probe_encounter_id = conn_probe_eid
 
     # -----------------------------------------------------------------------
     # Step 4: Trigger $reindex
@@ -383,10 +460,11 @@ def main() -> None:
         trigger_reindex(MEASURE_URL, probe_patient_id, probe_encounter_id)
         trigger_reindex(CDR_URL, probe_patient_id, probe_encounter_id)
 
+    bundle_count = len(list(BUNDLE_DIR.glob("*.json"))) - 1 if MANIFEST_PATH.exists() else 0
     log("============================================")
     log("  Lenny seed data loaded successfully!")
-    log(f"  CDR:     patient-bundle + connectathon clinical data")
-    log(f"  Engine:  measure-bundle + {len(list(BUNDLE_DIR.glob('*.json'))) - 1 if MANIFEST_PATH.exists() else 0} connectathon bundles")
+    log(f"  CDR:     patient-bundle + connectathon clinical data + Groups")
+    log(f"  Engine:  measure-bundle + {bundle_count} connectathon bundles")
     log("============================================")
 
 
