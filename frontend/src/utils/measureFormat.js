@@ -10,6 +10,13 @@ export function cleanMeasureName(name) {
   return name.replace(/\s*FHIR\s*$/i, '').trim();
 }
 
+export function findMatchingGroup(measureId, groups) {
+  if (!measureId || !groups || !groups.length) return null;
+  const cmsId = extractCmsId(measureId);
+  if (!cmsId) return null;
+  return groups.find(g => extractCmsId(g.name || g.id) === cmsId) ?? null;
+}
+
 export function measureOptionLabel(id, rawName) {
   const cmsId = extractCmsId(id);
   const name = cleanMeasureName(rawName || '');

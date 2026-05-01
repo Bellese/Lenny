@@ -1,4 +1,4 @@
-# Architectural Decisions — MCT2
+# Architectural Decisions — Lenny
 
 This log records significant technical and process choices with their rationale. When you make a decision that would be non-obvious to someone joining the project next month, add it here. Format: what we decided, why, and any alternatives considered.
 

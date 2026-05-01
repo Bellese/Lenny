@@ -2,7 +2,7 @@
 set -e
 
 # ============================================================
-# MCT2 Seed Data Loader
+# Lenny Seed Data Loader
 # Waits for HAPI FHIR instances, then loads demo data.
 # Idempotent: uses PUT-based transaction bundles (safe to re-run).
 # ============================================================
@@ -83,7 +83,7 @@ verify_data() {
 # Main
 # ============================================================
 
-log "Starting MCT2 seed data loader..."
+log "Starting Lenny seed data loader..."
 
 # Step 1: Wait for both HAPI FHIR servers
 wait_for_server "$CDR_URL" "HAPI FHIR CDR"
@@ -105,7 +105,7 @@ verify_data "$MEASURE_URL" "Library" "Measure Engine"
 
 # Done
 log "============================================"
-log "  MCT2 demo data loaded successfully!"
+log "  Lenny demo data loaded successfully!"
 log "  CDR:     55 patients with clinical data"
 log "  Engine:  1 measure (CMS122 - Diabetes HbA1c)"
 log "============================================"

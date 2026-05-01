@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# run_tests.sh — Run all unit tests for MCT2 bash scripts.
+# run_tests.sh — Run all unit tests for Lenny bash scripts.
 #
 # Usage:
 #   bash scripts/tests/run_tests.sh          # native bash (reconcile tests only on macOS)

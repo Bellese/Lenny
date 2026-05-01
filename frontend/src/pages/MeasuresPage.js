@@ -217,7 +217,7 @@ export default function MeasuresPage() {
       <ConfirmDialog
         open={!!confirm}
         title={`Delete ${confirm?.id}?`}
-        body={<>This removes <strong>{confirm ? getMeasureDisplayName(confirm) : ''}</strong> from MCT2. Existing job results are preserved, but you won't be able to re-run without re-uploading the bundle.</>}
+        body={<>This removes <strong>{confirm ? getMeasureDisplayName(confirm) : ''}</strong> from Lenny. Existing job results are preserved, but you won't be able to re-run without re-uploading the bundle.</>}
         confirmLabel="Delete permanently"
         tone="destructive"
         onCancel={() => setConfirm(null)}

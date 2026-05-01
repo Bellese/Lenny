@@ -1,6 +1,6 @@
-# MCT2 Development Workflow
+# Lenny Development Workflow
 
-This document establishes an orchestration standard for AI-assisted development on MCT2 (aka TUFKAMCT2 aka Project Launchpad, aka Leonard, aka Lenny). It defines which AI tool the team uses at each phase of work, how each phase connects back to GitHub Issues, and how two complementary toolkits ([gstack](https://github.com/garrytan/gstack) and [superpowers](https://github.com/obra/superpowers)) fit together into a single pipeline. The goal is a repeatable process that any team member can follow from issue to shipped code.
+This document establishes an orchestration standard for AI-assisted development on Lenny (aka TUFKALenny aka Project Launchpad, aka Leonard, aka Lenny). It defines which AI tool the team uses at each phase of work, how each phase connects back to GitHub Issues, and how two complementary toolkits ([gstack](https://github.com/garrytan/gstack) and [superpowers](https://github.com/obra/superpowers)) fit together into a single pipeline. The goal is a repeatable process that any team member can follow from issue to shipped code.
 
 ## How Work Flows
 

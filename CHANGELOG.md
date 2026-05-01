@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.12.0] - 2026-04-30
+
+### Added
+- **Auto-select patient group when measure is chosen (issue #228)** — Choosing a measure in the "Start Calculation" modal now automatically pre-fills the Patient Group field with the group whose CMS number matches the selected measure (e.g. selecting `CMS122FHIRDiabetes...` auto-selects `CMS122-cohort`). Uses `extractCmsId` as the join key. Manual group selection still works; the field clears if no match is found.
+
 ## [0.0.11.0] - 2026-04-29
 
 ### Fixed
