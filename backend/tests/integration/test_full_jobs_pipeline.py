@@ -34,7 +34,12 @@ _BUNDLE_DIR = _REPO_ROOT / "seed" / "connectathon-bundles"
 _MANIFEST_PATH = _BUNDLE_DIR / "manifest.json"
 
 # CMS1017 triggers HTTP 400 from HAPI on $evaluate-measure — skip entirely.
-_SKIP_MEASURES = {"CMS1017FHIRHHFI"}
+# CMS529: manifest id "CMS529FHIRHybridHospitalWideReadmission" differs from the
+# bundle's Measure logical id "CMSFHIR529HybridHospitalWideReadmission" (different
+# prefix order). Lenny calls /Measure/CMS529FHIR.../$evaluate-measure which returns
+# 404 — all 53 patients fail. Fix requires manifest id correction + prebaked CDR
+# image rebuild (new Group id). Tracked in GitHub issue #253.
+_SKIP_MEASURES = {"CMS1017FHIRHHFI", "CMS529FHIRHybridHospitalWideReadmission"}
 
 # Maps FHIR hyphenated population codes to Lenny's DB underscore keys.
 _FHIR_TO_DB_KEY: dict[str, str] = {

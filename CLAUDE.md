@@ -15,10 +15,10 @@
 **Decision tree:**
 - Pushing a PR? → Lint + Unit + CI-equivalent integration (no skipping).
 - Touching `measure_*` / `orchestrator.py` / `fhir_client.py` / `validation.py`? → Add Full workflow + Jobs pipeline validation (see below).
-- Adding measures or bumping HAPI? → Run the full integration suite (or manually trigger the nightly Connectathon Measures workflow) before merge.
+- Adding measures or bumping HAPI? → Run the full integration suite (or manually trigger the weekly Connectathon Measures workflow) before merge.
 - Validating that Lenny's Jobs API produces correct numerator/denominator counts? → `USE_PREBAKED=1 ./scripts/run-integration-tests.sh tests/integration/test_full_jobs_pipeline.py` (requires prebaked images with Groups; ~30–50 min for all 11 measures). Or run the standalone script: `python scripts/validate_all_measures.py`.
 
-The nightly Connectathon Measures workflow has four independent jobs: **Bundle Loader Test** (vanilla HAPI), **Connectathon Eval** (pre-baked HAPI), **Jobs Pipeline Validation** (pre-baked HAPI, validates Lenny orchestration layer), and **Full Workflow** (clean nightly run). See `docs/testing.md` for the full strategy.
+The weekly Connectathon Measures workflow has four independent jobs: **Bundle Loader Test** (vanilla HAPI), **Connectathon Eval** (pre-baked HAPI), **Jobs Pipeline Validation** (pre-baked HAPI, validates Lenny orchestration layer), and **Full Workflow** (clean nightly run). See `docs/testing.md` for the full strategy.
 
 ## Recurring bug: HAPI async-indexing race
 
@@ -69,7 +69,8 @@ PRs #142, #155, #159, #161, #167+ each patched a slice of this same disease.
    - HAPI behavior or configuration
    - Bundle import / `$everything` / `$evaluate-measure` paths
    - After any wipe+push cycle in the smoke run, probe `$everything` on at least one patient — see `docs/runbooks/everything-probe.md` for the script (the shell strips `$`, so use Python).
-5. The "ship-or-not" gate: if step 1, 2, 3, or 4 didn't run successfully, **do not push.** Tell Sutton what's blocking instead.
+5. **New or modified `tests/integration/` files** — run those exact files locally before pushing. The CI-equivalent suite uses `--ignore` flags and will **silently skip** any new integration test; you must run it yourself. For prebaked-only tests (check for `HAPI_PREBAKED` guard or `_require_prebaked_stack`): `USE_PREBAKED=1 ./scripts/run-integration-tests.sh <test_file>`. No exceptions — not even for the test you just wrote.
+6. The "ship-or-not" gate: if steps 1–5 didn't all pass, **do not push.** Tell Sutton what's blocking instead.
 
 If the change is documentation-only (`*.md`, no code), steps 1–4 are not required, but step 5 still applies — confirm in the PR description that no code changed.
 
