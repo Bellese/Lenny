@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.15.0] - 2026-05-03
+
+### Added
+- **End-to-end Jobs pipeline validation** — New parametrized integration test (`test_full_jobs_pipeline.py`) runs all 11 connectathon measures through the Lenny Jobs API against the prebaked HAPI stack and asserts per-patient numerator/denominator outputs match the ground-truth expected populations from the connectathon bundles. Closes the gap between `test_connectathon_measures.py` (bypasses Lenny) and `test_full_workflow.py` (no count assertions). CMS1017 (HTTP 400 from HAPI) is skipped; all 11 remaining measures pass on fresh prebaked containers. Runs in the nightly `jobs-pipeline-validation` workflow, not the PR gate.
+- **`scripts/validate_all_measures.py`** — Standalone script to validate all connectathon measures through the Jobs API against any stack. Produces a per-measure pass/fail table and structured JSON output. Exit codes: 0 = all strict measures pass, 1 = strict-measure failures, 2 = infra error.
+- **Jobs pipeline validation CI job** — New `jobs-pipeline-validation` job in the weekly Connectathon Measures workflow validates the full orchestration layer end-to-end using prebaked HAPI images (requires Groups pre-loaded in CDR).
+
+### Fixed
+- **Job creation no longer fails with FK violation when no CDR config exists** — `cdr_id` was stored as `0` (a non-existent FK reference) when using the fallback unauthenticated CDR path. Now correctly stores `NULL`, matching the `ON DELETE SET NULL` intent.
+- **Orchestrator no longer raises RuntimeError for unauthenticated direct-URL jobs** — `_get_cdr_auth_headers` previously raised unconditionally when `cdr_id` was `NULL`, breaking every job created without a CDR config row. Now returns empty headers when `auth_type` is `none` or unset; only raises when the job required auth credentials that are now unrecoverable.
+
 ## [0.0.14.0] - 2026-05-03
 
 ### Added

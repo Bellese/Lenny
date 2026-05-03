@@ -234,7 +234,18 @@ def post_bundle(url: str, bundle: dict, label: str, timeout: int = 300) -> bool:
         log(f"  ERROR {label}: HTTP {resp.status_code}: {resp.text[:400]}")
         return False
     else:
-        log(f"  {label}: HTTP {resp.status_code} OK")
+        # FHIR batch returns 200 even when individual entries fail — check each entry.
+        body = resp.json() if resp.headers.get("content-type", "").startswith("application/") else {}
+        entry_errors = [
+            e.get("response", {})
+            for e in body.get("entry", [])
+            if int(e.get("response", {}).get("status", "200").split(" ")[0]) >= 400
+        ]
+        if entry_errors:
+            log(f"  WARN {label}: HTTP 200 but {len(entry_errors)} entry error(s): "
+                f"{[e.get('status') for e in entry_errors[:5]]}")
+        else:
+            log(f"  {label}: HTTP {resp.status_code} OK")
     return True
 
 
@@ -463,7 +474,7 @@ def main() -> None:
     bundle_count = len(list(BUNDLE_DIR.glob("*.json"))) - 1 if MANIFEST_PATH.exists() else 0
     log("============================================")
     log("  Lenny seed data loaded successfully!")
-    log(f"  CDR:     patient-bundle + connectathon clinical data + Groups")
+    log("  CDR:     patient-bundle + connectathon clinical data + Groups")
     log(f"  Engine:  measure-bundle + {bundle_count} connectathon bundles")
     log("============================================")
 

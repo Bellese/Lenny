@@ -268,6 +268,12 @@ async def _get_cdr_auth_headers(job_id: int) -> dict[str, str]:
         if job is None:
             return {}
         if job.cdr_id is None:
+            # No CDR config linked — either job was created without one (unauthenticated
+            # direct URL) or the config was deleted after creation.  If auth type is
+            # "none"/unset no credentials are needed; for auth-bearing types the
+            # credentials are unrecoverable.
+            if not job.cdr_auth_type or job.cdr_auth_type == "none":
+                return {}
             raise RuntimeError(
                 f"Job {job_id} has no cdr_id — CDR config was deleted after job creation. "
                 "Cannot fetch auth credentials."
