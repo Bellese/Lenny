@@ -14,10 +14,11 @@
 
 **Decision tree:**
 - Pushing a PR? → Lint + Unit + CI-equivalent integration (no skipping).
-- Touching `measure_*` / `orchestrator.py` / `fhir_client.py` / `validation.py`? → Add Full workflow.
+- Touching `measure_*` / `orchestrator.py` / `fhir_client.py` / `validation.py`? → Add Full workflow + Jobs pipeline validation (see below).
 - Adding measures or bumping HAPI? → Run the full integration suite (or manually trigger the nightly Connectathon Measures workflow) before merge.
+- Validating that Lenny's Jobs API produces correct numerator/denominator counts? → `USE_PREBAKED=1 ./scripts/run-integration-tests.sh tests/integration/test_full_jobs_pipeline.py` (requires prebaked images with Groups; ~30–50 min for all 11 measures). Or run the standalone script: `python scripts/validate_all_measures.py`.
 
-The nightly Connectathon Measures workflow has three independent jobs: **Bundle Loader Test** (vanilla HAPI), **Connectathon Eval** (pre-baked HAPI), and **Full Workflow** (clean nightly run). See `docs/testing.md` for the full strategy.
+The nightly Connectathon Measures workflow has four independent jobs: **Bundle Loader Test** (vanilla HAPI), **Connectathon Eval** (pre-baked HAPI), **Jobs Pipeline Validation** (pre-baked HAPI, validates Lenny orchestration layer), and **Full Workflow** (clean nightly run). See `docs/testing.md` for the full strategy.
 
 ## Recurring bug: HAPI async-indexing race
 

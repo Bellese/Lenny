@@ -11,6 +11,11 @@ name: Connectathon Measures
 #   - connectathon-eval: pre-baked HAPI; golden isolation + full connectathon coverage
 #     (test_golden_measures.py + test_connectathon_measures.py).  Pre-baked images make
 #     PUT uploads idempotent/fast; eval-gate + 568 connectathon evals dominate the clock.
+#   - jobs-pipeline-validation: pre-baked HAPI; runs all 11 measures through Lenny's
+#     Jobs API and validates per-patient numerator/denominator outputs against ground-truth
+#     expected populations from the connectathon bundles.  Closes the gap between
+#     test_connectathon_measures.py (bypasses Lenny) and test_full_workflow.py (no count
+#     assertions).  Requires Groups pre-loaded in CDR (prebaked image only).
 #   - full-workflow: orchestration end-to-end coverage in a clean runner so it does not
 #     inherit the connectathon-loaded CDR state.
 #
@@ -95,6 +100,40 @@ jobs:
           ./scripts/run-integration-tests.sh
           tests/integration/test_golden_measures.py
           tests/integration/test_connectathon_measures.py
+
+  jobs-pipeline-validation:
+    name: Jobs Pipeline Validation (pre-baked HAPI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Validates Lenny's orchestration layer end-to-end: runs all 11 connectathon measures
+    # through the Jobs API and asserts per-patient numerator/denominator outputs match the
+    # ground-truth expected populations from the connectathon bundles.
+    # Requires prebaked CDR (has FHIR Groups per measure_id) — skips on vanilla HAPI.
+    env:
+      USE_PREBAKED: "1"
+      REQUIRE_PREBAKED: "1"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install dependencies
+        working-directory: backend
+        run: pip install -r requirements.txt -r requirements-test.txt
+
+      - name: Log in to GHCR
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121  # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Jobs pipeline validation (pre-baked HAPI)
+        run: ./scripts/run-integration-tests.sh tests/integration/test_full_jobs_pipeline.py
 
   full-workflow:
     name: Full Workflow (clean nightly run)
