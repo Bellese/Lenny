@@ -20,6 +20,14 @@ export function findMatchingGroup(measureId, groups) {
 export function measureOptionLabel(id, rawName) {
   const cmsId = extractCmsId(id);
   const name = cleanMeasureName(rawName || '');
-  if (cmsId && name) return `${cmsId} — ${name}`;
+  if (cmsId && name) return `[${cmsId}] ${name}`;
   return name || cmsId || id || '';
+}
+
+export function measureDisplayLabel(idOrUrl, rawName) {
+  const cms = extractCmsId(idOrUrl) || extractCmsId(rawName);
+  const name = cleanMeasureName(rawName || '');
+  if (cms && name) return `[${cms}] ${name}`;
+  if (cms) return `[${cms}]`;
+  return name || idOrUrl || '';
 }

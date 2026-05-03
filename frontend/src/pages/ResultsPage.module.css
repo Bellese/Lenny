@@ -52,6 +52,19 @@
   gap: 8px;
 }
 
+.jobSelectGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.jobSelectLabel {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+}
+
 .jobSelect {
   padding: 6px 10px;
   border: 1px solid var(--line);
@@ -101,10 +114,6 @@
   font-size: 11px;
   color: var(--text-muted);
   margin-top: 2px;
-}
-
-.sparklineWrap {
-  color: var(--accent);
 }
 
 /* Performance rate */
@@ -390,11 +399,7 @@
     gap: 8px;
   }
 
-  .sparklineWrap {
-    max-width: 100%;
-    overflow: hidden;
-  }
-
+  
   .rateNum {
     font-size: 48px;
   }
