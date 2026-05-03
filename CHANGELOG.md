@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.13.1] - 2026-05-03
+
+### Fixed
+- **CMS529 measure now evaluates correctly** — The manifest `id` for CMS529 (`CMS529FHIRHybridHospitalWideReadmission`) disagreed with the actual HAPI Measure resource id (`CMSFHIR529HybridHospitalWideReadmission`), causing all 53 CMS529 test patients to fail `$evaluate-measure` with a 404. The manifest id is corrected; rebuilding the prebaked CDR image will produce a FHIR Group with the right id and unblock CMS529 evaluation.
+
 ## [0.0.13.0] - 2026-05-03
 
 ### Changed
