@@ -1,112 +1,43 @@
 # GHCR Pull Auth on Prod
 
-## Why this exists
+## Current state
 
-CI and prod deploys consume pre-baked HAPI images from
-`ghcr.io/bellese/mct2-hapi-{cdr,measure}` via `docker-compose.prebaked.yml`
-(connectathon bundles + IGs baked in for fast cold-start, PR #199). GHCR
-packages owned by an org default to **private**, so an unauthenticated
-`docker compose pull` returns 401 and the deploy fails:
+`ghcr.io/bellese/mct2-hapi-cdr` and `ghcr.io/bellese/mct2-hapi-measure` are
+**public**. No authentication is required to pull them. `docker compose pull`
+on EC2 works without login, for both automated deploys and manual runs.
 
-```
-hapi-fhir-measure Error Head "https://ghcr.io/v2/bellese/mct2-hapi-measure/manifests/latest": unauthorized
-```
+Push still requires auth. The bake workflow (`.github/workflows/bake-hapi-image.yml`)
+authenticates with the workflow's ephemeral `GITHUB_TOKEN` (`packages: write`
+permission) — no change there.
 
-> **Note:** The original justification for this auth flow was the Phase 1
-> per-measure HAPI reset architecture (PR #167), which was reverted in
-> PR #180. The auth mechanism remains in use because pre-baked images
-> are still the deployment path for CI and prod under the current
-> single-instance architecture (PR #199).
+## Manual deploy
 
-## How auth works
-
-No long-lived credential. The deploy workflow's own ephemeral `GITHUB_TOKEN`
-(scope: `packages: read`) is relayed to the EC2 box for one deploy and then
-deleted.
-
-```
-.github/workflows/deploy.yml
-  ├─ Stage step:    aws ssm put-parameter --name /leonard/prod/GHCR_TOKEN
-  │                                       --value $GITHUB_TOKEN
-  │                                       --type SecureString --overwrite
-  ├─ Deploy step:   aws ssm send-command  (runs scripts/deploy-prod.sh on EC2)
-  │                   └─ deploy-prod.sh:  docker login ghcr.io < /run/leonard/env
-  └─ Cleanup step:  aws ssm delete-parameter (always-run, even on deploy fail)
+```bash
+ssh leonard@98.89.219.217 -i ~/.ssh/leonard.pem
+sudo ./scripts/deploy-prod.sh
 ```
 
-The token sits in SSM only for the duration of the deploy (~3-5 min). It would
-expire on its own at workflow end (~1 h) regardless.
-
-## IAM requirements
-
-The OIDC role `arn:aws:iam::439475769170:role/leonard-github-deploy` (assumed
-by the deploy workflow) needs:
-
-```json
-{
-  "Effect": "Allow",
-  "Action": [
-    "ssm:PutParameter",
-    "ssm:DeleteParameter"
-  ],
-  "Resource": "arn:aws:ssm:us-east-1:439475769170:parameter/leonard/prod/GHCR_TOKEN"
-},
-{
-  "Effect": "Allow",
-  "Action": ["kms:Encrypt"],
-  "Resource": "arn:aws:kms:us-east-1:439475769170:alias/aws/ssm"
-}
-```
-
-The EC2 instance role needs `ssm:GetParameter*` on `/leonard/prod/*` (already
-in place for `POSTGRES_PASSWORD`). No additional IAM change.
-
-## Failure modes
-
-**`Stage GHCR pull token in SSM` step fails with AccessDenied** — IAM doesn't
-yet allow `ssm:PutParameter` on the token path. Apply the policy snippet
-above and re-run the workflow.
-
-**Deploy step fails with `docker login ghcr.io failed`** — the workflow may
-not have `packages: read` permission. Check `.github/workflows/deploy.yml`
-permissions block. The token is also `packages: read`-scoped — if a future
-change reduces the workflow's permission, GHCR returns 401.
-
-**Manual deploy via `sudo ./scripts/deploy-prod.sh` on the EC2 box** —
-deploy-prod.sh prints a warning and skips `docker login`. If
-`docker-compose.prebaked.yml` is in the compose stack, the next pull will
-401. To run a manual deploy: either push to main (auto-redeploy via workflow
-with auth), or temporarily drop `-f docker-compose.prebaked.yml` from the
-COMPOSE array in `deploy-prod.sh`.
+No GHCR login step is needed. `docker compose pull` will pull from
+`ghcr.io/bellese/mct2-hapi-{cdr,measure}` without credentials.
 
 ## Verification
 
-After deploy:
+After deploy, confirm images are present:
 
-```
-ssh leonard@98.89.219.217 -i ~/.ssh/leonard.pem  # via session manager
+```bash
 sudo docker images | grep ghcr.io/bellese
 # Should list mct2-hapi-cdr:latest and mct2-hapi-measure:latest
 ```
 
-In CloudWatch logs (group `/leonard/deploy`), the deploy run should contain:
+## History
 
-```
-[+] Logging in to GHCR for pre-baked HAPI image pulls...
-[+] GHCR login OK
-```
-
-## Why not a long-lived PAT
-
-Considered. Rejected because:
-- A PAT is a long-lived credential needing rotation, monitoring, and SSM hygiene.
-- The workflow `GITHUB_TOKEN` is auto-rotated, scoped per-run, and free.
-- Bake workflow already pushes images using the same `GITHUB_TOKEN` pattern;
-  symmetry between push and pull auth is operationally clean.
+Previously, the deploy workflow used an ephemeral `GITHUB_TOKEN` (scope
+`packages: read`) staged into SSM SecureString `/leonard/prod/GHCR_TOKEN` for
+the duration of each deploy. That mechanism was removed in the PR that resolved
+issue #200 when the packages were made public. Images contain only public
+artifacts (HAPI binary, connectathon bundles, IGs) — no secrets.
 
 ## Related
 
-- PR that introduced the auth mechanism: #168
-- PR that introduced the prebaked dependency: #167 (Phase 1, reverted in #180)
-- PR that wired prebaked images into CI/prod under current architecture: #199
+- Issue #200 — the decision to make packages public
 - Bake workflow: `.github/workflows/bake-hapi-image.yml`

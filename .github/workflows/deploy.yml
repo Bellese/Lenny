@@ -12,7 +12,6 @@ concurrency:
 permissions:
   id-token: write
   contents: read
-  packages: read  # required for GHCR pull on EC2 (token relayed via SSM SecureString)
 
 jobs:
   test-and-deploy:
@@ -36,23 +35,6 @@ jobs:
         with:
           role-to-assume: arn:aws:iam::439475769170:role/leonard-github-deploy
           aws-region: us-east-1
-
-      - name: Stage GHCR pull token in SSM
-        # Writes the workflow's GITHUB_TOKEN to SSM as a SecureString so the
-        # EC2 deploy script can `docker login ghcr.io` to pull pre-baked HAPI
-        # images. The token is short-lived (workflow run TTL, ~1h) and removed
-        # by the cleanup step below regardless of deploy outcome.
-        if: success()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          aws ssm put-parameter \
-            --name "/leonard/prod/GHCR_TOKEN" \
-            --value "$GH_TOKEN" \
-            --type "SecureString" \
-            --overwrite \
-            --region us-east-1 >/dev/null
-          echo "Staged ephemeral GHCR pull token in /leonard/prod/GHCR_TOKEN"
 
       - name: Deploy via SSM Run Command
         if: success()
@@ -98,17 +80,6 @@ jobs:
             echo "Deploy timed out waiting for SSM command $COMMAND_ID (final status: $STATUS)" >&2
             exit 1
           fi
-
-      - name: Remove staged GHCR pull token from SSM
-        # Always-run cleanup. Token is unusable after workflow ends anyway
-        # (~1h TTL), but we remove it so a static read of SSM never reveals
-        # an active credential between deploys.
-        if: always()
-        run: |
-          aws ssm delete-parameter \
-            --name "/leonard/prod/GHCR_TOKEN" \
-            --region us-east-1 2>/dev/null || true
-          echo "Cleared /leonard/prod/GHCR_TOKEN"
 
       - name: Health check
         if: success()
