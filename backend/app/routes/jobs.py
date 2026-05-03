@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, field_validator
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import noload
 
 from app.config import settings
 from app.db import get_session
@@ -338,6 +339,65 @@ async def delete_job(
     await session.commit()
     logger.info("Job deleted", extra={"job_id": job_id})
     return Response(status_code=204)
+
+
+@router.get("/{job_id}/measure-report")
+async def get_job_measure_report(
+    job_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Return a FHIR Bundle (collection) of individual MeasureReports for a job.
+
+    Includes all patients whose populations["error"] is falsy — i.e. successful
+    evaluations AND gather_partial patients (those have real MeasureReports from the
+    engine; only their CDR push was partial). Excludes gather-failure and
+    evaluate-failure patients whose measure_report is a synthetic OperationOutcome.
+
+    Returns 404 if the job does not exist or has no results yet (consistent with
+    the /results endpoint). Direct API calls on an in-progress job receive a
+    partial bundle — intentional; no status gate is applied.
+
+    Memory: up to ~500 patients x ~20 KB/report = ~10 MB per query (single load,
+    no double-load due to noload() below). Revisit if cohort sizes grow to thousands.
+    """
+    job = await session.get(Job, job_id, options=[noload(Job.results), noload(Job.batches)])
+    if not job:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "not-found", "diagnostics": f"Job {job_id} not found"}],
+            },
+        )
+
+    result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
+    results = result.scalars().all()
+
+    if not results:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {"severity": "error", "code": "not-found", "diagnostics": f"No results found for job {job_id}"}
+                ],
+            },
+        )
+
+    # populations is non-nullable (models/job.py) — no `or {}` needed.
+    # Filter by populations["error"] (not measure_report resourceType) so that
+    # gather_partial patients with real engine-produced reports are included.
+    entries = [
+        {"resource": mr.measure_report} for mr in results if mr.measure_report and not mr.populations.get("error")
+    ]
+
+    return {
+        "resourceType": "Bundle",
+        "type": "collection",
+        "total": len(entries),
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "entry": entries,
+    }
 
 
 @router.get("/{job_id}/comparison")

@@ -147,6 +147,11 @@ export function getResult(id) {
   return request(`/results/${id}`);
 }
 
+export function getMeasureReportBundle(jobId) {
+  // 60-second timeout: bundle can be several MB for large cohorts
+  return request(`/jobs/${jobId}/measure-report`, { _timeout: 60000 });
+}
+
 export function getEvaluatedResources(resultId) {
   return request(`/results/${resultId}/evaluated-resources`);
 }
