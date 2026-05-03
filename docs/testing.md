@@ -99,11 +99,13 @@ Integration tests are marked `@pytest.mark.integration` and live in `backend/tes
 | `test_golden_measures.py` | End-to-end `$evaluate-measure` against golden bundles; part of the nightly source-of-truth job |
 | `test_connectathon_measures.py` | Parametrized per-test-case run across all connectathon bundles; skipped on the PR gate and included in the nightly source-of-truth job |
 | `test_full_workflow.py` | Full-stack pipeline covering job orchestration → measure eval → result storage; skipped on the PR gate and run in its own clean nightly job |
+| `test_full_jobs_pipeline.py` | Runs all connectathon measures through Lenny's Jobs API and asserts per-patient numerator/denominator outputs match ground-truth expected populations from the connectathon bundles; closes the gap between `test_connectathon_measures.py` (bypasses Lenny) and `test_full_workflow.py` (no count assertions); requires prebaked HAPI images; skipped on the PR gate and run in its own nightly `jobs-pipeline-validation` job |
 
-The nightly `connectathon-measures.yml` workflow runs once per night and on manual dispatch. It uses three independent clean jobs (PR #203):
+The nightly `connectathon-measures.yml` workflow runs once per night and on manual dispatch. It uses four independent clean jobs (PR #203 + jobs-pipeline-validation):
 - **Bundle Loader Test (vanilla HAPI)** — exercises the runtime IG load + bundle replay path against `hapiproject/hapi:v8.8.0-1`.
 - **Connectathon Eval (pre-baked HAPI)** — runs the connectathon source-of-truth suite (`test_golden_measures.py` + `test_connectathon_measures.py`) against the prebaked GHCR images.
 - **Full Workflow (clean nightly run)** — runs `test_full_workflow.py` by itself so it does not inherit the connectathon-loaded CDR state.
+- **Jobs Pipeline Validation (pre-baked HAPI)** — runs `test_full_jobs_pipeline.py` against the prebaked GHCR images; validates Lenny's orchestration layer end-to-end by asserting per-patient numerator/denominator outputs against ground-truth connectathon populations.
 
 **Manually triggering the nightly workflow** (Actions → Connectathon Measures → Run workflow) is appropriate before merging measure-engine, HAPI-bump, or bundle-format changes, in addition to the automatic nightly run.
 
@@ -241,6 +243,7 @@ All 5 jobs must pass before a PR can merge.
 The nightly `connectathon-measures.yml` workflow adds a once-nightly source-of-truth run with clean runner isolation:
 - `source-of-truth` runs `test_golden_measures.py` and `test_connectathon_measures.py`.
 - `full-workflow` runs `test_full_workflow.py` in a separate clean runner.
+- `jobs-pipeline-validation` runs `test_full_jobs_pipeline.py` against prebaked HAPI, validating per-patient population correctness end-to-end through the Jobs API.
 
 Trigger it manually from the Actions tab (`Run workflow`) before merging any change that touches the measure evaluation pipeline, FHIR data flow, or job orchestration.
 
