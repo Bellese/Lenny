@@ -6,7 +6,7 @@ import JobsPage from './pages/JobsPage';
 import ResultsPage from './pages/ResultsPage';
 import SettingsPage from './pages/SettingsPage';
 import ValidationPage from './pages/ValidationPage';
-import { getHealth } from './api/client';
+import { getHealth, getAdminSettings } from './api/client';
 import {
   MeasuresIcon, JobsIcon, ResultsIcon, ValidateIcon,
   SettingsIcon, SearchIcon, XIcon, SunIcon, MoonIcon,
@@ -14,11 +14,11 @@ import {
 import HealthIndicator from './components/HealthIndicator';
 import SearchContext from './contexts/SearchContext';
 
-const NAV_ITEMS = [
-  { path: '/measures',   label: 'Measures',   Icon: MeasuresIcon,  kbd: 'M' },
-  { path: '/jobs',       label: 'Jobs',        Icon: JobsIcon,      kbd: 'J' },
-  { path: '/results',    label: 'Results',     Icon: ResultsIcon,   kbd: 'E' },
-  { path: '/validation', label: 'Validation',  Icon: ValidateIcon,  kbd: 'V' },
+const ALL_NAV_ITEMS = [
+  { path: '/measures',   label: 'Measures',   Icon: MeasuresIcon,  kbd: 'M', feature: null },
+  { path: '/jobs',       label: 'Jobs',        Icon: JobsIcon,      kbd: 'J', feature: null },
+  { path: '/results',    label: 'Results',     Icon: ResultsIcon,   kbd: 'E', feature: null },
+  { path: '/validation', label: 'Validation',  Icon: ValidateIcon,  kbd: 'V', feature: 'validation' },
 ];
 
 const PAGE_TITLE = {
@@ -54,6 +54,7 @@ export default function App() {
   const [cdrErrorDetails, setCdrErrorDetails] = useState(null);
   const [theme, setTheme] = useState(() => localStorage.getItem('mct2-theme') || 'light');
   const [query, setQuery] = useState('');
+  const [features, setFeatures] = useState({ validation: true });
   const searchRef = useRef(null);
 
   // Apply dark class to html element
@@ -88,6 +89,16 @@ export default function App() {
     return () => clearInterval(interval);
   }, [checkHealth]);
 
+  // Load feature flags from admin settings
+  useEffect(() => {
+    getAdminSettings()
+      .then(s => setFeatures({ validation: s.validation_enabled ?? true }))
+      .catch(() => {});
+    const h = (e) => setFeatures({ validation: e.detail.validation_enabled ?? true });
+    window.addEventListener('admin-settings-changed', h);
+    return () => window.removeEventListener('admin-settings-changed', h);
+  }, []);
+
   // Keyboard shortcuts
   useEffect(() => {
     const h = (e) => {
@@ -112,13 +123,14 @@ export default function App() {
         if (e.key === 'm' || e.key === 'M') navigate('/measures');
         else if (e.key === 'j' || e.key === 'J') navigate('/jobs');
         else if (e.key === 'e' || e.key === 'E') navigate('/results');
-        else if (e.key === 'v' || e.key === 'V') navigate('/validation');
+        else if ((e.key === 'v' || e.key === 'V') && features.validation) navigate('/validation');
       }
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [navigate]);
+  }, [navigate, features]);
 
+  const navItems = ALL_NAV_ITEMS.filter(({ feature }) => !feature || features[feature]);
   const basePath = '/' + location.pathname.split('/')[1];
   const pageTitle = PAGE_TITLE[basePath] || 'Lenny';
   const searchPlaceholder = SEARCH_PLACEHOLDER[basePath] || 'Search…';
@@ -192,7 +204,7 @@ export default function App() {
             <span>Close</span>
           </button>
           <div className={styles.navGroupLabel}>Workspace</div>
-          {NAV_ITEMS.map(({ path, label, Icon, kbd }) => (
+          {navItems.map(({ path, label, Icon, kbd }) => (
             <NavLink
               key={path}
               to={path}

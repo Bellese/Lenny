@@ -311,6 +311,94 @@
   background: var(--bg-sunken);
 }
 
+/* Admin tab */
+.adminStack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.adminRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 16px 20px;
+}
+
+.adminRowInfo {
+  flex: 1;
+  min-width: 0;
+}
+
+.adminRowLabel {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  margin-bottom: 3px;
+}
+
+.adminRowDesc {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
+}
+
+.btnDanger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--err-wash);
+  color: var(--err);
+  border: 1px solid color-mix(in oklch, var(--err) 30%, transparent);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, opacity 120ms ease;
+  flex-shrink: 0;
+}
+.btnDanger:hover:not(:disabled) { background: color-mix(in oklch, var(--err) 18%, transparent); }
+.btnDanger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Toggle switch */
+.toggle {
+  position: relative;
+  width: 36px;
+  height: 20px;
+  border-radius: 999px;
+  background: var(--line);
+  border: none;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 150ms ease;
+  padding: 0;
+}
+.toggle::after {
+  content: '';
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+  transition: transform 150ms ease;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+.toggleOn {
+  background: var(--accent);
+}
+.toggleOn::after {
+  transform: translateX(16px);
+}
+.toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 @media (max-width: 820px) {
   .page {
     max-width: none;

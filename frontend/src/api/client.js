@@ -189,6 +189,25 @@ export function testConnection(data) {
   });
 }
 
+// Admin
+export function getAdminSettings() {
+  return request('/settings/admin');
+}
+
+export function updateAdminSettings(data) {
+  return request('/settings/admin', {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function wipeMeasureEngine() {
+  return request('/settings/admin/wipe-measure-engine', {
+    method: 'POST',
+    _timeout: 120000,
+  });
+}
+
 // Validation
 export function uploadTestBundle(file) {
   const formData = new FormData();

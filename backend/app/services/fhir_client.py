@@ -910,6 +910,28 @@ async def wipe_patient_data(*, strict: bool = True) -> None:
                     )
 
 
+async def wipe_measure_definitions() -> None:
+    """Delete all measure-definition resources from the measure engine.
+
+    Removes Library, Measure, ValueSet, CodeSystem, and ConceptMap.
+    Does NOT touch clinical resources (Patient, Encounter, etc.).
+    Called from the admin UI to recover from JVM/H2 state corruption (issue #238).
+    After this call the bundle_loader must re-seed the engine before the next job.
+    """
+    definition_types = ["Library", "Measure", "ValueSet", "CodeSystem", "ConceptMap"]
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        for rt in definition_types:
+            try:
+                delete_url = f"{settings.MEASURE_ENGINE_URL}/{rt}?_lastUpdated=gt1900-01-01"
+                resp = await client.delete(delete_url)
+                if resp.status_code < 300:
+                    logger.info("Wiped measure definition type", extra={"resourceType": rt})
+                else:
+                    await _delete_all_of_type(client, rt)
+            except httpx.HTTPError:
+                logger.warning("Failed to wipe measure definition type", extra={"resourceType": rt})
+
+
 async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str) -> None:
     """Delete all resources of a given type one by one."""
     url: Optional[str] = f"{settings.MEASURE_ENGINE_URL}/{resource_type}?_count=100"

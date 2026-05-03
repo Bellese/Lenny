@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.14.0] - 2026-05-03
+
+### Added
+- **Admin settings tab in Settings** — A new "Admin" section in Settings exposes two operator controls: a "Wipe engine" button that deletes all measure-definition resources (Library, Measure, ValueSet, CodeSystem, ConceptMap) from the HAPI measure engine to recover from CQL compilation failures (issue #238 follow-up), and a Validation toggle that enables or disables the bundle validation workflow.
+- **Validation feature flag** — Toggling Validation in Settings → Admin hides or shows the Validation nav item in real time without a page reload. The setting persists across restarts via the database.
+- **Wipe confirmation dialog** — The "Wipe engine" action requires a confirmation step to prevent accidental destruction; the engine re-seeds automatically on the next job run.
+
 ## [0.0.13.1] - 2026-05-03
 
 ### Fixed
