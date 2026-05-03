@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.13.0] - 2026-05-03
+
+### Changed
+- **Measure names now show as `[CMS125] Name` throughout the app** — Jobs, Results, Measures, and Validation pages all display the CMS ID in brackets alongside the human-readable name, matching Connectathon community vocabulary and reducing the need to memorize CMS IDs separately.
+- **Calculate button now opens the New Calculation modal pre-filled** — Clicking Calculate on any measure in the Measures library navigates directly to the Jobs page with that measure already selected in the modal, preserving context instead of dropping you on a blank Jobs page.
+- **System Status labels now say "Local"** — All four indicators on the Settings → System Status tab (Backend, Measure Engine, CDR, Database) are prefixed with "Local" to reinforce the bundled-stack context and set up the visual contrast for future remote connections.
+
+### Added
+- **"Job run" label on the Results page dropdown** — The job-run selector now has a visible label, removing the unlabeled control that confused testers.
+
+### Removed
+- **Placeholder trend line removed from Results page** — The blue sparkline on the Performance Rate card displayed hardcoded data identical for every measure, job, and period. Removed to avoid misleading users until real historical data is available.
+
 ## [0.0.12.0] - 2026-05-01
 
 ### Added

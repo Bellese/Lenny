@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Link } from 'react-router-dom';
 import styles from './MeasuresPage.module.css';
 import { deleteMeasure, getMeasures, uploadMeasure } from '../api/client';
 import { useToast } from '../components/Toast';
@@ -6,7 +7,7 @@ import KebabMenu from '../components/KebabMenu';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { TrashIcon, PlusIcon, CheckIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
-import { extractCmsId, cleanMeasureName } from '../utils/measureFormat';
+import { extractCmsId, cleanMeasureName, measureDisplayLabel } from '../utils/measureFormat';
 
 function getMeasureDisplayName(measure) {
   let name;
@@ -91,12 +92,12 @@ export default function MeasuresPage() {
 
   const handleDeleteConfirmed = async () => {
     if (!confirm?.id) return;
-    const measureName = getMeasureDisplayName(confirm);
+    const displayLabel = measureDisplayLabel(confirm.id, getMeasureDisplayName(confirm));
     const id = confirm.id;
     setConfirm(null);
     try {
       await deleteMeasure(id);
-      toast.success(`Deleted ${measureName}`);
+      toast.success(`Deleted ${displayLabel}`);
       await loadMeasures();
     } catch (err) {
       toast.error(`Delete failed: ${err.message || 'Failed to delete measure'}`);
@@ -193,7 +194,7 @@ export default function MeasuresPage() {
                     <td data-label="Status"><StatusBadge status={getMeasureStatus(measure)} /></td>
                     <td data-label="Actions">
                       <div className={styles.actionGroup}>
-                        <a href="/jobs" className={styles.calcBtn}>Calculate</a>
+                        <Link to={`/jobs?newCalc=${encodeURIComponent(measure.id || '')}`} className={styles.calcBtn}>Calculate</Link>
                         <KebabMenu items={[
                           { divider: true },
                           {
@@ -217,7 +218,7 @@ export default function MeasuresPage() {
       <ConfirmDialog
         open={!!confirm}
         title={`Delete ${confirm?.id}?`}
-        body={<>This removes <strong>{confirm ? getMeasureDisplayName(confirm) : ''}</strong> from Lenny. Existing job results are preserved, but you won't be able to re-run without re-uploading the bundle.</>}
+        body={<>This removes <strong>{confirm ? measureDisplayLabel(confirm.id, getMeasureDisplayName(confirm)) : ''}</strong> from Lenny. Existing job results are preserved, but you won't be able to re-run without re-uploading the bundle.</>}
         confirmLabel="Delete permanently"
         tone="destructive"
         onCancel={() => setConfirm(null)}

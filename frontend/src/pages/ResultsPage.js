@@ -5,13 +5,10 @@ import { getJobs, getResults, getResult, createJob } from '../api/client';
 import { useToast } from '../components/Toast';
 import PatientDetail from '../components/PatientDetail';
 import ComparisonView from '../components/ComparisonView';
-import Sparkline from '../components/Sparkline';
 import DistBar from '../components/DistBar';
 import { CheckIcon, XIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
-import { extractCmsId, cleanMeasureName, measureOptionLabel } from '../utils/measureFormat';
-
-const SPARK_FALLBACK = [61.2, 62.8, 63.1, 64.0, 64.7, 65.2, 65.9, 66.1, 66.4, 66.8, 67.1, 67.4];
+import { extractCmsId, cleanMeasureName, measureOptionLabel, measureDisplayLabel } from '../utils/measureFormat';
 
 function timeAgo(dateStr) {
   if (!dateStr) return null;
@@ -22,7 +19,7 @@ function timeAgo(dateStr) {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-function exportCsv(patients, measureName, period) {
+function exportCsv(patients, measureId, measureName, period) {
   const header = ['Patient ID', 'Name', 'Initial Population', 'Denominator', 'Numerator', 'Denom Exclusion'];
   const rows = patients.map(p => [
     p.patient_id || p.id || '',
@@ -37,7 +34,9 @@ function exportCsv(patients, measureName, period) {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `results-${measureName || 'measure'}-${period || 'period'}.csv`.replace(/\s+/g, '-');
+  const cmsId = extractCmsId(measureId);
+  const fileLabel = cmsId ? `${cmsId}-${cleanMeasureName(measureName || '')}` : (measureName || 'measure');
+  a.download = `results-${fileLabel}-${period || 'period'}.csv`.replace(/\s+/g, '-');
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -198,7 +197,7 @@ export default function ResultsPage() {
     <div className={styles.page}>
       <div className={styles.pageHeader}>
         <div>
-          {measureName && <div className={styles.eyebrow}>{extractCmsId(measureName) || cleanMeasureName(measureName)}</div>}
+          {measureName && <div className={styles.eyebrow}>{measureDisplayLabel(selectedJob?.measure_id, measureName)}</div>}
           <h1 className={styles.title}>Results</h1>
           {period && <div className={styles.sub}><span className={styles.mono}>{period}</span></div>}
           {completedAgo && (
@@ -209,20 +208,23 @@ export default function ResultsPage() {
         </div>
         <div className={styles.headerActions}>
           {jobs.length > 0 && (
-            <select className={styles.jobSelect} value={selectedJobId} onChange={handleJobChange} aria-label="Select job">
-              {jobs.map(job => (
-                <option key={job.id} value={job.id}>
-                  {measureOptionLabel(job.measure_id, job.measure_name)}
-                  {job.period_start ? ` (${job.period_start})` : ''}
-                </option>
-              ))}
-            </select>
+            <div className={styles.jobSelectGroup}>
+              <label htmlFor="job-run-select" className={styles.jobSelectLabel}>Job run</label>
+              <select id="job-run-select" className={styles.jobSelect} value={selectedJobId} onChange={handleJobChange}>
+                {jobs.map(job => (
+                  <option key={job.id} value={job.id}>
+                    {measureOptionLabel(job.measure_id, job.measure_name)}
+                    {job.period_start ? ` (${job.period_start})` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
           )}
           {selectedJobId && results && (
             <>
               <button
                 className={styles.btnGhost}
-                onClick={() => exportCsv(allPatients, measureName, period)}
+                onClick={() => exportCsv(allPatients, selectedJob?.measure_id, measureName, period)}
                 disabled={allPatients.length === 0}
               >
                 Export CSV
@@ -275,9 +277,6 @@ export default function ResultsPage() {
                 <div>
                   <div className={styles.cardEyebrow}>Performance rate</div>
                   <div className={styles.cardSub}>Numerator ÷ (Denominator − Exclusions)</div>
-                </div>
-                <div className={styles.sparklineWrap}>
-                  <Sparkline values={SPARK_FALLBACK} w={140} h={40} stroke="var(--accent)" />
                 </div>
               </div>
               <div className={styles.rateRow}>

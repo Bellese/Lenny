@@ -136,20 +136,20 @@ export default function SettingsPage() {
   ];
 
   const statusServices = [
-    { label: 'Backend', ok: !!health, errorDetails: null },
+    { label: 'Local Backend', ok: !!health, errorDetails: null },
     {
-      label: 'Measure Engine',
+      label: 'Local Measure Engine',
       ok: health?.measure_engine?.status === 'healthy' || health?.measure_engine?.status === 'connected',
       errorDetails: health?.measure_engine?.error_details || null,
     },
     {
-      label: 'CDR',
+      label: 'Local CDR',
       ok: health?.cdr?.status === 'healthy' || health?.cdr?.status === 'connected',
       detail: health?.cdr?.name || null,
       errorDetails: health?.cdr?.error_details || null,
     },
     {
-      label: 'Database',
+      label: 'Local Database',
       ok: health?.database?.status === 'healthy' || health?.database?.status === 'connected',
       errorDetails: health?.database?.error_details || null,
     },
