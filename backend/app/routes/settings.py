@@ -12,9 +12,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
+from app.models.app_setting import AppSetting
 from app.models.config import AuthType, CDRConfig
 from app.models.job import Job, JobStatus
-from app.services.fhir_client import _validate_ssrf_url, verify_fhir_connection
+from app.services.fhir_client import _validate_ssrf_url, verify_fhir_connection, wipe_measure_definitions
 from app.services.fhir_errors import (
     HINT_BY_STATUS,
     FhirOperationError,
@@ -438,3 +439,75 @@ async def test_cdr_connection(body: TestConnectionRequest) -> dict:
                 "issue": [{"severity": "error", "code": "exception", "diagnostics": sanitize_error(exc)}],
             },
         )
+
+
+# ---------------------------------------------------------------------------
+# Admin endpoints
+# ---------------------------------------------------------------------------
+
+_ADMIN_DEFAULTS: dict[str, str] = {
+    "validation_enabled": "true",
+}
+
+
+async def _get_setting(session: AsyncSession, key: str) -> str:
+    row = await session.get(AppSetting, key)
+    return row.value if row is not None else _ADMIN_DEFAULTS[key]
+
+
+@router.get("/admin")
+async def get_admin_settings(session: AsyncSession = Depends(get_session)) -> dict:
+    """Return current admin settings."""
+    return {
+        "validation_enabled": (await _get_setting(session, "validation_enabled")) == "true",
+    }
+
+
+class AdminSettingsUpdate(BaseModel):
+    validation_enabled: bool | None = None
+
+
+@router.put("/admin")
+async def update_admin_settings(
+    body: AdminSettingsUpdate,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Persist admin settings."""
+    updates: dict[str, str] = {}
+    if body.validation_enabled is not None:
+        updates["validation_enabled"] = "true" if body.validation_enabled else "false"
+
+    for key, value in updates.items():
+        row = await session.get(AppSetting, key)
+        if row is None:
+            session.add(AppSetting(key=key, value=value))
+        else:
+            row.value = value
+    await session.commit()
+
+    return {
+        "validation_enabled": (await _get_setting(session, "validation_enabled")) == "true",
+    }
+
+
+@router.post("/admin/wipe-measure-engine", status_code=200)
+async def wipe_measure_engine() -> dict:
+    """Delete all measure-definition resources (Library, Measure, ValueSet, CodeSystem, ConceptMap)
+    from the HAPI measure engine.
+
+    Recovers from JVM/H2 state corruption that causes CQL compilation failures (issue #238).
+    The engine is automatically re-seeded on the next job run via bundle_loader.
+    """
+    try:
+        await wipe_measure_definitions()
+    except Exception as exc:
+        logger.error("Measure engine wipe failed", extra={"error": sanitize_error(exc)})
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "exception", "diagnostics": sanitize_error(exc)}],
+            },
+        )
+    logger.info("Measure engine definitions wiped via admin endpoint")
+    return {"status": "ok", "message": "Measure engine definitions wiped. Engine will re-seed on next job run."}
