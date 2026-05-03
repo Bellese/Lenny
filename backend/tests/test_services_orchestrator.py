@@ -475,7 +475,7 @@ async def test_get_cdr_auth_headers_reads_live_cdr_config(test_session, session_
 
 
 async def test_orchestrator_fails_clearly_when_cdr_deleted(test_session, session_factory):
-    """_get_cdr_auth_headers raises RuntimeError when the CDR config no longer exists."""
+    """_get_cdr_auth_headers raises RuntimeError when CDR config is gone but auth was needed."""
     job = Job(
         measure_id="m-orphan",
         period_start="2024-01-01",
@@ -483,6 +483,7 @@ async def test_orchestrator_fails_clearly_when_cdr_deleted(test_session, session
         cdr_url="http://gone.example.com/fhir",
         status=JobStatus.running,
         cdr_id=None,  # CDR was deleted (FK set NULL by ON DELETE SET NULL)
+        cdr_auth_type="basic",  # auth was required — credentials are now unrecoverable
     )
     test_session.add(job)
     await test_session.commit()
@@ -491,6 +492,48 @@ async def test_orchestrator_fails_clearly_when_cdr_deleted(test_session, session
     with patch("app.services.orchestrator.async_session", session_factory):
         with pytest.raises(RuntimeError, match="has no cdr_id"):
             await _get_cdr_auth_headers(job.id)
+
+
+async def test_orchestrator_returns_empty_headers_when_no_auth(test_session, session_factory):
+    """_get_cdr_auth_headers returns {} when cdr_id=None and no auth type is set."""
+    job = Job(
+        measure_id="m-noauth",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://direct.example.com/fhir",
+        status=JobStatus.running,
+        cdr_id=None,  # created without a CDR config (direct URL, unauthenticated)
+        cdr_auth_type=None,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    with patch("app.services.orchestrator.async_session", session_factory):
+        headers = await _get_cdr_auth_headers(job.id)
+
+    assert headers == {}
+
+
+async def test_orchestrator_returns_empty_headers_when_auth_type_is_none_string(test_session, session_factory):
+    """_get_cdr_auth_headers returns {} when cdr_id=None and cdr_auth_type='none'."""
+    job = Job(
+        measure_id="m-noauth-str",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://direct2.example.com/fhir",
+        status=JobStatus.running,
+        cdr_id=None,
+        cdr_auth_type="none",  # explicit string "none" from AuthType.none CDR config
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    with patch("app.services.orchestrator.async_session", session_factory):
+        headers = await _get_cdr_auth_headers(job.id)
+
+    assert headers == {}
 
 
 async def test_process_batch_uses_everything_strategy(test_session, session_factory, monkeypatch):
