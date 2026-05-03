@@ -1,4 +1,4 @@
-import { extractCmsId, cleanMeasureName, measureOptionLabel, findMatchingGroup } from './measureFormat';
+import { extractCmsId, cleanMeasureName, measureOptionLabel, measureDisplayLabel, findMatchingGroup } from './measureFormat';
 
 describe('extractCmsId', () => {
   it('returns null for null input', () => expect(extractCmsId(null)).toBeNull());
@@ -24,8 +24,8 @@ describe('cleanMeasureName', () => {
 });
 
 describe('measureOptionLabel', () => {
-  it('formats both cmsId and name: CMS71 — Anticoagulation Therapy', () =>
-    expect(measureOptionLabel('CMS71v1', 'Anticoagulation Therapy FHIR')).toBe('CMS71 — Anticoagulation Therapy'));
+  it('formats both cmsId and name with brackets', () =>
+    expect(measureOptionLabel('CMS71v1', 'Anticoagulation Therapy FHIR')).toBe('[CMS71] Anticoagulation Therapy'));
   it('falls back to name only when id has no CMS pattern', () =>
     expect(measureOptionLabel('EXM-529', 'Some Measure')).toBe('Some Measure'));
   it('falls back to cmsId only when rawName is absent', () =>
@@ -34,6 +34,25 @@ describe('measureOptionLabel', () => {
     expect(measureOptionLabel('EXM-529', '')).toBe('EXM-529'));
   it('returns empty string when all args are empty', () =>
     expect(measureOptionLabel('', '')).toBe(''));
+});
+
+describe('measureDisplayLabel', () => {
+  it('formats cms+name: [CMS122] Breast Cancer Screening', () =>
+    expect(measureDisplayLabel('CMS122v1', 'Breast Cancer Screening FHIR')).toBe('[CMS122] Breast Cancer Screening'));
+  it('formats cms-only when name is absent', () =>
+    expect(measureDisplayLabel('CMS122v1', '')).toBe('[CMS122]'));
+  it('formats cms-only when name is null', () =>
+    expect(measureDisplayLabel('CMS122v1', null)).toBe('[CMS122]'));
+  it('falls back to cleaned name when no CMS ID in id or name', () =>
+    expect(measureDisplayLabel('EXM-529', 'Some Measure')).toBe('Some Measure'));
+  it('falls back gracefully when idOrUrl is a full URL (extractCmsId requires ^CMS prefix)', () =>
+    expect(measureDisplayLabel('http://example.com/CMS122v1', 'Breast Cancer Screening')).toBe('Breast Cancer Screening'));
+  it('extracts CMS ID from rawName when id has no pattern, returns [cms] name', () =>
+    expect(measureDisplayLabel('EXM-529', 'CMS71v1')).toBe('[CMS71] CMS71v1'));
+  it('returns empty string when both args are absent', () =>
+    expect(measureDisplayLabel('', '')).toBe(''));
+  it('returns raw idOrUrl as fallback when nothing else matches', () =>
+    expect(measureDisplayLabel('EXM-529', '')).toBe('EXM-529'));
 });
 
 describe('findMatchingGroup', () => {

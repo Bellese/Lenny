@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import styles from './JobsPage.module.css';
 import { getJobs, getMeasures, getGroups, createJob, cancelJob, deleteJob } from '../api/client';
 import { useToast } from '../components/Toast';
@@ -9,7 +9,7 @@ import PulseDot from '../components/PulseDot';
 import { TrashIcon, ViewIcon, SparkIcon, PlusIcon, XIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
 import PeriodPicker from '../components/PeriodPicker';
-import { extractCmsId, cleanMeasureName, measureOptionLabel, findMatchingGroup } from '../utils/measureFormat';
+import { extractCmsId, measureDisplayLabel, measureOptionLabel, findMatchingGroup } from '../utils/measureFormat';
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '--';
@@ -55,6 +55,7 @@ function isComplete(status) {
 
 export default function JobsPage() {
   const navigate = useNavigate();
+  const location = useLocation();
   const [jobs, setJobs] = useState([]);
   const [measures, setMeasures] = useState([]);
   const [groups, setGroups] = useState([]);
@@ -182,12 +183,22 @@ export default function JobsPage() {
   };
 
   const getMeasureName = (job) => {
-    const raw = job.measure_name || (() => {
+    const name = job.measure_name || (() => {
       const m = measures.find(m => m.id === job.measure_id);
-      return m ? (m.resource?.title || m.resource?.name || m.title || m.name || job.measure_id) : job.measure_id;
-    })() || '--';
-    return cleanMeasureName(raw);
+      return m ? (m.resource?.title || m.resource?.name || m.title || m.name || null) : null;
+    })();
+    return measureDisplayLabel(job.measure_id, name);
   };
+
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    const newCalcId = params.get('newCalc');
+    if (!newCalcId || !measures.length) return;
+    const exists = measures.some(m => m.id === newCalcId);
+    setFormData(prev => ({ ...prev, measure_id: exists ? newCalcId : (prev.measure_id || measures[0]?.id || '') }));
+    setShowModal(true);
+    navigate(location.pathname, { replace: true });
+  }, [location.search, measures, navigate, location.pathname]);
 
   const getProgress = (job) => {
     if (job.progress !== undefined && job.progress !== null) return job.progress;
@@ -405,7 +416,7 @@ export default function JobsPage() {
               <span className={styles.sheetTitle}>New calculation</span>
               <button className={styles.sheetClose} onClick={() => setShowModal(false)} aria-label="Close"><XIcon /></button>
             </div>
-            <form onSubmit={handleCreateJob} className={styles.sheetBody}>
+            <form id="new-calc-form" onSubmit={handleCreateJob} className={styles.sheetBody}>
               <div className={styles.field}>
                 <label className={styles.label} htmlFor="measure-select">Measure</label>
                 <select id="measure-select" className={styles.select} value={formData.measure_id}

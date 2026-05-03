@@ -4,6 +4,7 @@ import {
   deleteValidationRun, uploadTestBundle, getUploads,
   getExpectedResults, startValidationRun, getValidationRuns, getValidationRun,
 } from '../api/client';
+import { extractCmsId, cleanMeasureName } from '../utils/measureFormat';
 import { useToast } from '../components/Toast';
 import KebabMenu from '../components/KebabMenu';
 import ConfirmDialog from '../components/ConfirmDialog';
@@ -144,7 +145,9 @@ export default function ValidationPage() {
 
   const measureLabel = (measureUrl) => {
     if (!measureUrl) return '--';
-    return measureUrl.split('/').pop() || measureUrl;
+    const segment = measureUrl.split('/').pop() || measureUrl;
+    const cmsId = extractCmsId(segment);
+    return cmsId ? `[${cmsId}]` : cleanMeasureName(segment);
   };
 
   const runBundleName = (run, index) => (
@@ -338,7 +341,9 @@ function populationList(populations) {
 
 function measureNameFromUrl(url) {
   if (!url) return '--';
-  return url.split('/').pop() || url;
+  const segment = url.split('/').pop() || url;
+  const cmsId = extractCmsId(segment);
+  return cmsId ? `[${cmsId}]` : cleanMeasureName(segment);
 }
 
 function toCaseId(patient, measureIndex, patientIndex) {
