@@ -1,6 +1,6 @@
 """Validate Lenny's Jobs pipeline against ground-truth connectathon expected populations.
 
-Runs all 11 connectathon measures (CMS1017 skipped — HTTP 400 from HAPI) through
+Runs all 12 connectathon measures (CMS1017 skipped — HTTP 400 from HAPI) through
 Lenny's orchestration pipeline and asserts per-patient population outputs match the
 expected populations embedded in the connectathon bundle test-case MeasureReports.
 
@@ -34,12 +34,7 @@ _BUNDLE_DIR = _REPO_ROOT / "seed" / "connectathon-bundles"
 _MANIFEST_PATH = _BUNDLE_DIR / "manifest.json"
 
 # CMS1017 triggers HTTP 400 from HAPI on $evaluate-measure — skip entirely.
-# CMS529: manifest id "CMS529FHIRHybridHospitalWideReadmission" differs from the
-# bundle's Measure logical id "CMSFHIR529HybridHospitalWideReadmission" (different
-# prefix order). Lenny calls /Measure/CMS529FHIR.../$evaluate-measure which returns
-# 404 — all 53 patients fail. Fix requires manifest id correction + prebaked CDR
-# image rebuild (new Group id). Tracked in GitHub issue #253.
-_SKIP_MEASURES = {"CMS1017FHIRHHFI", "CMS529FHIRHybridHospitalWideReadmission"}
+_SKIP_MEASURES = {"CMS1017FHIRHHFI"}
 
 # Maps FHIR hyphenated population codes to Lenny's DB underscore keys.
 _FHIR_TO_DB_KEY: dict[str, str] = {
@@ -243,7 +238,10 @@ async def test_lenny_jobs_produce_correct_results(
             continue
 
         if is_xfail:
-            pytest.xfail(f"Known HAPI CQL divergence for {measure_id}/{pid}: mismatches={mismatches}")
+            # Accumulate xfails — do NOT call pytest.xfail() here because that raises
+            # XFailed immediately, aborting the whole test and hiding real failures that
+            # appear after this patient in the results list.
+            continue
 
         if strict:
             exp_str = ", ".join(f"{k}={v}" for k, v in sorted(exp.items()))

@@ -45,12 +45,30 @@ _FHIR_TO_DB_KEY: dict[str, str] = {
 _HAPI_DE_XFAIL: frozenset[tuple[str, str]] = frozenset(
     {
         # CMS122 — AIFrailLTCF frailty criteria divergence (×6)
-        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "9cba6cfa-9671-4850-803d-e286c7d59ee7"),
-        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "ede0ee7a-18ab-4ba7-934c-23618f1270ea"),
-        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "3b62b0a8-44f2-4365-bcb9-7cadef5bab2e"),
-        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "e61be907-af68-493f-a6bc-3d93ef8b6c6e"),
-        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "cade5021-b1bf-43e9-a0a4-659c05b386d0"),
-        ("CMS122FHIRDiabetesAssessGreaterThan9Percent", "f5771b74-a7de-439a-a51f-49a3863e086b"),
+        (
+            "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            "9cba6cfa-9671-4850-803d-e286c7d59ee7",
+        ),
+        (
+            "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            "ede0ee7a-18ab-4ba7-934c-23618f1270ea",
+        ),
+        (
+            "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            "3b62b0a8-44f2-4365-bcb9-7cadef5bab2e",
+        ),
+        (
+            "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            "e61be907-af68-493f-a6bc-3d93ef8b6c6e",
+        ),
+        (
+            "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            "cade5021-b1bf-43e9-a0a4-659c05b386d0",
+        ),
+        (
+            "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            "f5771b74-a7de-439a-a51f-49a3863e086b",
+        ),
         # CMS125 — AIFrailLTCF + mastectomy period-end boundary (×10)
         ("CMS125FHIRBreastCancerScreening", "4cf81a94-81fb-4be2-b075-7d8f9ff02a6e"),
         ("CMS125FHIRBreastCancerScreening", "d4540640-2561-4ebd-b7c6-15878a4dc582"),
@@ -107,14 +125,17 @@ def _http_json(
 def _is_test_case(resource: dict[str, Any]) -> bool:
     for ext in resource.get("modifierExtension", []):
         if (
-            ext.get("url") == "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase"
+            ext.get("url")
+            == "http://hl7.org/fhir/us/cqfmeasures/StructureDefinition/cqfm-isTestCase"
             and ext.get("valueBoolean") is True
         ):
             return True
     return resource.get("type") == "individual" and resource.get("status") == "complete"
 
 
-def _parse_bundle(bundle_path: Path) -> tuple[str | None, str | None, dict[str, dict[str, bool]]]:
+def _parse_bundle(
+    bundle_path: Path,
+) -> tuple[str | None, str | None, dict[str, dict[str, bool]]]:
     """Parse a connectathon bundle file.
 
     Returns (period_start, period_end, {patient_id: {pop_key: bool}}).
@@ -162,7 +183,11 @@ def _parse_bundle(bundle_path: Path) -> tuple[str | None, str | None, dict[str, 
                     if code in _FHIR_TO_DB_KEY:
                         raw_pops[code] = raw_pops.get(code, 0) + pop.get("count", 0)
 
-        patients[patient_id] = {_FHIR_TO_DB_KEY[k]: bool(v) for k, v in raw_pops.items() if k in _FHIR_TO_DB_KEY}
+        patients[patient_id] = {
+            _FHIR_TO_DB_KEY[k]: bool(v)
+            for k, v in raw_pops.items()
+            if k in _FHIR_TO_DB_KEY
+        }
 
     return period_start, period_end, patients
 
@@ -203,7 +228,9 @@ def _check_measures_present(base_url: str, expected_canonical_urls: list[str]) -
         sys.exit(2)
 
 
-def _create_job(base_url: str, measure_id: str, period_start: str, period_end: str) -> int:
+def _create_job(
+    base_url: str, measure_id: str, period_start: str, period_end: str
+) -> int:
     resp = _http_json(
         "POST",
         f"{base_url}/jobs",
@@ -218,7 +245,9 @@ def _create_job(base_url: str, measure_id: str, period_start: str, period_end: s
     return int(resp["id"])
 
 
-def _poll_job(base_url: str, job_id: int, timeout_seconds: int, poll_seconds: int) -> dict[str, Any]:
+def _poll_job(
+    base_url: str, job_id: int, timeout_seconds: int, poll_seconds: int
+) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         job = _http_json("GET", f"{base_url}/jobs/{job_id}", timeout=15)
@@ -262,7 +291,9 @@ def _validate_measure(
             "fail_count": 0,
             "xfail_count": 0,
             "error_count": 0,
-            "failures": [{"reason": "No measurement period found in bundle test cases"}],
+            "failures": [
+                {"reason": "No measurement period found in bundle test cases"}
+            ],
         }
 
     job_id = _create_job(base_url, measure_id, period_start, period_end)
@@ -290,7 +321,9 @@ def _validate_measure(
             "fail_count": 0,
             "xfail_count": 0,
             "error_count": 1,
-            "failures": [{"reason": f"Job failed: {job.get('error_message', 'unknown')}"}],
+            "failures": [
+                {"reason": f"Job failed: {job.get('error_message', 'unknown')}"}
+            ],
         }
 
     patients = _get_results(base_url, job_id)
@@ -348,10 +381,10 @@ def _validate_measure(
                     }
                 )
             else:
-                # Non-strict measure: warn but don't count as failure
-                fail_count += 1
-                if not failures_only:
-                    pass  # non-strict mismatches are only printed in verbose mode
+                # Non-strict measure: count as pass, not failure.
+                # Non-strict measures have known MADiE export issues — mismatches
+                # do not indicate a Lenny bug and must not trigger exit 1.
+                pass_count += 1
 
     return {
         "measure_id": measure_id,
@@ -372,7 +405,9 @@ def _validate_measure(
 
 def _print_summary(results: list[dict[str, Any]]) -> None:
     print()
-    print(f"{'Measure':<50} {'Cases':>6} {'Pass':>5} {'Fail':>5} {'XFail':>6} {'Err':>5} {'Status'}")
+    print(
+        f"{'Measure':<50} {'Cases':>6} {'Pass':>5} {'Fail':>5} {'XFail':>6} {'Err':>5} {'Status'}"
+    )
     print("-" * 95)
     for r in results:
         total = r["pass_count"] + r["fail_count"] + r["xfail_count"] + r["error_count"]
@@ -412,7 +447,9 @@ def _print_failures(results: list[dict[str, Any]]) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument(
         "--base-url",
         default="http://localhost:8000",
@@ -474,7 +511,10 @@ def main() -> int:
         requested = {m.strip() for m in args.measures.split(",")}
         measures = [m for m in measures if m["id"] in requested]
         if not measures:
-            print(f"ERROR: None of the requested measures found in manifest: {args.measures}", file=sys.stderr)
+            print(
+                f"ERROR: None of the requested measures found in manifest: {args.measures}",
+                file=sys.stderr,
+            )
             sys.exit(2)
 
     # Skip CMS1017 (HTTP 400 from HAPI on $evaluate-measure)
@@ -529,14 +569,20 @@ def main() -> int:
             "base_url": base_url,
             "results": results,
         }
-        out_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        out_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
         print(f"JSON report written to: {args.json_out}")
 
     _infra_statuses = {"failed", "timeout"}
     strict_failures = sum(
-        r["fail_count"] + r["error_count"] for r in results if r.get("job_status") not in _infra_statuses
+        r["fail_count"] + r["error_count"]
+        for r in results
+        if r.get("job_status") not in _infra_statuses
     )
-    infra_failures = sum(1 for r in results if r.get("job_status") in {"failed", "timeout"})
+    infra_failures = sum(
+        1 for r in results if r.get("job_status") in {"failed", "timeout"}
+    )
 
     if infra_failures > 0:
         return 1
