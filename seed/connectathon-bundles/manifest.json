@@ -142,7 +142,7 @@
       ]
     },
     {
-      "id": "CMS529FHIRHybridHospitalWideReadmission",
+      "id": "CMSFHIR529HybridHospitalWideReadmission",
       "canonical_url": "https://madie.cms.gov/Measure/CMSFHIR529HybridHospitalWideReadmission",
       "bundle_file": "CMS529FHIRHybridHospitalWideReadmission-bundle.json",
       "sha256": "2e12d2de0040927d9e7cfd7196ea203887ffbbfac93b61294cd7ce86b9752c0e",
