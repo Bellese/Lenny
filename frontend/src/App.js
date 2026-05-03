@@ -128,7 +128,7 @@ export default function App() {
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
-  }, [navigate]);
+  }, [navigate, features]);
 
   const navItems = ALL_NAV_ITEMS.filter(({ feature }) => !feature || features[feature]);
   const basePath = '/' + location.pathname.split('/')[1];
