@@ -10,14 +10,8 @@
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": [
-            "repo:Bellese/mct2:ref:refs/heads/main",
-            "repo:Bellese/lenny:ref:refs/heads/main"
-          ],
-          "token.actions.githubusercontent.com:job_workflow_ref": [
-            "Bellese/mct2/.github/workflows/deploy.yml@refs/heads/main",
-            "Bellese/lenny/.github/workflows/deploy.yml@refs/heads/main"
-          ]
+          "token.actions.githubusercontent.com:sub": "repo:Bellese/lenny:ref:refs/heads/main",
+          "token.actions.githubusercontent.com:job_workflow_ref": "Bellese/lenny/.github/workflows/deploy.yml@refs/heads/main"
         }
       }
     }
