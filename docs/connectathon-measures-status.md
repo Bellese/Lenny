@@ -54,7 +54,7 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 | CMS2FHIRPCSDepressionScreenAndFollowUp | 36 | 36¹ | 0 | 0 | IP=0 most patients | ⚠️ BROKEN — missing 10 VSAC ValueSets | Refreshed bundle from MADiE with ValueSets |
 | CMS71FHIRSTKAnticoagAFFlutter | 83 | 9 | 74 | 0 | 80/83 patients missing Claims | ⚠️ BROKEN — duplicate Claim IDs in export | Refreshed bundle from MADiE (per-patient Claims) |
 | CMS165FHIRControllingHighBloodPressure | 10 | 0 | 10 | 0 | IP=0 all patients | ⚠️ BROKEN — library version mismatch | Refreshed bundle from MADiE (AdultOutpatientEncounters v4.19.000) |
-| CMS1017FHIRHHFI | 65 | 0 | 0 | 65 | HTTP 400 — cannot evaluate | ⚠️ BROKEN — HAPI scoring-type incompatibility | Resolve issue #100 |
+| CMS1017FHIRHHFI | 65 | 0 | 0 | 65 | HTTP 400 — cannot evaluate | ⚠️ BROKEN — HAPI scoring-type incompatibility | Await HAPI DEQM update (issue #100 closed — HAPI upstream fix still needed) |
 | CMS1218FHIRHHRF | 55 | 55¹ | 0 | 0 | **IP=0 all 55 patients** | ⚠️ BROKEN — 0 ValueSets in bundle | Refreshed bundle from MADiE with ValueSets |
 
 ¹ **"Pass" in strict=false means the test didn't crash, not that populations are correct.** For CMS2 and CMS1218, population mismatches (actual IP=0 vs expected IP>0) are silently treated as non-fatal warnings. If you run either measure in Lenny you will see 0 results for every population. That is the correct expected behavior given the broken bundle — not a Lenny bug.
@@ -71,7 +71,7 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 - **CMS71** — MADiE v0.3.002 exports all 83 Claims with the same ID; `fix_duplicate_claim_ids()` partially recovers (only 3/83 patients get Claims). Needs refreshed MADiE bundle.
 - **CMS165** — v0.3.000 bundle missing library dependencies (`AdultOutpatientEncounters v4.16.000` vs. available `v4.19.000`). Needs refreshed MADiE bundle.
 - **CMS2** — missing 10 VSAC ValueSets (depression screening/medications); IP=0 for most patients. Non-strict mode treats all population mismatches as warns so the test shows 0 Fail.
-- **CMS1017** — HAPI v8.8.0 returns HTTP 400 for this measure's scoring type; all 65 tests skipped. See issue #100.
+- **CMS1017** — HAPI v8.8.0 returns HTTP 400 for this measure's scoring type; all 65 tests skipped. Issue #100 (tracking this) is closed — HAPI upstream fix for composite/ratio scoring type still needed.
 - **CMS1218** — 0 ValueSets in bundle. The required ValueSets (e.g. `2.16.840.1.113762.1.4.1248.208` "General And Neuraxial Anesthesia") are not present in any bundle in this repo. HAPI returns `MeasureReport.status=error` (Unknown ValueSet) for every patient, producing IP=0 across the board. Non-strict mode treats the resulting population mismatches as warns, so the nightly test shows 0 Fail — but 0 patients evaluate correctly.
 
 ---
@@ -89,7 +89,7 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 **CMS1017FHIRHHFI** (removed in PR #98, documented in issue #101):
 CMS1017's bundle contains 35 ValueSets including 10 whose canonical URLs overlap with CMS816/CMS529. Alphabetical bundle loading puts CMS1017 first, populating HAPI with VS version `20250419` (125 expansion codes). CMS816/CMS529 ship the correct version `20221118` (167 codes) at the same URLs — the dedup guard skips loading them since the URL is already present. CQL finds no matching encounters; IP=0 for all CMS816/CMS529 golden patients. Additionally, HAPI v8.8.0 returns HTTP 400 for all CMS1017 `$evaluate-measure` calls, so it contributes zero passing tests regardless.
 
-Fix needed: resolve issue #100 (HAPI scoring-type support), then verify no VS version conflicts with CMS816/CMS529 before re-adding.
+Fix needed: HAPI DEQM update for composite/ratio scoring type support (issue #100 closed — underlying HAPI fix still needed), then verify no VS version conflicts with CMS816/CMS529 before re-adding.
 
 **CMS1218FHIRHHRF** (removed in PR #98, documented in issue #101):
 CMS1218 bundle ships 0 ValueSets. Its IP criteria ("Elective Inpatient Encounter With OR Procedure Within 3 Days") requires ValueSets — including `2.16.840.1.113762.1.4.1248.208` "General And Neuraxial Anesthesia" — that are only present when all 12 connectathon bundles are loaded together. In golden test isolation, all patients evaluate to IP=0.
@@ -257,6 +257,6 @@ All EXM FHIR4 bundles (EXM104, EXM105, EXM108, EXM124, EXM125, EXM130, EXM165, E
 2. **CMS122/124/125/130** — obtain QI-Core 6 dQM v1.0.000 bundles from MADiE (issue #115)
 3. **CMS165** — get refreshed bundle from MADiE with updated library versions
 4. **CMS71** — get refreshed bundle from MADiE with correct per-patient Claim resources
-5. **CMS1017** — once issue #100 (HAPI HTTP 400) is resolved, re-add to golden tests after verifying VS conflicts are gone
+5. **CMS1017** — await HAPI DEQM upstream fix for composite/ratio scoring type (issue #100 closed; HTTP 400 still present in v8.8.0); re-add to golden tests after fix ships and VS conflicts are verified gone
 6. **CMS1218** — once MADiE ships bundle with required ValueSets, re-add to golden tests
 7. **Remove xfail marks** — when HAPI ships a fix for the DE divergence, run `--runxfail` to confirm xpassed, then remove from `_HAPI_DE_XFAIL`
