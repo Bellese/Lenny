@@ -1,6 +1,6 @@
 [Unit]
 Description=Leonard prod secrets bootstrap
-Documentation=https://github.com/Bellese/mct2
+Documentation=https://github.com/Bellese/lenny
 After=network-online.target
 Wants=network-online.target
 Before=docker.service

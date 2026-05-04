@@ -111,5 +111,5 @@ the HAPI async-indexing notes in `CLAUDE.md` for next steps.
 
 ## Related issues
 
-- [#187](https://github.com/Bellese/mct2/issues/187) — root cause investigation (H2 corruption, RESOLVED via this procedure)
-- [#188](https://github.com/Bellese/mct2/issues/188) — orchestrator wipe-races-push (separate issue; fixing #188 reduces the frequency of H2 drift)
+- [#187](https://github.com/Bellese/lenny/issues/187) — root cause investigation (H2 corruption, RESOLVED via this procedure)
+- [#188](https://github.com/Bellese/lenny/issues/188) — orchestrator wipe-races-push (separate issue; fixing #188 reduces the frequency of H2 drift)

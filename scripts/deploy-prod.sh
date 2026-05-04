@@ -165,7 +165,7 @@ LEONARD_DIR="$LEONARD_DIR" "$RECONCILE_SCRIPT"
 # ── step 7: pull pre-built images from registries ─────────────────────────────
 # Without an explicit pull, `up --build` uses any locally-cached image even when
 # `:latest` upstream has been republished. This bit us when the bake workflow
-# (which republishes ghcr.io/bellese/mct2-hapi-{cdr,measure}:latest) finished
+# (which republishes ghcr.io/bellese/lenny-hapi-{cdr,measure}:latest) finished
 # AFTER the deploy workflow started — deploy used the stale cached image and
 # never picked up the new bake. `docker compose pull` here is best-effort
 # (--ignore-pull-failures lets us continue if a registry hiccups; the next

@@ -52,7 +52,18 @@ export default function App() {
   const [cdrStatus, setCdrStatus] = useState('unknown');
   const [cdrName, setCdrName] = useState('');
   const [cdrErrorDetails, setCdrErrorDetails] = useState(null);
-  const [theme, setTheme] = useState(() => localStorage.getItem('mct2-theme') || 'light');
+  const [theme, setTheme] = useState(() => {
+    // One-time migration from the legacy mct2-theme key (renamed 2026-05).
+    const current = localStorage.getItem('lenny-theme');
+    if (current) return current;
+    const legacy = localStorage.getItem('mct2-theme');
+    if (legacy) {
+      localStorage.setItem('lenny-theme', legacy);
+      localStorage.removeItem('mct2-theme');
+      return legacy;
+    }
+    return 'light';
+  });
   const [query, setQuery] = useState('');
   const [features, setFeatures] = useState({ validation: true });
   const searchRef = useRef(null);
@@ -60,7 +71,7 @@ export default function App() {
   // Apply dark class to html element
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
-    localStorage.setItem('mct2-theme', theme);
+    localStorage.setItem('lenny-theme', theme);
   }, [theme]);
 
   // Clear search on navigation
