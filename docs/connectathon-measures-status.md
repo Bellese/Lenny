@@ -24,6 +24,23 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 
 ---
 
+## Status Rollup
+
+- **4/12** Passing 100% — CMS124, CMS506, CMS816, CMSFHIR529
+- **3/12** Mostly passing (known HAPI CQL divergence, 17 xfails total) —
+  CMS122 (89%), CMS125 (85%), CMS130 (98%)
+- **5/12** Broken
+  - **4/5** need corrected MADiE bundles — CMS2, CMS71, CMS165, CMS1218
+  - **1/5** needs HAPI upstream fix — CMS1017 (HTTP 400 on scoring type)
+
+**A vs B headline:** Direct HAPI strict=true holds at **302/319** with the
+same 17 known xfails. The Lenny Jobs path passes every strict=true measure
+and now fails CMS2 / CMS165 / CMS1218 because PR #258 surfaces
+`MeasureReport.status=error` as a job failure instead of storing
+silent all-zero results.
+
+---
+
 ## A+B Retest Result (2026-05-04)
 
 **A: Direct HAPI/source-of-truth harness** — `test_golden_measures.py` plus `test_connectathon_measures.py` against latest prebaked HAPI finished `488 passed, 66 skipped, 17 xfailed` in 23m36s. The strict=true connectathon baseline is now 302/319 with 17 known xfails and no XPASS. Golden CMS816 and CMS529 passed; `basic-measure` remained skipped.
@@ -67,7 +84,7 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 | CMS1017FHIRHHFI | 65 | 65 skipped | Not run in Jobs pipeline | HTTP 400 — cannot evaluate | ⚠️ BROKEN — HAPI scoring-type incompatibility | Await HAPI DEQM update (issue #100 closed — HAPI upstream fix still needed) |
 | CMS1218FHIRHHRF | 55 | 55 pass¹ | ❌ failed: 55/55 eval errors | Population warnings; missing ValueSets now surface as job failure | ⚠️ BROKEN — 0 ValueSets in bundle | Refreshed bundle from MADiE with ValueSets |
 
-¹ **"Pass" in strict=false direct-HAPI tests means the test did not crash, not that populations are correct.** The direct-HAPI harness treats population mismatches as non-fatal warnings for strict=false measures. After PR #258, the Lenny Jobs path raises `FhirOperationError` when HAPI returns `MeasureReport.status=error`, so CMS2, CMS165, and CMS1218 now fail as jobs instead of storing silent all-zero/non-usable results.
+¹ **"Pass" in strict=false direct-HAPI tests means the test did not crash, not that populations are correct.** The direct-HAPI harness treats population mismatches as non-fatal warnings for strict=false measures. After PR #258, the Lenny Jobs path raises `FhirOperationError` when HAPI returns `MeasureReport.status=error`, so CMS2, CMS165, and CMS1218 now fail as jobs instead of storing silent all-zero/non-usable results. Earlier revisions of this doc showed lower direct-HAPI pass counts for CMS71 (9/83) and CMS165 (0/10) because pre-v8.8.0 HAPI returned HTTP errors for those cases, which the test counted as failures. The prebaked HAPI v8.8.0 image returns 200 + MeasureReport with population warnings for the same inputs, so strict=false now soft-passes all 83 and 10 respectively. Population correctness is unchanged.
 
 ### Notes (strict=true measures)
 
