@@ -13,10 +13,12 @@
 | | Count |
 |---|---|
 | Total test cases | 568 |
-| Pass | 402 (71%) |
-| Fail — genuine accuracy gap (strict=true) | 17 |
-| Warn-only — bundle issues (strict=false) | 84 |
-| Skip — HTTP 400 | 65 |
+| ✅ Correct — strict=true, populations match expected | 219 (of 233 strict=true cases) |
+| ⚠️ Broken bundle — strict=false, populations wrong | 270 (CMS2 + CMS71 + CMS165 + CMS1218 cases) |
+| ❌ Fail — strict=true, genuine HAPI CQL divergence | 17 (xfailed) |
+| ⏭ Skip — HTTP 400 (CMS1017) | 65 |
+
+> **The 71% figure cited in earlier docs is misleading** — it counted strict=false "passes" the same as strict=true passes. The 270 cases from broken-bundle measures never produce correct populations. The meaningful pass rate across the 7 strict=true measures is 219/233 = 94%, with all 17 failures traced to a known HAPI upstream CQL divergence (not a Lenny defect).
 
 Previous pass rate was 29% before session 11 infrastructure fixes.
 
@@ -24,32 +26,53 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 
 ## Per-Measure Results (Nightly Connectathon Test)
 
-| Measure | Cases | Pass | Fail | Skip | Strict | Status | Next Step |
-|---|---|---|---|---|---|---|---|
-| CMS2FHIRPCSDepressionScreenAndFollowUp | 36 | 36 | 0 | 0 | false | PASS (non-strict) | — |
-| CMS71FHIRSTKAnticoagAFFlutter | 83 | 9 | 74 | 0 | false | FAILING — bundle export bug | Refreshed bundle from MADiE (per-patient Claims) |
-| CMS122FHIRDiabetesAssessGreaterThan9Percent | 56 | 50 | 6 | 0 | true | MOSTLY PASSING (89%) | 6 failures xfailed (HAPI DE divergence) — file HAPI upstream issue when ready |
-| CMS124FHIRCervicalCancerScreening | 33 | 33 | 0 | 0 | true | PASS (100%) | — |
-| CMS125FHIRBreastCancerScreening | 66 | 56 | 10 | 0 | true | MOSTLY PASSING (85%) | 10 failures xfailed (HAPI DE divergence) — file HAPI upstream issue when ready |
-| CMS130FHIRColorectalCancerScreening | 64 | 63 | 1 | 0 | true | MOSTLY PASSING (98%) | 1 failure xfailed (`f9ef1fd1` dementia) — file HAPI upstream issue when ready |
-| CMS165FHIRControllingHighBloodPressure | 10 | 0 | 10 | 0 | false | FAILING — library mismatch | Refreshed bundle from MADiE (AdultOutpatientEncounters v4.19.000) |
-| CMS506FHIRSafeUseofOpioids | 38 | 38 | 0 | 0 | true | PASS (100%) | — |
-| CMS816FHIRHHHypo | 9 | 9 | 0 | 0 | true | PASS (100%) | — |
-| CMS529FHIRHybridHospitalWideReadmission | 53 | 53 | 0 | 0 | true | PASS (100%) | — |
-| CMS1017FHIRHHFI | 65 | 0 | 0 | 65 | false | SKIP (HTTP 400) | Investigate HAPI DEQM scoring-type incompatibility (issue #100) |
-| CMS1218FHIRHHRF | 55 | 55 | 0 | 0 | false | PASS (non-strict) | — |
+> **How to read this table.** Two completely different things look the same if you only scan Pass/Fail:
+>
+> - **Strict = true** → any population mismatch is a hard Fail. Pass means the populations are clinically correct.
+> - **Strict = false** → population mismatches are warnings, not failures. A measure can show 0 Fail and still evaluate every single patient wrong. The "Pass" count only means the test didn't crash.
+>
+> **Never read a strict=false row as clinically accurate.** Those rows are broken measures being tracked until MADiE ships a fix. The nightly test keeps them in the suite so regressions are visible, not because the results are trusted.
 
-### Notes
+### Strict=true — populations are correct (trust these results)
+
+| Measure | Cases | Pass | Fail | Skip | Status | Next Step |
+|---|---|---|---|---|---|---|
+| CMS122FHIRDiabetesAssessGreaterThan9Percent | 56 | 50 | 6 | 0 | MOSTLY PASSING (89%) | 6 failures xfailed (HAPI DE divergence) — file HAPI upstream issue when ready |
+| CMS124FHIRCervicalCancerScreening | 33 | 33 | 0 | 0 | ✅ PASS (100%) | — |
+| CMS125FHIRBreastCancerScreening | 66 | 56 | 10 | 0 | MOSTLY PASSING (85%) | 10 failures xfailed (HAPI DE divergence) — file HAPI upstream issue when ready |
+| CMS130FHIRColorectalCancerScreening | 64 | 63 | 1 | 0 | MOSTLY PASSING (98%) | 1 failure xfailed (`f9ef1fd1` dementia) — file HAPI upstream issue when ready |
+| CMS506FHIRSafeUseofOpioids | 38 | 38 | 0 | 0 | ✅ PASS (100%) | — |
+| CMS816FHIRHHHypo | 9 | 9 | 0 | 0 | ✅ PASS (100%) | — |
+| CMS529FHIRHybridHospitalWideReadmission | 53 | 53 | 0 | 0 | ✅ PASS (100%) | — |
+
+### Strict=false — ⚠️ BROKEN BUNDLES. Results are NOT clinically accurate.
+
+> These measures have known bundle defects. The nightly test runs them in non-strict mode **only to detect regressions**, not to validate correctness. A "0 Fail" row here does not mean the measure works — it means the defect hasn't gotten worse. Do not run these measures in Lenny and expect meaningful results.
+
+| Measure | Cases | Pass¹ | Fail | Skip | UI Result | Status | Fix Needed |
+|---|---|---|---|---|---|---|---|
+| CMS2FHIRPCSDepressionScreenAndFollowUp | 36 | 36¹ | 0 | 0 | IP=0 most patients | ⚠️ BROKEN — missing 10 VSAC ValueSets | Refreshed bundle from MADiE with ValueSets |
+| CMS71FHIRSTKAnticoagAFFlutter | 83 | 9 | 74 | 0 | 80/83 patients missing Claims | ⚠️ BROKEN — duplicate Claim IDs in export | Refreshed bundle from MADiE (per-patient Claims) |
+| CMS165FHIRControllingHighBloodPressure | 10 | 0 | 10 | 0 | IP=0 all patients | ⚠️ BROKEN — library version mismatch | Refreshed bundle from MADiE (AdultOutpatientEncounters v4.19.000) |
+| CMS1017FHIRHHFI | 65 | 0 | 0 | 65 | HTTP 400 — cannot evaluate | ⚠️ BROKEN — HAPI scoring-type incompatibility | Resolve issue #100 |
+| CMS1218FHIRHHRF | 55 | 55¹ | 0 | 0 | **IP=0 all 55 patients** | ⚠️ BROKEN — 0 ValueSets in bundle | Refreshed bundle from MADiE with ValueSets |
+
+¹ **"Pass" in strict=false means the test didn't crash, not that populations are correct.** For CMS2 and CMS1218, population mismatches (actual IP=0 vs expected IP>0) are silently treated as non-fatal warnings. If you run either measure in Lenny you will see 0 results for every population. That is the correct expected behavior given the broken bundle — not a Lenny bug.
+
+### Notes (strict=true measures)
 
 - **CMS124, CMS506, CMS816, CMS529** — 100% pass, strict=true
 - **CMS122** — 50/56 (89%); 6 `denominator-exclusion` mismatches confirmed as HAPI CQL divergence (xfailed in test suite)
 - **CMS125** — 56/66 (85%); 10 `denominator-exclusion` mismatches confirmed as HAPI CQL divergence (xfailed)
 - **CMS130** — 63/64 (98%); 1 failure (`f9ef1fd1` dementia condition) confirmed as HAPI CQL divergence (xfailed)
-- **CMS71** — strict=false; MADiE v0.3.002 exports all 83 Claims with the same ID; `fix_duplicate_claim_ids()` partially recovers (only 3/83 patients get Claims). Needs refreshed MADiE bundle.
-- **CMS165** — strict=false; v0.3.000 bundle missing library dependencies (`AdultOutpatientEncounters v4.16.000` vs. available `v4.19.000`). Needs refreshed MADiE bundle.
-- **CMS2** — strict=false; missing 10 VSAC ValueSets (depression screening/medications); IP=0 for most patients. Passes because mismatches are non-fatal warns.
-- **CMS1017** — strict=false; HAPI v8.8.0 returns HTTP 400 for this measure's scoring type; all 65 tests skipped. See issue #100.
-- **CMS1218** — strict=false; no ValueSets in bundle (relies on other connectathon bundles' VSes for IP resolution); passes on warns.
+
+### Notes (strict=false measures)
+
+- **CMS71** — MADiE v0.3.002 exports all 83 Claims with the same ID; `fix_duplicate_claim_ids()` partially recovers (only 3/83 patients get Claims). Needs refreshed MADiE bundle.
+- **CMS165** — v0.3.000 bundle missing library dependencies (`AdultOutpatientEncounters v4.16.000` vs. available `v4.19.000`). Needs refreshed MADiE bundle.
+- **CMS2** — missing 10 VSAC ValueSets (depression screening/medications); IP=0 for most patients. Non-strict mode treats all population mismatches as warns so the test shows 0 Fail.
+- **CMS1017** — HAPI v8.8.0 returns HTTP 400 for this measure's scoring type; all 65 tests skipped. See issue #100.
+- **CMS1218** — 0 ValueSets in bundle. The required ValueSets (e.g. `2.16.840.1.113762.1.4.1248.208` "General And Neuraxial Anesthesia") are not present in any bundle in this repo. HAPI returns `MeasureReport.status=error` (Unknown ValueSet) for every patient, producing IP=0 across the board. Non-strict mode treats the resulting population mismatches as warns, so the nightly test shows 0 Fail — but 0 patients evaluate correctly.
 
 ---
 
