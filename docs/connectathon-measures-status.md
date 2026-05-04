@@ -2,7 +2,7 @@
 
 **HAPI version:** v8.8.0-1
 **Target:** MADiE May 2026 Connectathon (12 measures)
-**Last updated:** 2026-04-27 (banner refresh during docs cleanup; per-measure status unchanged since 2026-04-24, when issue #140 root cause was confirmed — CMS122 DE divergence is HAPI upstream CQL bug, not Lenny defect; `/jobs` hardcoded sleep replaced with `HAPI_SYNC_AFTER_UPLOAD` gate)
+**Last updated:** 2026-05-04 (doc-only: rewrote Per-Measure Results table into strict=true / strict=false sections with UI Result column and footnote; updated issue #100 references to reflect it is closed; pass/fail numbers unchanged from last nightly run)
 
 > **Maintenance note:** This file is hand-edited and drifts within days of a connectathon-measures workflow run. Auto-generation from nightly output is tracked as a follow-up. Resource baselines listed below (Patient: 568, Measure: ≥12, etc.) are connectathon-seed counts, not arbitrary thresholds — they reflect the sum of all 12 bundles' test patients/resources, not a target for a deployed CDR.
 
