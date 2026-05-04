@@ -38,10 +38,9 @@ SKIP_MESSAGE = (
 # reference-type search parameters indexed, causing Encounter?patient=… to
 # return 0 results and $evaluate-measure to produce all-zero populations.
 #
-# Fix: after each bulk data load, trigger a fresh $reindex for all clinical
-# resource types (Encounter, Observation, Condition, Procedure, …) and poll
-# until Encounter reference-param indexing AND Observation/Condition global
-# counts confirm the index is serving results.
+# Fix: after each bulk data load, trigger a fresh $reindex for Encounter,
+# Observation, and Condition, then poll until reference-param searches for
+# all three return results before allowing tests to proceed.
 _REINDEX_POLL_INTERVAL = 1  # seconds between probe checks
 _REINDEX_TIMEOUT = 300  # seconds before giving up
 
@@ -104,11 +103,17 @@ def _wait_for_valueset_expansion(base_url: str, large_valueset_ids: list[str]) -
 def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encounter_id: str) -> None:
     """Trigger HAPI $reindex and block until reference search indexes are ready.
 
-    Reindexes all clinical resource types queried by CMS measures via patient/$everything.
+    Reindexes Encounter, Observation, and Condition only — the types that caused
+    CMS122/124/125 to produce all-zero populations when missing from the Lucene index.
     Two gates must pass before returning:
       1. Encounter?patient= returns results (reference-param indexing ready).
-      2. Observation and Condition have global count > 0 (CMS122/124/125 initial-population
-         criteria depend on these; they produce all-zero populations if not yet indexed).
+      2. Observation?patient= and Condition?patient= return results (CMS122/124/125
+         initial-population criteria depend on these types).
+
+    Procedure, MedicationRequest, and MedicationAdministration are intentionally NOT
+    reindexed here.  Triggering $reindex on those types restarts HAPI's async reindex
+    jobs; CMS measures that query those types (CMS2, CMS165, CMS1218) will then see
+    500 errors from HAPI mid-evaluation, causing all patient evals to fail.
 
     The probe resources must already exist in HAPI (written before calling this function).
     """
@@ -118,18 +123,18 @@ def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encoun
 
     headers = {"Content-Type": "application/fhir+json"}
 
-    # Reindex all clinical types that CMS measures query via $everything.  Previously only
-    # Encounter was reindexed; the missing types caused CMS122/124/125 to see empty
-    # Observation/Condition results and produce IP=0 for all patients.
-    _CLINICAL_TYPES = (
-        "Encounter",
-        "Observation",
-        "Condition",
-        "Procedure",
-        "MedicationRequest",
-        "MedicationAdministration",
-    )
-    for resource_type in _CLINICAL_TYPES:
+    # Reindex only the types we gate on (Encounter, Observation, Condition).  Previously only
+    # Encounter was reindexed; Observation/Condition were added because CMS122/124/125 depend
+    # on them and produce IP=0 when they are missing from the Lucene index.
+    #
+    # Do NOT reindex Procedure, MedicationRequest, or MedicationAdministration here.
+    # Explicitly triggering $reindex for those types causes HAPI to restart their async
+    # reindex jobs; when CMS2/CMS165/CMS1218 run shortly afterwards, those jobs are still
+    # in progress and HAPI returns 500 errors on internal CQL searches against those types,
+    # causing all patient evaluations to fail.  The startup Lucene rebuild (which has already
+    # made progress by the time HAPI's /metadata responds) handles them without interference.
+    _REINDEX_TYPES = ("Encounter", "Observation", "Condition")
+    for resource_type in _REINDEX_TYPES:
         params = {"resourceType": "Parameters", "parameter": [{"name": "type", "valueString": resource_type}]}
         r = _httpx.post(f"{base_url}/$reindex", json=params, headers=headers, timeout=30)
         if r.status_code >= 400:
