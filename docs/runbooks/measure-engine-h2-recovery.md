@@ -88,7 +88,7 @@ If any count is 0, the seed did not complete. Re-check `docker logs leonard-seed
 ### Step 2: Run a /jobs cycle and verify populations
 
 ```bash
-curl -s -X POST https://api.98-89-219-217.nip.io/jobs \
+curl -s -X POST https://api.lenny.bellese.dev/jobs \
   -H "Content-Type: application/json" \
   -d '{"measure_id":"CMS124FHIRCervicalCancerScreening",
        "period_start":"2026-01-01","period_end":"2026-12-31",
@@ -100,8 +100,8 @@ Wait for the job to complete, then check populations:
 
 ```bash
 JOB_ID=<id-from-above>
-curl -s "https://api.98-89-219-217.nip.io/jobs/$JOB_ID" | jq '{status,total_patients}'
-curl -s "https://api.98-89-219-217.nip.io/jobs/$JOB_ID/comparison" | jq .
+curl -s "https://api.lenny.bellese.dev/jobs/$JOB_ID" | jq '{status,total_patients}'
+curl -s "https://api.lenny.bellese.dev/jobs/$JOB_ID/comparison" | jq .
 ```
 
 Expected CMS124 with connectathon group filter: `matched=33/33  IPP=29  denom=29  numer=4  denom-excl=16`.

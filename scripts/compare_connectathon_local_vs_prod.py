@@ -266,7 +266,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--production-api-base",
-        default="https://api.98-89-219-217.nip.io",
+        default="https://api.lenny.bellese.dev",
         help="Production Lenny API base URL",
     )
     parser.add_argument(
