@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import styles from './ResultsPage.module.css';
-import { getJobs, getResults, getResult, createJob } from '../api/client';
+import { getJobs, getResults, getResult, createJob, getMeasureReportBundle } from '../api/client';
 import { useToast } from '../components/Toast';
 import PatientDetail from '../components/PatientDetail';
 import ComparisonView from '../components/ComparisonView';
@@ -77,6 +77,7 @@ export default function ResultsPage() {
   const [detailLoading, setDetailLoading] = useState(false);
   const [populationFilter, setPopulationFilter] = useState('all');
   const [rerunning, setRerunning] = useState(false);
+  const [bundleDownloading, setBundleDownloading] = useState(false);
 
   useEffect(() => {
     async function loadJobs() {
@@ -169,6 +170,30 @@ export default function ResultsPage() {
     }
   };
 
+  const handleDownloadBundle = async () => {
+    if (!selectedJobId) return;
+    setBundleDownloading(true);
+    try {
+      const bundle = await getMeasureReportBundle(selectedJobId);
+      const json = JSON.stringify(bundle, null, 2);
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const mid = (selectedJob?.measure_id || 'measure').replace(/[^a-zA-Z0-9-_]/g, '-');
+      const period = selectedJob?.period_start && selectedJob?.period_end
+        ? `${selectedJob.period_start}-to-${selectedJob.period_end}`
+        : 'unknown-period';
+      a.download = `measure-report-${mid}-${period}-job-${selectedJobId}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast.error(`Failed to download FHIR JSON: ${err.message}`);
+    } finally {
+      setBundleDownloading(false);
+    }
+  };
+
   const selectedJob = jobs.find(j => String(j.id) === String(selectedJobId));
   const populations = results?.populations || {};
   const allPatients = results?.patients || [];
@@ -228,6 +253,14 @@ export default function ResultsPage() {
                 disabled={allPatients.length === 0}
               >
                 Export CSV
+              </button>
+              <button
+                className={styles.btnGhost}
+                onClick={handleDownloadBundle}
+                disabled={allPatients.length === 0 || bundleDownloading}
+                aria-busy={bundleDownloading}
+              >
+                {bundleDownloading ? 'Downloading…' : 'Download FHIR JSON'}
               </button>
               {selectedJob && (
                 <button

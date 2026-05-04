@@ -40,6 +40,7 @@ backend/app/
   routes/
     health.py       GET /health
     jobs.py         POST /jobs, GET /jobs, GET /jobs/{id}, POST /jobs/{id}/cancel,
+                    GET /jobs/{id}/measure-report (FHIR Bundle of individual MeasureReports),
                     GET /jobs/{id}/comparison (actual vs. expected population counts)
     measures.py     GET /measures, POST /measures/upload
     results.py      GET /results, GET /results/{job_id}
