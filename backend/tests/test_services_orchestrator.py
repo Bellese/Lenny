@@ -442,7 +442,10 @@ async def test_run_job_all_hapi_2788_produces_valueset_job_message(test_session,
     diag = f"HAPI-2788: Unknown ValueSet: {vs_url_encoded}"
     hapi_outcome = FhirOperationOutcome(
         issues=[FhirIssue(severity="error", code="processing", diagnostics=diag)],
-        raw={"resourceType": "OperationOutcome", "issue": [{"severity": "error", "code": "processing", "diagnostics": diag}]},
+        raw={
+            "resourceType": "OperationOutcome",
+            "issue": [{"severity": "error", "code": "processing", "diagnostics": diag}],
+        },
     )
     fhir_err = FhirOperationError(
         operation="evaluate-measure",
