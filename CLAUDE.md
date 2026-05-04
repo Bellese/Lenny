@@ -108,7 +108,7 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
 
 - **Profile:** `leonard` (account `439475769170`). Always use `AWS_PROFILE=leonard` for any AWS CLI commands.
 - EC2 instance: `i-0f00585639d2f3ef1`, t3.medium (4 GB RAM), Elastic IP `98.89.219.217`, region `us-east-1`
-- Live URLs: `https://98-89-219-217.nip.io` (UI), `https://api.98-89-219-217.nip.io` (API)
+- Live URLs: `https://lenny.bellese.dev` (UI), `https://api.lenny.bellese.dev` (API)
 
 ## Do NOT
 
