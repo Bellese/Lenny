@@ -7,6 +7,8 @@ evaluates the measure, and stores results.
 import asyncio
 import copy
 import logging
+import re
+import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -33,6 +35,28 @@ from app.services.validation import sanitize_error
 logger = logging.getLogger(__name__)
 
 LENNY_ERROR_EXT = "https://lenny.bellese.io/fhir/StructureDefinition/synthesized-error"
+
+# HAPI-2788: HAPI echoes ValueSet URLs percent-encoded in its diagnostic message.
+# sanitize_error() strips plain URLs (https?://...) but leaves percent-encoded ones intact,
+# so we match both forms here and decode before surfacing to the user.
+_HAPI_UNKNOWN_VS_RE = re.compile(
+    r"HAPI-2788[^:]*:\s*Unknown ValueSet:\s*(\S+)",
+    re.IGNORECASE,
+)
+
+
+def _extract_unknown_valueset_urls(error_messages: list[str]) -> list[str]:
+    """If ALL messages are HAPI-2788 Unknown ValueSet errors, return sorted unique decoded URLs.
+
+    Returns [] if any message does not match (mixed error types should use the generic message).
+    """
+    urls: set[str] = set()
+    for msg in error_messages:
+        m = _HAPI_UNKNOWN_VS_RE.search(msg)
+        if not m:
+            return []
+        urls.add(urllib.parse.unquote(m.group(1)))
+    return sorted(urls)
 
 
 def _extract_populations(measure_report: dict[str, Any]) -> dict[str, bool]:
@@ -240,7 +264,29 @@ async def run_job(job_id: int) -> None:
                 return
             if job.total_patients and job.processed_patients == 0 and job.failed_patients > 0:
                 job.status = JobStatus.failed
-                job.error_message = f"All {job.failed_patients} patient evaluations failed"
+                error_rows = (
+                    (
+                        await session.execute(
+                            select(MeasureResult.populations).where(
+                                MeasureResult.job_id == job_id,
+                                MeasureResult.error_phase == "evaluate",
+                            )
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+                patient_errors = [
+                    r["error_message"] for r in error_rows if isinstance(r, dict) and r.get("error_message")
+                ]
+                vs_urls = _extract_unknown_valueset_urls(patient_errors) if patient_errors else []
+                if vs_urls:
+                    vs_list = ", ".join(vs_urls)
+                    job.error_message = (
+                        f"All {job.failed_patients} patient evaluations failed: unknown ValueSet(s): {vs_list}"
+                    )
+                else:
+                    job.error_message = f"All {job.failed_patients} patient evaluations failed"
             else:
                 job.status = JobStatus.complete
             job.completed_at = datetime.now(timezone.utc)
