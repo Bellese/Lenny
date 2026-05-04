@@ -2,7 +2,7 @@
 
 **HAPI version:** v8.8.0-1
 **Target:** MADiE May 2026 Connectathon (12 measures)
-**Last updated:** 2026-05-04 (doc-only: rewrote Per-Measure Results table into strict=true / strict=false sections with UI Result column and footnote; updated issue #100 references to reflect it is closed; pass/fail numbers unchanged from last nightly run)
+**Last updated:** 2026-05-04 (doc-only: updated CMS2/CMS1218 UI Result and footnote — PR #258 changed MeasureReport.status=error from silent IP=0 to hard job failure; pass/fail numbers unchanged from last nightly run)
 
 > **Maintenance note:** This file is hand-edited and drifts within days of a connectathon-measures workflow run. Auto-generation from nightly output is tracked as a follow-up. Resource baselines listed below (Patient: 568, Measure: ≥12, etc.) are connectathon-seed counts, not arbitrary thresholds — they reflect the sum of all 12 bundles' test patients/resources, not a target for a deployed CDR.
 
@@ -51,13 +51,13 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 
 | Measure | Cases | Pass¹ | Fail | Skip | UI Result | Status | Fix Needed |
 |---|---|---|---|---|---|---|---|
-| CMS2FHIRPCSDepressionScreenAndFollowUp | 36 | 36¹ | 0 | 0 | IP=0 most patients | ⚠️ BROKEN — missing 10 VSAC ValueSets | Refreshed bundle from MADiE with ValueSets |
+| CMS2FHIRPCSDepressionScreenAndFollowUp | 36 | 36¹ | 0 | 0 | ❌ Job fails — all 36 evaluations fail (HAPI-2788 missing ValueSet; see issue #266) | ⚠️ BROKEN — missing 10 VSAC ValueSets | Refreshed bundle from MADiE with ValueSets |
 | CMS71FHIRSTKAnticoagAFFlutter | 83 | 9 | 74 | 0 | 80/83 patients missing Claims | ⚠️ BROKEN — duplicate Claim IDs in export | Refreshed bundle from MADiE (per-patient Claims) |
 | CMS165FHIRControllingHighBloodPressure | 10 | 0 | 10 | 0 | IP=0 all patients | ⚠️ BROKEN — library version mismatch | Refreshed bundle from MADiE (AdultOutpatientEncounters v4.19.000) |
 | CMS1017FHIRHHFI | 65 | 0 | 0 | 65 | HTTP 400 — cannot evaluate | ⚠️ BROKEN — HAPI scoring-type incompatibility | Await HAPI DEQM update (issue #100 closed — HAPI upstream fix still needed) |
-| CMS1218FHIRHHRF | 55 | 55¹ | 0 | 0 | **IP=0 all 55 patients** | ⚠️ BROKEN — 0 ValueSets in bundle | Refreshed bundle from MADiE with ValueSets |
+| CMS1218FHIRHHRF | 55 | 55¹ | 0 | 0 | ❌ Job fails — all 55 evaluations fail (HAPI-2788 missing ValueSet; see issue #266) | ⚠️ BROKEN — 0 ValueSets in bundle | Refreshed bundle from MADiE with ValueSets |
 
-¹ **"Pass" in strict=false means the test didn't crash, not that populations are correct.** For CMS2 and CMS1218, population mismatches (actual IP=0 vs expected IP>0) are silently treated as non-fatal warnings. If you run either measure in Lenny you will see 0 results for every population. That is the correct expected behavior given the broken bundle — not a Lenny bug.
+¹ **"Pass" in strict=false means the test didn't crash, not that populations are correct.** For CMS2 and CMS1218, population mismatches (actual IP=0 vs expected IP>0) are silently treated as non-fatal warnings in the test suite. **However, if you run either measure in Lenny directly, the job will fail hard** — all patient evaluations fail with HAPI-2788 (Unknown ValueSet). This is the behavior since PR #258 fixed the silent-zero bug (MeasureReport.status=error is now a raised FhirOperationError, not a silent pass-through). The test suite still shows 0 Fail because it runs the connectathon bundles via a different code path that doesn't yet apply the same check. See issue #266 for the follow-on UX work (surfacing this as a job-level warning rather than all-patients-failed).
 
 ### Notes (strict=true measures)
 
@@ -70,9 +70,9 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 
 - **CMS71** — MADiE v0.3.002 exports all 83 Claims with the same ID; `fix_duplicate_claim_ids()` partially recovers (only 3/83 patients get Claims). Needs refreshed MADiE bundle.
 - **CMS165** — v0.3.000 bundle missing library dependencies (`AdultOutpatientEncounters v4.16.000` vs. available `v4.19.000`). Needs refreshed MADiE bundle.
-- **CMS2** — missing 10 VSAC ValueSets (depression screening/medications); IP=0 for most patients. Non-strict mode treats all population mismatches as warns so the test shows 0 Fail.
+- **CMS2** — missing 10 VSAC ValueSets (depression screening/medications). Since PR #258, running CMS2 in Lenny produces a hard job failure (all 36 evaluations fail with HAPI-2788). The connectathon test still shows 0 Fail because it runs via a different code path; see issue #266.
 - **CMS1017** — HAPI v8.8.0 returns HTTP 400 for this measure's scoring type; all 65 tests skipped. Issue #100 (tracking this) is closed — HAPI upstream fix for composite/ratio scoring type still needed.
-- **CMS1218** — 0 ValueSets in bundle. The required ValueSets (e.g. `2.16.840.1.113762.1.4.1248.208` "General And Neuraxial Anesthesia") are not present in any bundle in this repo. HAPI returns `MeasureReport.status=error` (Unknown ValueSet) for every patient, producing IP=0 across the board. Non-strict mode treats the resulting population mismatches as warns, so the nightly test shows 0 Fail — but 0 patients evaluate correctly.
+- **CMS1218** — 0 ValueSets in bundle. The required ValueSets (e.g. `2.16.840.1.113762.1.4.1248.208` "General And Neuraxial Anesthesia") are not present in any bundle in this repo. HAPI returns `MeasureReport.status=error` (Unknown ValueSet) for every patient. Since PR #258, running CMS1218 in Lenny produces a hard job failure (all 55 evaluations fail). The connectathon test still shows 0 Fail because population mismatches in strict=false mode are non-fatal warnings — the test doesn't go through the Jobs API. See issue #266.
 
 ---
 
