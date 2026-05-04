@@ -265,24 +265,25 @@ async def run_job(job_id: int) -> None:
             if job.total_patients and job.processed_patients == 0 and job.failed_patients > 0:
                 job.status = JobStatus.failed
                 error_rows = (
-                    await session.execute(
-                        select(MeasureResult.populations).where(
-                            MeasureResult.job_id == job_id,
-                            MeasureResult.error_phase == "evaluate",
+                    (
+                        await session.execute(
+                            select(MeasureResult.populations).where(
+                                MeasureResult.job_id == job_id,
+                                MeasureResult.error_phase == "evaluate",
+                            )
                         )
                     )
-                ).scalars().all()
+                    .scalars()
+                    .all()
+                )
                 patient_errors = [
-                    r["error_message"]
-                    for r in error_rows
-                    if isinstance(r, dict) and r.get("error_message")
+                    r["error_message"] for r in error_rows if isinstance(r, dict) and r.get("error_message")
                 ]
                 vs_urls = _extract_unknown_valueset_urls(patient_errors) if patient_errors else []
                 if vs_urls:
                     vs_list = ", ".join(vs_urls)
                     job.error_message = (
-                        f"All {job.failed_patients} patient evaluations failed: "
-                        f"unknown ValueSet(s): {vs_list}"
+                        f"All {job.failed_patients} patient evaluations failed: unknown ValueSet(s): {vs_list}"
                     )
                 else:
                     job.error_message = f"All {job.failed_patients} patient evaluations failed"
