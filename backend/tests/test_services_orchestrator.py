@@ -427,6 +427,64 @@ async def test_run_job_nonexistent(session_factory):
         await run_job(99999)
 
 
+async def test_run_job_all_hapi_2788_produces_valueset_job_message(test_session, session_factory):
+    """When ALL patients fail with HAPI-2788 Unknown ValueSet, job.error_message names the ValueSet URL."""
+    from app.services.fhir_errors import FhirIssue, FhirOperationError, FhirOperationOutcome
+
+    job_id = await _setup_job(test_session)
+    patients = [
+        {"resourceType": "Patient", "id": "p1"},
+        {"resourceType": "Patient", "id": "p2"},
+    ]
+
+    vs_url_encoded = "http%3A%2F%2Fcts.nlm.nih.gov%2Ffhir%2FValueSet%2F2.16.840.1.113883.3.600.1916"
+    vs_url_decoded = "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.600.1916"
+    diag = f"HAPI-2788: Unknown ValueSet: {vs_url_encoded}"
+    hapi_outcome = FhirOperationOutcome(
+        issues=[FhirIssue(severity="error", code="processing", diagnostics=diag)],
+        raw={"resourceType": "OperationOutcome", "issue": [{"severity": "error", "code": "processing", "diagnostics": diag}]},
+    )
+    fhir_err = FhirOperationError(
+        operation="evaluate-measure",
+        url="http://mcs/fhir/Measure/CMS2/$evaluate-measure",
+        status_code=200,
+        outcome=hapi_outcome,
+        latency_ms=10,
+    )
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patients",
+            new_callable=AsyncMock,
+            return_value=patients,
+        ),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patient_data",
+            new_callable=AsyncMock,
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]),
+        ),
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch("app.services.orchestrator.evaluate_measure", new_callable=AsyncMock, side_effect=fhir_err),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
+    ):
+        await run_job(job_id)
+
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        assert job.status == JobStatus.failed
+        assert job.failed_patients == 2
+        # Must name the decoded ValueSet URL, not just "All 2 patient evaluations failed"
+        assert vs_url_decoded in job.error_message
+        assert "ValueSet" in job.error_message
+
+
 async def test_get_cdr_auth_headers_reads_live_cdr_config(test_session, session_factory):
     """_get_cdr_auth_headers joins cdr_configs via cdr_id for live credentials."""
     from app.models.config import AuthType, CDRConfig
