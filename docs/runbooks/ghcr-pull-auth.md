@@ -13,8 +13,8 @@ permission) — no change there.
 ## Manual deploy
 
 ```bash
-ssh leonard@98.89.219.217 -i ~/.ssh/leonard.pem
-sudo ./scripts/deploy-prod.sh
+ssh ec2-user@98.89.219.217 -i ~/.ssh/leonard-ec2.pem
+cd /opt/leonard && sudo ./scripts/deploy-prod.sh
 ```
 
 No GHCR login step is needed. `docker compose pull` will pull from
