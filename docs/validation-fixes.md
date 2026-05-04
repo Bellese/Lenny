@@ -208,7 +208,7 @@ curl -X POST http://localhost:8000/validation/run
 
 Check backend logs for recovery attempts:
 ```bash
-docker logs mct2-backend-1 2>&1 | grep -E "missing_measures|Reloaded measures|attempting to reload"
+docker logs lenny-backend-1 2>&1 | grep -E "missing_measures|Reloaded measures|attempting to reload"
 ```
 
 Example log output:

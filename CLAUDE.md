@@ -90,7 +90,7 @@ If the change is documentation-only (`*.md`, no code), steps 1–4 are not requi
 
 ## Workflow
 
-Branches: `feature/*`, `fix/*`, or `chore/*` off `main`, merged via PR. Always work in a git worktree (`git worktree add ../mct2-<branch> -b <branch> origin/main`) — never commit directly on the current branch.
+Branches: `feature/*`, `fix/*`, or `chore/*` off `main`, merged via PR. Always work in a git worktree (`git worktree add ../lenny-<branch> -b <branch> origin/main`) — never commit directly on the current branch.
 Work items: GitHub Issues on the [project board](https://github.com/orgs/Bellese/projects/33/views/3).
 
 | Phase | Command | Toolkit |

@@ -46,4 +46,4 @@ Lenny eliminates the most expensive component of the vendor relationship — the
 
 **Requirements:** Docker Engine 24+, 16 GB RAM recommended, 4 CPU cores, 20 GB disk.
 
-**Repository:** [https://github.com/Bellese/mct2](https://github.com/Bellese/mct2)
+**Repository:** [https://github.com/Bellese/lenny](https://github.com/Bellese/lenny)
