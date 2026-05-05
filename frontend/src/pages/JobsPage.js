@@ -10,6 +10,7 @@ import { TrashIcon, ViewIcon, SparkIcon, PlusIcon, XIcon } from '../components/I
 import { useSearch } from '../contexts/SearchContext';
 import PeriodPicker from '../components/PeriodPicker';
 import { extractCmsId, measureDisplayLabel, measureOptionLabel, findMatchingGroup } from '../utils/measureFormat';
+import { isActuallyRunning, isRunning, isComplete, selectActiveJob } from '../utils/jobStatus';
 
 function formatDateTime(dateStr) {
   if (!dateStr) return '--';
@@ -43,15 +44,6 @@ function StatusBadge({ status }) {
   return <span className={styles.badge}>{status}</span>;
 }
 
-function isRunning(status) {
-  const s = (status || '').toLowerCase();
-  return s === 'running' || s === 'in_progress' || s === 'in-progress' || s === 'queued' || s === 'pending';
-}
-
-function isComplete(status) {
-  const s = (status || '').toLowerCase();
-  return s === 'completed' || s === 'complete';
-}
 
 export default function JobsPage() {
   const navigate = useNavigate();
@@ -226,11 +218,14 @@ export default function JobsPage() {
   };
 
   const q = query.trim().toLowerCase();
-  const activeJob = jobs.find(j => isRunning(j.status));
+  const activeJob = selectActiveJob(jobs);
   const filteredJobs = jobs.filter(j => {
     if (!q) return true;
     return getMeasureName(j).toLowerCase().includes(q) || (j.id || '').toLowerCase().includes(q);
   });
+
+  const runningCount = jobs.filter(j => isActuallyRunning(j.status)).length;
+  const queuedCount = jobs.filter(j => { const s = (j.status || '').toLowerCase(); return s === 'queued' || s === 'pending'; }).length;
 
   return (
     <div className={styles.page}>
@@ -239,7 +234,8 @@ export default function JobsPage() {
           <div className={styles.eyebrow}>Calculations</div>
           <h1 className={styles.title}>Jobs</h1>
           <div className={styles.sub}>
-            {jobs.filter(j => isRunning(j.status)).length} running ·{' '}
+            {runningCount} running ·{' '}
+            {queuedCount > 0 && <>{queuedCount} queued ·{' '}</>}
             {jobs.filter(j => isComplete(j.status)).length} complete ·{' '}
             {jobs.filter(j => (j.status || '').toLowerCase() === 'failed').length} failed
           </div>
@@ -261,7 +257,7 @@ export default function JobsPage() {
             <div className={styles.heroTop}>
               <div>
                 <div className={styles.heroMeta}>
-                  <span className={`${styles.badge} ${styles.badgeRunning}`}><PulseDot />Running</span>
+                  <StatusBadge status={activeJob.status} />
                   <span className={styles.heroId}>{activeJob.id}</span>
                 </div>
                 <div className={styles.heroName}>{getMeasureName(activeJob)}</div>
@@ -270,7 +266,9 @@ export default function JobsPage() {
                     <span className={styles.mono}>{activeJob.period_start} → {activeJob.period_end}</span>
                   )}
                   <span>Cohort: {getCohortName(activeJob)}</span>
-                  <span>Elapsed {formatElapsed(activeJob.started_at || activeJob.created_at)}</span>
+                  {isActuallyRunning(activeJob.status) && (
+                    <span>Elapsed {formatElapsed(activeJob.started_at || activeJob.created_at)}</span>
+                  )}
                 </div>
               </div>
               <button className={styles.btnGhost} onClick={() => handleCancel(activeJob.id)}>
