@@ -7,15 +7,11 @@ from typing import Any
 import pytest
 
 from app.services.validation import (
-    _fix_duplicate_claim_ids as fix_duplicate_claim_ids,
-)
-from app.services.validation import (
     _fix_library_deps_for_hapi as fix_library_deps_for_hapi,
 )
 
 __all__ = [
     "fail_with_context",
-    "fix_duplicate_claim_ids",
     "fix_library_deps_for_hapi",
     "fix_valueset_compose_for_hapi",
     "make_put_bundle",

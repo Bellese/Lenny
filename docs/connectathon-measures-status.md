@@ -1,10 +1,34 @@
 # Connectathon Measures Status
 
-**HAPI version:** v8.8.0-1
-**Target:** MADiE May 2026 Connectathon (12 measures)
-**Last updated:** 2026-05-04 (full A+B retest against `:latest` prebaked HAPI images after PR #258: direct HAPI strict=true held at 302/319 with 17 known xfails; Lenny Jobs passed all strict=true measures and failed only broken strict=false measures CMS2, CMS165, and CMS1218)
+> **2026-05-06 — 5 measures removed from Lenny** (see issue #278).
+> CMS2, CMS71, CMS165, CMS1017, and CMS1218 had upstream bundle/HAPI issues that could not be
+> fixed before the connectathon. They have been removed from the seed bundles, manifest, and test
+> suite. The original status detail for each is preserved below under
+> [Removed measures (2026-05-06)](#removed-measures-2026-05-06).
+> To re-add a measure once upstream fixes ship, drop the refreshed bundle into
+> `seed/connectathon-bundles/` and add its entry back to `manifest.json`.
 
-> **Maintenance note:** This file is hand-edited and drifts within days of a connectathon-measures workflow run. Auto-generation from nightly output is tracked as a follow-up. Resource baselines listed below (Patient: 568, Measure: ≥12, etc.) are connectathon-seed counts, not arbitrary thresholds — they reflect the sum of all 12 bundles' test patients/resources, not a target for a deployed CDR.
+**HAPI version:** v8.8.0-1
+**Target:** MADiE May 2026 Connectathon (7 active measures)
+**Last updated:** 2026-05-06 (5 broken measures removed; 7 strict=true measures remain)
+
+> **Maintenance note:** This file is hand-edited and drifts within days of a connectathon-measures workflow run. Auto-generation from nightly output is tracked as a follow-up.
+
+---
+
+## Current connectathon measures (7)
+
+All 7 active measures are `strict=true` — every population mismatch is a hard test failure.
+
+| Measure | Cases | Pass | Fail (xfail) | Status |
+|---|---|---|---|---|
+| CMS122FHIRDiabetesAssessGreaterThan9Percent | 56 | 50 | 6 | MOSTLY PASSING (89%) — 6 HAPI CQL divergences xfailed |
+| CMS124FHIRCervicalCancerScreening | 33 | 33 | 0 | ✅ PASS (100%) |
+| CMS125FHIRBreastCancerScreening | 66 | 56 | 10 | MOSTLY PASSING (85%) — 10 HAPI CQL divergences xfailed |
+| CMS130FHIRColorectalCancerScreening | 64 | 63 | 1 | MOSTLY PASSING (98%) — 1 HAPI CQL divergence xfailed |
+| CMS506FHIRSafeUseofOpioids | 38 | 38 | 0 | ✅ PASS (100%) |
+| CMS816FHIRHHHypo | 9 | 9 | 0 | ✅ PASS (100%) |
+| CMSFHIR529HybridHospitalWideReadmission | 53 | 53 | 0 | ✅ PASS (100%) |
 
 ---
 
@@ -12,13 +36,12 @@
 
 | | Count |
 |---|---|
-| Total test cases | 568 |
-| ✅ Correct — strict=true, populations match expected | 302 (of 319 strict=true cases; 95%) |
-| ⚠️ Broken bundle — strict=false / not clinically trusted | 184 direct-HAPI non-strict cases (CMS2 + CMS71 + CMS165 + CMS1218); Lenny Jobs fails CMS2/CMS165/CMS1218 |
+| Total active test cases | 319 |
+| ✅ Correct — strict=true, populations match expected | 302 (of 319; 95%) |
 | ❌ Known HAPI CQL divergence — strict=true xfailed | 17 |
-| ⏭ Skip — HTTP 400 (CMS1017) | 65 |
+| ⏭ Skip | 0 |
 
-> **The 71% figure cited in earlier docs is misleading** — it counted strict=false "passes" the same as strict=true passes. The 184 cases from broken-bundle measures are not clinically trusted even when the direct-HAPI harness records them as non-strict passes. The meaningful pass rate across the 7 strict=true measures is 302/319 = 95%, with all 17 failures traced to a known HAPI upstream CQL divergence (not a Lenny defect).
+The meaningful pass rate is **302/319 = 95%**, with all 17 failures traced to a known HAPI upstream CQL divergence (not a Lenny defect).
 
 Previous pass rate was 29% before session 11 infrastructure fixes.
 
@@ -26,65 +49,39 @@ Previous pass rate was 29% before session 11 infrastructure fixes.
 
 ## Status Rollup
 
-- **4/12** Passing 100% — CMS124, CMS506, CMS816, CMSFHIR529
-- **3/12** Mostly passing (known HAPI CQL divergence, 17 xfails total) —
+- **4/7** Passing 100% — CMS124, CMS506, CMS816, CMSFHIR529
+- **3/7** Mostly passing (known HAPI CQL divergence, 17 xfails total) —
   CMS122 (89%), CMS125 (85%), CMS130 (98%)
-- **5/12** Broken
-  - **4/5** need corrected MADiE bundles — CMS2, CMS71, CMS165, CMS1218
-  - **1/5** needs HAPI upstream fix — CMS1017 (HTTP 400 on scoring type)
-
-**A vs B headline:** Direct HAPI strict=true holds at **302/319** with the
-same 17 known xfails. The Lenny Jobs path passes every strict=true measure
-and now fails CMS2 / CMS165 / CMS1218 because PR #258 surfaces
-`MeasureReport.status=error` as a job failure instead of storing
-silent all-zero results.
+- **0/7** Broken (5 broken measures removed in issue #278)
 
 ---
 
-## A+B Retest Result (2026-05-04)
+## A+B Retest Result (2026-05-04, pre-removal baseline)
+
+> *These numbers are the last full A+B run before the 5 broken measures were removed.
+> The 5 broken-bundle measures are excluded from current test runs.*
 
 **A: Direct HAPI/source-of-truth harness** — `test_golden_measures.py` plus `test_connectathon_measures.py` against latest prebaked HAPI finished `488 passed, 66 skipped, 17 xfailed` in 23m36s. The strict=true connectathon baseline is now 302/319 with 17 known xfails and no XPASS. Golden CMS816 and CMS529 passed; `basic-measure` remained skipped.
 
 **B: Lenny orchestration path** — `test_full_jobs_pipeline.py` against the same prebaked images finished `8 passed, 3 failed` in 8m44s. All strict=true Jobs measures passed: CMS122, CMS124, CMS125, CMS130, CMS506, CMS816, and CMSFHIR529. The only Jobs failures were broken strict=false measures: CMS2, CMS165, and CMS1218, each failing all patient evaluations after PR #258 surfaced `MeasureReport.status=error` as `FhirOperationError`.
 
-**Interpretation** — direct HAPI did not regress; the stale `219/233` headline is superseded by `302/319`. Lenny Jobs matches the direct-HAPI baseline for every strict=true measure. The A/B delta is isolated to broken strict=false measures where direct HAPI still records non-strict warning passes, but Lenny now fails the job when HAPI returns error reports.
+**Interpretation** — direct HAPI did not regress; the stale `219/233` headline is superseded by `302/319`. Lenny Jobs matches the direct-HAPI baseline for every strict=true measure. The A/B delta was isolated to broken strict=false measures (now removed).
 
 ---
 
 ## Per-Measure Results (Nightly Connectathon Test)
 
-> **How to read this table.** Two completely different things look the same if you only scan Pass/Fail:
->
-> - **Strict = true** → any population mismatch is a hard Fail. Pass means the populations are clinically correct.
-> - **Strict = false** → population mismatches are warnings, not failures. A measure can show 0 Fail and still evaluate every single patient wrong. The "Pass" count only means the test didn't crash.
->
-> **Never read a strict=false row as clinically accurate.** Those rows are broken measures being tracked until MADiE ships a fix. The nightly test keeps them in the suite so regressions are visible, not because the results are trusted.
-
 ### Strict=true — populations are correct (trust these results)
 
-| Measure | Cases | Pass | Fail | Skip | Status | Next Step |
-|---|---|---|---|---|---|---|
-| CMS122FHIRDiabetesAssessGreaterThan9Percent | 56 | 50 | 6 | 0 | MOSTLY PASSING (89%) | 6 failures xfailed (HAPI DE divergence) — file HAPI upstream issue when ready |
-| CMS124FHIRCervicalCancerScreening | 33 | 33 | 0 | 0 | ✅ PASS (100%) | — |
-| CMS125FHIRBreastCancerScreening | 66 | 56 | 10 | 0 | MOSTLY PASSING (85%) | 10 failures xfailed (HAPI DE divergence) — file HAPI upstream issue when ready |
-| CMS130FHIRColorectalCancerScreening | 64 | 63 | 1 | 0 | MOSTLY PASSING (98%) | 1 failure xfailed (`f9ef1fd1` dementia) — file HAPI upstream issue when ready |
-| CMS506FHIRSafeUseofOpioids | 38 | 38 | 0 | 0 | ✅ PASS (100%) | — |
-| CMS816FHIRHHHypo | 9 | 9 | 0 | 0 | ✅ PASS (100%) | — |
-| CMSFHIR529HybridHospitalWideReadmission | 53 | 53 | 0 | 0 | ✅ PASS (100%) | — |
-
-### Strict=false — ⚠️ BROKEN BUNDLES. Results are NOT clinically accurate.
-
-> These measures have known bundle defects. The nightly test runs them in non-strict mode **only to detect regressions**, not to validate correctness. A "0 Fail" row here does not mean the measure works — it means the defect hasn't gotten worse. Do not run these measures in Lenny and expect meaningful results.
-
-| Measure | Cases | Direct HAPI | Lenny Jobs | UI / Clinical Result | Status | Fix Needed |
-|---|---|---|---|---|---|---|
-| CMS2FHIRPCSDepressionScreenAndFollowUp | 36 | 36 pass¹ | ❌ failed: 36/36 eval errors | Population warnings; missing ValueSets now surface as job failure | ⚠️ BROKEN — missing 10 VSAC ValueSets | Refreshed bundle from MADiE with ValueSets |
-| CMS71FHIRSTKAnticoagAFFlutter | 83 | 83 pass¹ | ✅ passed | Population warnings; Claims remain incomplete | ⚠️ BROKEN — duplicate Claim IDs in export | Refreshed bundle from MADiE (per-patient Claims) |
-| CMS165FHIRControllingHighBloodPressure | 10 | 10 pass¹ | ❌ failed: 10/10 eval errors | Population warnings; library mismatch now surfaces as job failure | ⚠️ BROKEN — library version mismatch | Refreshed bundle from MADiE (AdultOutpatientEncounters v4.19.000) |
-| CMS1017FHIRHHFI | 65 | 65 skipped | Not run in Jobs pipeline | HTTP 400 — cannot evaluate | ⚠️ BROKEN — HAPI scoring-type incompatibility | Await HAPI DEQM update (issue #100 closed — HAPI upstream fix still needed) |
-| CMS1218FHIRHHRF | 55 | 55 pass¹ | ❌ failed: 55/55 eval errors | Population warnings; missing ValueSets now surface as job failure | ⚠️ BROKEN — 0 ValueSets in bundle | Refreshed bundle from MADiE with ValueSets |
-
-¹ **"Pass" in strict=false direct-HAPI tests means the test did not crash, not that populations are correct.** The direct-HAPI harness treats population mismatches as non-fatal warnings for strict=false measures. After PR #258, the Lenny Jobs path raises `FhirOperationError` when HAPI returns `MeasureReport.status=error`, so CMS2, CMS165, and CMS1218 now fail as jobs instead of storing silent all-zero/non-usable results. Earlier revisions of this doc showed lower direct-HAPI pass counts for CMS71 (9/83) and CMS165 (0/10) because pre-v8.8.0 HAPI returned HTTP errors for those cases, which the test counted as failures. The prebaked HAPI v8.8.0 image returns 200 + MeasureReport with population warnings for the same inputs, so strict=false now soft-passes all 83 and 10 respectively. Population correctness is unchanged.
+| Measure | Cases | Pass | Fail (xfail) | Status | Next Step |
+|---|---|---|---|---|---|
+| CMS122FHIRDiabetesAssessGreaterThan9Percent | 56 | 50 | 6 | MOSTLY PASSING (89%) | 6 failures xfailed (HAPI DE divergence) — file HAPI upstream issue when ready |
+| CMS124FHIRCervicalCancerScreening | 33 | 33 | 0 | ✅ PASS (100%) | — |
+| CMS125FHIRBreastCancerScreening | 66 | 56 | 10 | MOSTLY PASSING (85%) | 10 failures xfailed (HAPI DE divergence) — file HAPI upstream issue when ready |
+| CMS130FHIRColorectalCancerScreening | 64 | 63 | 1 | MOSTLY PASSING (98%) | 1 failure xfailed (`f9ef1fd1` dementia) — file HAPI upstream issue when ready |
+| CMS506FHIRSafeUseofOpioids | 38 | 38 | 0 | ✅ PASS (100%) | — |
+| CMS816FHIRHHHypo | 9 | 9 | 0 | ✅ PASS (100%) | — |
+| CMSFHIR529HybridHospitalWideReadmission | 53 | 53 | 0 | ✅ PASS (100%) | — |
 
 ### Notes (strict=true measures)
 
@@ -93,13 +90,23 @@ silent all-zero results.
 - **CMS125** — 56/66 (85%); 10 `denominator-exclusion` mismatches confirmed as HAPI CQL divergence (xfailed)
 - **CMS130** — 63/64 (98%); 1 failure (`f9ef1fd1` dementia condition) confirmed as HAPI CQL divergence (xfailed)
 
-### Notes (strict=false measures)
+---
 
-- **CMS71** — MADiE v0.3.002 exports all 83 Claims with the same ID; `fix_duplicate_claim_ids()` partially recovers the bundle enough for Lenny Jobs to complete, but populations remain warning-only and clinically untrusted. Needs refreshed MADiE bundle.
-- **CMS165** — v0.3.000 bundle missing library dependencies (`AdultOutpatientEncounters v4.16.000` vs. available `v4.19.000`). Direct HAPI records non-strict warning passes; Lenny Jobs now fails all 10 evaluations. Needs refreshed MADiE bundle.
-- **CMS2** — missing 10 VSAC ValueSets (depression screening/medications); IP=0 for most patients. Direct HAPI records non-strict warning passes; Lenny Jobs now fails all 36 evaluations after error reports are surfaced.
-- **CMS1017** — HAPI v8.8.0 returns HTTP 400 for this measure's scoring type; all 65 tests skipped. Issue #100 (tracking this) is closed — HAPI upstream fix for composite/ratio scoring type still needed.
-- **CMS1218** — 0 ValueSets in bundle. The required ValueSets (e.g. `2.16.840.1.113762.1.4.1248.208` "General And Neuraxial Anesthesia") are not present in any bundle in this repo. Direct HAPI records non-strict warning passes; Lenny Jobs now fails all 55 evaluations after HAPI error reports are surfaced.
+## Removed measures (2026-05-06)
+
+> Removed in issue #278 — unable to fix before the connectathon. Re-add once upstream fixes ship
+> by dropping the refreshed bundle into `seed/connectathon-bundles/` and adding its entry back to
+> `manifest.json`. Status table preserved as a historical record.
+
+| Measure | Cases | Direct HAPI | Lenny Jobs | Root Cause | Fix Needed |
+|---|---|---|---|---|---|
+| CMS2FHIRPCSDepressionScreenAndFollowUp | 36 | 36 pass¹ | ❌ 36/36 eval errors | Missing 10 VSAC ValueSets | Refreshed bundle from MADiE with ValueSets |
+| CMS71FHIRSTKAnticoagAFFlutter | 83 | 83 pass¹ | ✅ passed (clinically untrusted) | Duplicate Claim IDs in MADiE v0.3.002 export | Refreshed bundle from MADiE (per-patient Claims) |
+| CMS165FHIRControllingHighBloodPressure | 10 | 10 pass¹ | ❌ 10/10 eval errors | Library version mismatch (`AdultOutpatientEncounters v4.16.000` vs. available `v4.19.000`) | Refreshed bundle from MADiE with updated library versions |
+| CMS1017FHIRHHFI | 65 | 65 skipped | Not run | HAPI DEQM scoring-type incompatibility → HTTP 400 | Await HAPI upstream fix (issue #100 closed; HTTP 400 still present in v8.8.0) |
+| CMS1218FHIRHHRF | 55 | 55 pass¹ | ❌ 55/55 eval errors | 0 ValueSets in bundle | Refreshed bundle from MADiE with ValueSets |
+
+¹ *"Pass" in strict=false direct-HAPI tests means the test did not crash — not that populations are correct.* PR #258 surfaces `MeasureReport.status=error` as a Lenny Jobs failure, so CMS2/CMS165/CMS1218 failed as jobs even though direct HAPI recorded soft passes.
 
 ---
 
@@ -245,14 +252,6 @@ Status: Genuine HAPI vs. MADiE CQL evaluation differences — **not fixable in L
 
 **Issue #140 root cause (2026-04-24):** Separate investigation confirmed the CMS122 `denominator-exclusion` gap is a HAPI upstream CQL bug, not a Lenny defect. Evidence: (1) the count of 19 actual vs. 25 expected exactly matches the 6 `_HAPI_DE_XFAIL` frailty patients; (2) Phase 3 testing showed adding an index-consistency gate to the `/jobs` path improved overall CMS122 accuracy (49/56 → 50/56) but left `denominator-exclusion` at 19 → 19, ruling out reference-index timing. The `/jobs` path hardcoded `asyncio.sleep(5.0)` was replaced with an index-consistency gate (same pattern as the validation path) to fix the broader accuracy gap for other patients; that gate was subsequently replaced by `synchronization.strategy=sync` at the HAPI level (PR #214). See issue #140 for full findings.
 
-### Class B: CMS71 — MADiE bundle export bug (strict=false)
-
-MADiE v0.3.002 exports all 83 Claim resources with the same ID. `fix_duplicate_claim_ids()` assigns unique IDs and the Lenny Jobs pipeline completes, but the direct-HAPI harness still emits population warnings and the measure remains clinically untrusted until MADiE ships corrected per-patient Claims.
-
-### Class C: CMS165 — library version mismatch (strict=false)
-
-Bundle v0.3.000 requires `AdultOutpatientEncounters v4.16.000`; HAPI has `v4.19.000` (loaded by CMS125/CMS130). Direct HAPI records non-strict warning passes; Lenny Jobs fails all 10 patient evaluations after PR #258 surfaces error reports. Needs refreshed bundle from MADiE.
-
 ---
 
 ## Known Noise
@@ -281,10 +280,6 @@ All EXM FHIR4 bundles (EXM104, EXM105, EXM108, EXM124, EXM125, EXM130, EXM165, E
 ## Next Steps
 
 1. **File HAPI upstream issue** (when ready) — hapifhir/hapi-fhir for the DE criteria evaluation divergence (frailty, dementia, mastectomy date boundary). When filed, update `_HAPI_DE_XFAIL` comment in `test_connectathon_measures.py` with the issue number.
-2. **Lenny Jobs strict=false expectation** — decide whether `test_full_jobs_pipeline.py` should explicitly expect/xfail failed jobs for CMS2, CMS165, and CMS1218 now that HAPI error reports are surfaced instead of silently stored
-3. **CMS122/124/125/130** — obtain QI-Core 6 dQM v1.0.000 bundles from MADiE (issue #115)
-4. **CMS165** — get refreshed bundle from MADiE with updated library versions
-5. **CMS71** — get refreshed bundle from MADiE with correct per-patient Claim resources
-6. **CMS1017** — await HAPI DEQM upstream fix for composite/ratio scoring type (issue #100 closed; HTTP 400 still present in v8.8.0); re-add to golden tests after fix ships and VS conflicts are verified gone
-7. **CMS1218** — once MADiE ships bundle with required ValueSets, re-add to golden tests
-8. **Remove xfail marks** — when HAPI ships a fix for the DE divergence, run `--runxfail` to confirm xpassed, then remove from `_HAPI_DE_XFAIL`
+2. **CMS122/124/125/130** — obtain QI-Core 6 dQM v1.0.000 bundles from MADiE (issue #115)
+3. **Re-add removed measures** (once upstream fixes ship) — see [Removed measures](#removed-measures-2026-05-06) section. Drop the refreshed bundle into `seed/connectathon-bundles/` and add the entry back to `manifest.json`.
+4. **Remove xfail marks** — when HAPI ships a fix for the DE divergence, run `--runxfail` to confirm xpassed, then remove from `_HAPI_DE_XFAIL`

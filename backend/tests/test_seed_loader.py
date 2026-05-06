@@ -55,7 +55,7 @@ class TestSynthesizeGroupFromPatients:
 
     def test_returns_none_when_bundle_already_has_group(self):
         bundle = _make_bundle("Patient", "Patient", include_group=True)
-        result = synthesize_group_from_patients(bundle, "CMS1017FHIRHHFI")
+        result = synthesize_group_from_patients(bundle, "CMS122FHIRDiabetesAssessGreaterThan9Percent")
         assert result is None, "Should skip synthesis when Group already exists"
 
     def test_returns_none_when_no_patients(self):

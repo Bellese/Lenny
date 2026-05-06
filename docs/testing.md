@@ -135,9 +135,9 @@ Each entry in `manifest.json` has a `"strict"` field. All current entries have `
 
 ```json
 {
-  "id": "CMS1017FHIRHHFI",
-  "bundle_file": "CMS1017FHIRHHFI-bundle.json",
-  "expected_test_cases": 65,
+  "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+  "bundle_file": "CMS122FHIRDiabetesAssessGreaterThan9Percent-bundle.json",
+  "expected_test_cases": 56,
   "strict": true,
   "known_issues": []
 }

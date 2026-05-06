@@ -112,8 +112,8 @@ def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encoun
 
     Procedure, MedicationRequest, and MedicationAdministration are intentionally NOT
     reindexed here.  Triggering $reindex on those types restarts HAPI's async reindex
-    jobs; CMS measures that query those types (CMS2, CMS165, CMS1218) will then see
-    500 errors from HAPI mid-evaluation, causing all patient evals to fail.
+    jobs; any CMS measure that queries those types shortly afterwards will see 500 errors
+    from HAPI mid-evaluation, causing all patient evals to fail.
 
     The probe resources must already exist in HAPI (written before calling this function).
     """
@@ -129,10 +129,8 @@ def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encoun
     #
     # Do NOT reindex Procedure, MedicationRequest, or MedicationAdministration here.
     # Explicitly triggering $reindex for those types causes HAPI to restart their async
-    # reindex jobs; when CMS2/CMS165/CMS1218 run shortly afterwards, those jobs are still
-    # in progress and HAPI returns 500 errors on internal CQL searches against those types,
-    # causing all patient evaluations to fail.  The startup Lucene rebuild (which has already
-    # made progress by the time HAPI's /metadata responds) handles them without interference.
+    # reindex jobs, returning 500 errors on internal CQL searches until the jobs finish.
+    # The startup Lucene rebuild handles them without interference.
     _REINDEX_TYPES = ("Encounter", "Observation", "Condition")
     for resource_type in _REINDEX_TYPES:
         params = {"resourceType": "Parameters", "parameter": [{"name": "type", "valueString": resource_type}]}
