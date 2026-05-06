@@ -986,6 +986,33 @@ async def resolve_evaluated_resource(reference: str) -> dict[str, Any]:
         return resp.json()
 
 
+async def snapshot_evaluated_resources(measure_report: dict[str, Any]) -> list[dict[str, Any]] | None:
+    """Resolve every evaluatedResource reference in a MeasureReport to a stored snapshot.
+
+    Returns a list of full FHIR resources. Per-reference failures are skipped and logged
+    rather than raised — partial snapshots are still useful and the caller has already
+    persisted the MeasureReport itself. Returns None when there is nothing to snapshot.
+    """
+    refs = [
+        r.get("reference")
+        for r in (measure_report or {}).get("evaluatedResource", [])
+        if isinstance(r, dict) and r.get("reference")
+    ]
+    if not refs:
+        return None
+
+    resources: list[dict[str, Any]] = []
+    for ref in refs:
+        try:
+            resources.append(await resolve_evaluated_resource(ref))
+        except Exception as exc:
+            logger.warning(
+                "Failed to snapshot evaluated resource",
+                extra={"reference": ref, "error": str(exc)[:200]},
+            )
+    return resources
+
+
 async def list_groups(
     cdr_url: str,
     auth_headers: dict[str, str],

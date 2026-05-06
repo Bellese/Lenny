@@ -259,6 +259,7 @@ async def _run_schema_migrations(conn) -> None:
         for stmt in [
             "ALTER TABLE measure_results ADD COLUMN IF NOT EXISTS error_details JSONB",
             "ALTER TABLE measure_results ADD COLUMN IF NOT EXISTS error_phase VARCHAR(32)",
+            "ALTER TABLE measure_results ADD COLUMN IF NOT EXISTS evaluated_resources JSONB",
             "ALTER TABLE bundle_uploads ADD COLUMN IF NOT EXISTS error_details JSONB",
             "ALTER TABLE validation_results ADD COLUMN IF NOT EXISTS error_details JSONB",
         ]:

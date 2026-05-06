@@ -256,3 +256,58 @@ async def test_get_evaluated_resources_error_does_not_leak_hostname(client, test
     data = resp.json()
     assert data["errors"] is not None
     assert len(data["errors"]) > 0
+
+
+async def test_get_evaluated_resources_uses_snapshot_when_present(client, test_session):
+    """When a snapshot was persisted at job time, the endpoint reads from it
+    and never calls the live resolver — so historical results stay viewable
+    after the next job's wipe_patient_data() destroys the engine-side data."""
+    job, results = await _create_job_with_results(test_session, num_results=1)
+    result_id = results[0].id
+
+    snapshot = [
+        {"resourceType": "Patient", "id": "patient-0", "gender": "female"},
+        {"resourceType": "Condition", "id": "cond-0", "code": {"text": "Diabetes"}},
+    ]
+    results[0].evaluated_resources = snapshot
+    await test_session.commit()
+
+    with patch(
+        "app.routes.results.resolve_evaluated_resource",
+        new_callable=AsyncMock,
+        side_effect=AssertionError("live resolver must not be called when snapshot is present"),
+    ):
+        resp = await client.get(f"/results/{result_id}/evaluated-resources")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["source"] == "snapshot"
+    assert data["resolved"] == 2
+    assert data["resources"] == snapshot
+    assert data["errors"] is None
+
+
+async def test_get_evaluated_resources_falls_back_to_live_for_legacy_rows(client, test_session):
+    """Legacy MeasureResult rows (predating the snapshot column) have
+    evaluated_resources = NULL; the endpoint should fall back to live resolution."""
+    job, results = await _create_job_with_results(test_session, num_results=1)
+    result_id = results[0].id
+    assert results[0].evaluated_resources is None
+
+    patient_resource = {"resourceType": "Patient", "id": "patient-0"}
+    condition_resource = {"resourceType": "Condition", "id": "cond-0"}
+
+    async def mock_resolve(reference):
+        return patient_resource if "Patient" in reference else condition_resource
+
+    with patch(
+        "app.routes.results.resolve_evaluated_resource",
+        new_callable=AsyncMock,
+        side_effect=mock_resolve,
+    ):
+        resp = await client.get(f"/results/{result_id}/evaluated-resources")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["source"] == "live"
+    assert data["resolved"] == 2

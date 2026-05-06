@@ -7,6 +7,16 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Removed 5 broken connectathon measures (CMS2, CMS71, CMS165, CMS1017, CMS1218) from seed bundles, manifest, and test suite due to upstream bundle/HAPI issues that cannot be fixed before the connectathon. See issue #278. The 7 remaining strict=true measures (CMS122, CMS124, CMS125, CMS130, CMS506, CMS816, CMS529) are unaffected. Re-add any measure once MADiE/HAPI ships a fix by dropping the refreshed bundle into `seed/connectathon-bundles/` and adding its manifest entry.
 
+## [0.0.17.0] - 2026-05-06
+
+### Added
+- **Evaluated resources now survive subsequent jobs** — every successful patient evaluation persists a snapshot of its `evaluatedResource` FHIR resources alongside the MeasureReport, so the Results page's "Evaluated resources" section remains viewable after the next job's `wipe_patient_data()` would have cleared the engine-side data. New `evaluated_resources` JSON column on `measure_results`; `GET /results/{id}/evaluated-resources` now returns from the snapshot when present (`source: "snapshot"`) and falls back to live measure-engine resolution for legacy rows (`source: "live"`).
+
+## [0.0.16.1] - 2026-05-06
+
+### Fixed
+- **Population membership now displays in the patient detail fly-out** — the Results page's per-patient drawer was always showing an empty "Population membership" section and missing header badges. The component was reading population flags at the top level of the result object, but the API nests them under `result.populations`. Three accesses now read from the correct path, so each patient's Initial population / Denominator / Numerator status renders with the right Yes/No state.
+
 ## [0.0.16.0] - 2026-05-05
 
 ### Fixed

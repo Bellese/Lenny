@@ -137,11 +137,12 @@ async def get_evaluated_resources(
     result_id: int,
     session: AsyncSession = Depends(get_session),
 ) -> dict:
-    """Resolve evaluatedResource references from a MeasureReport.
+    """Return evaluatedResource resources for a MeasureReport.
 
-    Proxies to the measure engine to fetch each referenced resource.
-    The patient data is kept on the measure engine until the NEXT job
-    starts, so these references remain resolvable.
+    New rows have a snapshot persisted at job time (see orchestrator.py) so this
+    survives the next job's wipe_patient_data(). Legacy rows fall back to live
+    resolution against the measure engine, which only works until the next job
+    starts.
     """
     mr = await session.get(MeasureResult, result_id)
     if not mr:
@@ -160,18 +161,26 @@ async def get_evaluated_resources(
         )
 
     measure_report = mr.measure_report or {}
-    evaluated_refs: list[str] = []
+    evaluated_refs: list[str] = [
+        ref_obj.get("reference") for ref_obj in measure_report.get("evaluatedResource", []) if ref_obj.get("reference")
+    ]
 
-    # Extract evaluatedResource references from the MeasureReport
-    for ref_obj in measure_report.get("evaluatedResource", []):
-        ref = ref_obj.get("reference")
-        if ref:
-            evaluated_refs.append(ref)
+    # New rows: snapshot was persisted at job time, survives subsequent wipes.
+    if mr.evaluated_resources is not None:
+        snapshot = mr.evaluated_resources
+        return {
+            "result_id": result_id,
+            "patient_id": mr.patient_id,
+            "total_references": len(evaluated_refs),
+            "resolved": len(snapshot),
+            "resources": snapshot,
+            "errors": None,
+            "source": "snapshot",
+        }
 
-    # Resolve each reference from the measure engine
+    # Legacy rows (pre-snapshot feature): fall back to live resolution.
     resources: list[dict] = []
     errors: list[dict] = []
-
     for ref in evaluated_refs:
         try:
             resource = await resolve_evaluated_resource(ref)
@@ -190,4 +199,5 @@ async def get_evaluated_resources(
         "resolved": len(resources),
         "resources": resources,
         "errors": errors if errors else None,
+        "source": "live",
     }
