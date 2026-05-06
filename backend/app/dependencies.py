@@ -1,4 +1,14 @@
-"""FastAPI dependency for active CDR configuration."""
+"""FastAPI dependencies for active connection configurations.
+
+`ConnectionContext` is the canonical dataclass returned by `get_active_<kind>`
+dependencies. Future kinds (MCS, TS, MR, MRR) reuse this shape with the `kind`
+field disambiguating which connection-management table the row came from.
+
+`CDRContext` remains as a backwards-compatible alias so existing imports
+(`from app.dependencies import CDRContext, get_active_cdr`) keep working
+unchanged. The alias will be removed once all call sites migrate to
+`ConnectionContext` (a follow-up PR).
+"""
 
 from __future__ import annotations
 
@@ -14,7 +24,15 @@ from app.models.config import AuthType, CDRConfig
 
 
 @dataclass
-class CDRContext:
+class ConnectionContext:
+    """Active-connection snapshot loaded by `get_active_<kind>` dependencies.
+
+    `cdr_url` retains its kind-prefixed name for backwards compatibility with
+    existing route handlers (`jobs.py`, `health.py`). When MCS lands the
+    dataclass will gain a parallel `mcs_url` field. Generic-`url` normalization
+    is deferred until kind #3 (Terminology Server) per the design doc.
+    """
+
     id: int
     name: str
     cdr_url: str
@@ -22,9 +40,14 @@ class CDRContext:
     auth_credentials: dict | None
     is_default: bool
     is_read_only: bool
+    kind: str = "cdr"
 
 
-async def get_active_cdr(session: AsyncSession = Depends(get_session)) -> CDRContext:
+# Backwards-compat alias. Removed once call sites migrate to ConnectionContext.
+CDRContext = ConnectionContext
+
+
+async def get_active_cdr(session: AsyncSession = Depends(get_session)) -> ConnectionContext:
     """FastAPI dependency: load the active CDR config from DB.
 
     Fallback to Local CDR defaults if no active row exists
@@ -33,7 +56,7 @@ async def get_active_cdr(session: AsyncSession = Depends(get_session)) -> CDRCon
     result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
     cfg = result.scalar_one_or_none()
     if cfg is None:
-        return CDRContext(
+        return ConnectionContext(
             id=0,
             name="Local CDR",
             cdr_url=settings.DEFAULT_CDR_URL,
@@ -41,8 +64,9 @@ async def get_active_cdr(session: AsyncSession = Depends(get_session)) -> CDRCon
             auth_credentials=None,
             is_default=True,
             is_read_only=False,
+            kind="cdr",
         )
-    return CDRContext(
+    return ConnectionContext(
         id=cfg.id,
         name=cfg.name or "Local CDR",
         cdr_url=cfg.cdr_url,
@@ -50,4 +74,5 @@ async def get_active_cdr(session: AsyncSession = Depends(get_session)) -> CDRCon
         auth_credentials=cfg.auth_credentials,
         is_default=cfg.is_default,
         is_read_only=cfg.is_read_only,
+        kind="cdr",
     )
