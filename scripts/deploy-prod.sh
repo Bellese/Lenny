@@ -9,7 +9,7 @@
 #   5. Wait for db healthcheck to pass (12 × 5s = 60s max)
 #   6. scripts/reconcile-db-password.sh
 #   7. docker compose up -d (remaining services)
-#   8. Health check: curl https://api.98-89-219-217.nip.io/health (24 × 5s = 2 min max)
+#   8. Health check: curl https://api.lenny.bellese.dev/health (24 × 5s = 2 min max)
 #
 # --post-db-restart mode:
 #   Runs only steps 1–3 and 6 (preflight, fetch, extract secret, reconcile).
@@ -47,7 +47,7 @@ readonly SECRET_FILE="${ENV_DIR}/POSTGRES_PASSWORD"
 readonly FERNET_SECRET_FILE="${ENV_DIR}/CDR_FERNET_KEY"
 readonly FETCH_SCRIPT="${LEONARD_DIR}/scripts/fetch-prod-secrets.sh"
 readonly RECONCILE_SCRIPT="${LEONARD_DIR}/scripts/reconcile-db-password.sh"
-readonly HEALTH_URL="https://api.98-89-219-217.nip.io/health"
+readonly HEALTH_URL="https://api.lenny.bellese.dev/health"
 
 # ── argument parsing ───────────────────────────────────────────────────────────
 POST_DB_RESTART=0
@@ -165,7 +165,7 @@ LEONARD_DIR="$LEONARD_DIR" "$RECONCILE_SCRIPT"
 # ── step 7: pull pre-built images from registries ─────────────────────────────
 # Without an explicit pull, `up --build` uses any locally-cached image even when
 # `:latest` upstream has been republished. This bit us when the bake workflow
-# (which republishes ghcr.io/bellese/mct2-hapi-{cdr,measure}:latest) finished
+# (which republishes ghcr.io/bellese/lenny-hapi-{cdr,measure}:latest) finished
 # AFTER the deploy workflow started — deploy used the stale cached image and
 # never picked up the new bake. `docker compose pull` here is best-effort
 # (--ignore-pull-failures lets us continue if a registry hiccups; the next

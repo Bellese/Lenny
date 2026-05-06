@@ -451,6 +451,189 @@ async def test_delete_running_job_sets_delete_requested(client, test_session):
 
 
 # ---------------------------------------------------------------------------
+# GET /jobs/{id}/measure-report
+# ---------------------------------------------------------------------------
+
+
+async def test_get_job_measure_report_success(client, test_session):
+    """Bundle contains only successful patients; error patients are excluded."""
+    from app.models.job import Job, JobStatus, MeasureResult
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.flush()
+
+    report = {"resourceType": "MeasureReport", "type": "individual", "group": []}
+
+    # 3 successful patients
+    for pid in ("p1", "p2", "p3"):
+        test_session.add(
+            MeasureResult(
+                job_id=job.id,
+                patient_id=pid,
+                measure_report=report,
+                populations={"initial_population": True, "denominator": True, "numerator": False},
+            )
+        )
+
+    # 1 error patient — should be excluded
+    test_session.add(
+        MeasureResult(
+            job_id=job.id,
+            patient_id="p-err",
+            measure_report={"resourceType": "OperationOutcome"},
+            populations={"error": True, "error_message": "gather failed", "error_phase": "gather"},
+            error_phase="gather",
+        )
+    )
+    await test_session.commit()
+
+    resp = await client.get(f"/jobs/{job.id}/measure-report")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["resourceType"] == "Bundle"
+    assert data["type"] == "collection"
+    assert data["total"] == 3
+    assert len(data["entry"]) == 3
+    assert all(e["resource"]["resourceType"] == "MeasureReport" for e in data["entry"])
+    assert "timestamp" in data
+
+
+async def test_get_job_measure_report_includes_gather_partial(client, test_session):
+    """gather_partial patients have real MeasureReports and no populations['error'] key — included."""
+    from app.models.job import Job, JobStatus, MeasureResult
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.flush()
+
+    report = {"resourceType": "MeasureReport", "type": "individual", "group": []}
+    test_session.add(
+        MeasureResult(
+            job_id=job.id,
+            patient_id="p-partial",
+            measure_report=report,
+            populations={"initial_population": True, "denominator": False, "numerator": False},
+            error_phase="gather_partial",
+            error_details={"operation": "gather", "failed_types": ["Observation"]},
+        )
+    )
+    await test_session.commit()
+
+    resp = await client.get(f"/jobs/{job.id}/measure-report")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 1
+    assert data["entry"][0]["resource"]["resourceType"] == "MeasureReport"
+
+
+async def test_get_job_measure_report_job_not_found(client):
+    """Returns 404 OperationOutcome when job does not exist."""
+    resp = await client.get("/jobs/99999/measure-report")
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    assert detail["issue"][0]["code"] == "not-found"
+
+
+async def test_get_job_measure_report_no_results(client, test_session):
+    """Returns 404 when job exists but has no MeasureResult rows."""
+    from app.models.job import Job, JobStatus
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.commit()
+
+    resp = await client.get(f"/jobs/{job.id}/measure-report")
+    assert resp.status_code == 404
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    assert detail["issue"][0]["code"] == "not-found"
+
+
+async def test_get_job_measure_report_in_progress_returns_partial_bundle(client, test_session):
+    """In-progress jobs return a partial bundle — no status gate is applied."""
+    from app.models.job import Job, JobStatus, MeasureResult
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+    )
+    test_session.add(job)
+    await test_session.flush()
+
+    report = {"resourceType": "MeasureReport", "type": "individual", "group": []}
+    test_session.add(
+        MeasureResult(
+            job_id=job.id,
+            patient_id="p1",
+            measure_report=report,
+            populations={"initial_population": True},
+        )
+    )
+    await test_session.commit()
+
+    resp = await client.get(f"/jobs/{job.id}/measure-report")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 1
+
+
+async def test_get_job_measure_report_all_errors_returns_empty_bundle(client, test_session):
+    """When all results are errors, returns 200 with an empty bundle (not 404)."""
+    from app.models.job import Job, JobStatus, MeasureResult
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.flush()
+
+    test_session.add(
+        MeasureResult(
+            job_id=job.id,
+            patient_id="p-err",
+            measure_report={"resourceType": "OperationOutcome"},
+            populations={"error": True, "error_message": "gather failed", "error_phase": "gather"},
+            error_phase="gather",
+        )
+    )
+    await test_session.commit()
+
+    resp = await client.get(f"/jobs/{job.id}/measure-report")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["resourceType"] == "Bundle"
+    assert data["total"] == 0
+    assert data["entry"] == []
+
+
+# ---------------------------------------------------------------------------
 # GET /jobs/{id}/comparison
 # ---------------------------------------------------------------------------
 

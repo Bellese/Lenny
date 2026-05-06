@@ -38,8 +38,9 @@ SKIP_MESSAGE = (
 # reference-type search parameters indexed, causing Encounter?patient=… to
 # return 0 results and $evaluate-measure to produce all-zero populations.
 #
-# Fix: after each bulk data load, trigger a fresh $reindex and poll until a
-# known patient's encounters appear in search results.
+# Fix: after each bulk data load, trigger a fresh $reindex for Encounter,
+# Observation, and Condition, then poll until reference-param searches for
+# all three return results before allowing tests to proceed.
 _REINDEX_POLL_INTERVAL = 1  # seconds between probe checks
 _REINDEX_TIMEOUT = 300  # seconds before giving up
 
@@ -102,35 +103,85 @@ def _wait_for_valueset_expansion(base_url: str, large_valueset_ids: list[str]) -
 def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encounter_id: str) -> None:
     """Trigger HAPI $reindex and block until reference search indexes are ready.
 
-    Calls ``POST /fhir/$reindex`` then polls ``Encounter?patient={probe}``
-    until at least one result appears.  The probe resources must already
-    exist in HAPI (written before calling this function).
+    Reindexes Encounter, Observation, and Condition only — the types that caused
+    CMS122/124/125 to produce all-zero populations when missing from the Lucene index.
+    Two gates must pass before returning:
+      1. Encounter?patient= returns results (reference-param indexing ready).
+      2. Observation?patient= and Condition?patient= return results (CMS122/124/125
+         initial-population criteria depend on these types).
+
+    Procedure, MedicationRequest, and MedicationAdministration are intentionally NOT
+    reindexed here.  Triggering $reindex on those types restarts HAPI's async reindex
+    jobs; CMS measures that query those types (CMS2, CMS165, CMS1218) will then see
+    500 errors from HAPI mid-evaluation, causing all patient evals to fail.
+
+    The probe resources must already exist in HAPI (written before calling this function).
     """
+    import warnings as _warnings
+
     import httpx as _httpx
 
     headers = {"Content-Type": "application/fhir+json"}
-    params = {"resourceType": "Parameters", "parameter": [{"name": "type", "valueString": "Encounter"}]}
-    import warnings as _warnings
 
-    r = _httpx.post(f"{base_url}/$reindex", json=params, headers=headers, timeout=30)
-    if r.status_code >= 400:
-        _warnings.warn(f"$reindex trigger at {base_url} returned {r.status_code}: {r.text[:200]}")
+    # Reindex only the types we gate on (Encounter, Observation, Condition).  Previously only
+    # Encounter was reindexed; Observation/Condition were added because CMS122/124/125 depend
+    # on them and produce IP=0 when they are missing from the Lucene index.
+    #
+    # Do NOT reindex Procedure, MedicationRequest, or MedicationAdministration here.
+    # Explicitly triggering $reindex for those types causes HAPI to restart their async
+    # reindex jobs; when CMS2/CMS165/CMS1218 run shortly afterwards, those jobs are still
+    # in progress and HAPI returns 500 errors on internal CQL searches against those types,
+    # causing all patient evaluations to fail.  The startup Lucene rebuild (which has already
+    # made progress by the time HAPI's /metadata responds) handles them without interference.
+    _REINDEX_TYPES = ("Encounter", "Observation", "Condition")
+    for resource_type in _REINDEX_TYPES:
+        params = {"resourceType": "Parameters", "parameter": [{"name": "type", "valueString": resource_type}]}
+        r = _httpx.post(f"{base_url}/$reindex", json=params, headers=headers, timeout=30)
+        if r.status_code >= 400:
+            _warnings.warn(f"$reindex({resource_type}) at {base_url} returned {r.status_code}: {r.text[:200]}")
 
+    # Gate 1: Encounter reference-param indexing (patient-scoped probe)
     deadline = time.monotonic() + _REINDEX_TIMEOUT
     while time.monotonic() < deadline:
         resp = _httpx.get(f"{base_url}/Encounter?patient={probe_patient_id}&_count=1", timeout=10)
         if resp.status_code == 200:
             try:
                 if resp.json().get("entry"):
-                    return
+                    break
             except Exception:
                 pass
         time.sleep(_REINDEX_POLL_INTERVAL)
+    else:
+        raise RuntimeError(
+            f"HAPI at {base_url} reference-param indexing did not complete within {_REINDEX_TIMEOUT}s "
+            f"(probe: Encounter?patient={probe_patient_id})"
+        )
 
-    raise RuntimeError(
-        f"HAPI at {base_url} reference-param indexing did not complete within {_REINDEX_TIMEOUT}s "
-        f"(probe: Encounter?patient={probe_patient_id})"
-    )
+    # Gate 2: Observation and Condition reference-param indexing must be ready.
+    # $everything uses patient-reference searches to retrieve these; CMS122/124/125
+    # produce IP=0 when their Observation/Condition data is missing.
+    # Use the same probe patient as Gate 1 — connectathon patients all have
+    # clinical data so a patient?= probe is a genuine reference-param index test
+    # (unlike ?_summary=count which HAPI may serve from JPA row-counts, not Lucene).
+    for resource_type, search_param in (("Observation", "patient"), ("Condition", "patient")):
+        deadline = time.monotonic() + _REINDEX_TIMEOUT
+        while time.monotonic() < deadline:
+            resp = _httpx.get(
+                f"{base_url}/{resource_type}?{search_param}={probe_patient_id}&_count=1",
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                try:
+                    if resp.json().get("entry"):
+                        break
+                except Exception:
+                    pass
+            time.sleep(_REINDEX_POLL_INTERVAL)
+        else:
+            _warnings.warn(
+                f"HAPI at {base_url} {resource_type} reference-param index not ready within {_REINDEX_TIMEOUT}s; "
+                f"CMS measures depending on {resource_type} may return IP=0."
+            )
 
 
 # ---------------------------------------------------------------------------

@@ -25,3 +25,13 @@ api.{$CADDY_HOST} {
         header_up X-Forwarded-For {remote_host}
     }
 }
+
+# Soft cutover from the legacy nip.io URLs to lenny.bellese.dev (issue #264).
+# Remove these two blocks ≥ 2 weeks after cutover lands.
+98-89-219-217.nip.io {
+    redir https://{$CADDY_HOST}{uri} permanent
+}
+
+api.98-89-219-217.nip.io {
+    redir https://api.{$CADDY_HOST}{uri} permanent
+}

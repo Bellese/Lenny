@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.16.0] - 2026-05-05
+
+### Fixed
+- **Jobs page hero card now shows the actively-running job** — when multiple jobs are queued, the progress card previously showed the most-recently-created queued job instead of the job actually executing. The hero card now prioritizes a truly-running job and only falls back to showing a queued job when nothing is in progress.
+- **Subtitle no longer conflates running and queued counts** — the "N running" counter now shows only jobs in active execution; queued jobs appear separately as "N queued" when present.
+- **Hero card badge reflects actual job status** — the badge was hardcoded as "Running" regardless of whether the job was queued or running. It now renders the correct status via `StatusBadge`.
+- **Elapsed timer hidden for queued jobs** — the "Elapsed" timer in the hero card was counting from creation time for queued jobs that haven't started yet. It now only appears for jobs that are actively running.
+
+### Added
+- **`jobStatus.js` utility** — extracted `isActuallyRunning`, `isRunning`, `isComplete`, and `selectActiveJob` helpers to `frontend/src/utils/jobStatus.js` with 24 unit tests covering the hero-card job selection logic.
+
 ## [0.0.15.0] - 2026-05-03
 
 ### Added

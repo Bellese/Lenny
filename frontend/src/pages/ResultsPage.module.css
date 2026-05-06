@@ -47,8 +47,11 @@
 }
 
 .headerActions {
+  --action-control-height: 30px;
+
   display: flex;
-  align-items: center;
+  align-items: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
 }
 
@@ -66,12 +69,15 @@
 }
 
 .jobSelect {
-  padding: 6px 10px;
+  box-sizing: border-box;
+  height: var(--action-control-height);
+  padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--bg-elevated);
   color: var(--text);
-  font-size: 13px;
+  font-size: 12px;
+  line-height: 1;
   min-width: 200px;
 }
 
@@ -205,16 +211,21 @@
 }
 
 .btnGhost {
-  display: flex;
+  box-sizing: border-box;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  padding: 5px 10px;
+  height: var(--action-control-height);
+  padding: 0 10px;
   background: transparent;
   border: 1px solid var(--line);
   border-radius: var(--radius-sm);
   font-size: 12px;
+  line-height: 1;
   color: var(--text-muted);
   cursor: pointer;
+  white-space: nowrap;
 }
 
 .btnGhost:hover:not(:disabled) {
@@ -228,13 +239,21 @@
 }
 
 .btnAccent {
-  padding: 5px 12px;
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: var(--action-control-height);
+  padding: 0 12px;
   background: var(--accent);
+  border: 1px solid var(--accent);
   color: #fff;
   border-radius: var(--radius-sm);
   font-size: 12px;
   font-weight: 600;
+  line-height: 1;
   cursor: pointer;
+  white-space: nowrap;
   transition: opacity 0.15s;
 }
 
@@ -375,6 +394,14 @@
     width: 100%;
   }
 
+  .headerActions {
+    align-items: stretch;
+  }
+
+  .jobSelectGroup {
+    width: 100%;
+  }
+
   .cardsRow {
     grid-template-columns: 1fr;
     gap: 12px;
@@ -405,11 +432,13 @@
   }
 
   .tableActions,
-  .btnGhost {
+  .btnGhost,
+  .btnAccent {
     width: 100%;
   }
 
-  .btnGhost {
+  .btnGhost,
+  .btnAccent {
     justify-content: center;
   }
 

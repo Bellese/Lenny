@@ -24,7 +24,7 @@ without loading all 12 bundles.  All 12 bundles are still loaded nightly by the
 bake job (scripts/load_connectathon_bundles.py) which is the authoritative
 source-of-truth coverage.
 
-See: https://github.com/Bellese/mct2/issues/202
+See: https://github.com/Bellese/lenny/issues/202
 """
 
 from __future__ import annotations

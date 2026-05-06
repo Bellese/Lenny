@@ -429,6 +429,56 @@ async def test_evaluate_measure_raises_on_200_with_operation_outcome():
     assert "CQL evaluation error" in err.outcome.primary_diagnostic()
 
 
+async def test_evaluate_measure_raises_on_200_with_error_status_measure_report():
+    """evaluate_measure raises FhirOperationError when HAPI returns 200 OK with
+    MeasureReport.status == 'error' (e.g. Unknown ValueSet).  Populations are all
+    zero in that response but the error must not be silently swallowed."""
+    contained_oo = {
+        "resourceType": "OperationOutcome",
+        "id": "oo-1",
+        "issue": [
+            {
+                "severity": "error",
+                "code": "exception",
+                "diagnostics": (
+                    "Exception for subjectId: Patient/p1, "
+                    "Message: HAPI-2788: Unknown ValueSet: "
+                    "http%3A%2F%2Fcts.nlm.nih.gov%2Ffhir%2FValueSet%2F2.16.840.1.113762.1.4.1248.208"
+                ),
+            }
+        ],
+    }
+    measure_report = {
+        "resourceType": "MeasureReport",
+        "status": "error",
+        "period": {"start": "2026-01-01", "end": "2026-12-31"},
+        "contained": [contained_oo],
+        "group": [
+            {
+                "population": [
+                    {"code": {"coding": [{"code": "initial-population"}]}, "count": 0},
+                ]
+            }
+        ],
+    }
+    response = _make_response(200, measure_report)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        with pytest.raises(FhirOperationError) as exc_info:
+            await evaluate_measure("CMS1218FHIRHHRF", "p1", "2026-01-01", "2026-12-31")
+
+    err = exc_info.value
+    assert err.status_code == 200
+    assert err.operation == "evaluate-measure"
+    assert err.outcome is not None
+    assert "HAPI-2788" in err.outcome.primary_diagnostic()
+    assert "2.16.840.1.113762.1.4.1248.208" in err.outcome.primary_diagnostic()
+
+
 async def test_push_resources_raises_fhir_error_on_http_failure():
     """push_resources raises FhirOperationError on non-2xx response."""
     resources = [{"resourceType": "Patient", "id": "p1"}]
