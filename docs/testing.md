@@ -113,15 +113,15 @@ The nightly `connectathon-measures.yml` workflow runs once per night and on manu
 
 ## Troubleshooting measure IP undercount
 
-If `/jobs` reports lower initial population counts than the direct-HAPI integration harness, work the ladder below in order — each step rules out one cause class. The same three env vars (`HAPI_SYNC_AFTER_UPLOAD`, `PATIENT_DATA_STRATEGY`, `VALUESET_RELOAD_MODE`) are the levers; isolate one at a time.
+If `/jobs` reports lower initial population counts than the direct-HAPI integration harness, work the ladder below in order — each step rules out one cause class. The two remaining env vars (`PATIENT_DATA_STRATEGY`, `VALUESET_RELOAD_MODE`) are the levers; isolate one at a time.
 
-**Step 1 — confirm async-indexing is the cause.** Set `HAPI_SYNC_AFTER_UPLOAD=False`, restart the backend, and re-run the failing job. If the count *changes*, the symptom is the HAPI async-indexing race (see CLAUDE.md) — the reindex wait is masking or revealing it. If the count is *unchanged*, async-indexing is not the issue; continue to Step 2.
+**Step 1 — rule out async-indexing.** Use the triage rule in the *Recurring bug: HAPI async-indexing race* section of `CLAUDE.md`: read the resource directly (`GET /{Type}/{id}`) and compare to what the search endpoint returns. If the direct read has data and the search doesn't, async-indexing is still the cause — `synchronization.strategy=sync` is the structural fix; investigate why it isn't taking effect (check docker-compose config, container restart). If direct read and search agree, async-indexing is not the issue; continue to Step 2.
 
 **Step 2 — confirm the data-acquisition path.** Set `PATIENT_DATA_STRATEGY=data_requirements` (or `batch_query` if you were on `data_requirements`), restart, and re-run. If counts shift, Lenny is fetching different resource sets between strategies — investigate which strategy is missing resources the measure CQL requires.
 
 **Step 3 — confirm ValueSet expansion.** Set `VALUESET_RELOAD_MODE=remap`, restart, and re-run. If counts move, a ValueSet expansion is the culprit (typically a code-system version mismatch between bundle and HAPI's terminology cache).
 
-**Background.** HAPI indexes Encounter patient references and expands large ValueSets asynchronously after bundle upload, so Lenny waits for reindex and `$expand` readiness before jobs can run against freshly uploaded Connectathon bundles. The validation dashboard path uses the same `HAPI_SYNC_AFTER_UPLOAD` reindex wait after the validation worker pushes patient data; upload-bundle and `/jobs` still wait for both reindex and ValueSet expansion readiness, but validation runs only need the reindex wait because they do not load new ValueSets. The full HAPI consistency model (and the structural fix tracked in #206) lives in the *Recurring bug: HAPI async-indexing race* section of `CLAUDE.md`.
+**Background.** HAPI expands large ValueSets asynchronously after bundle upload, so Lenny waits for `$expand` readiness before jobs can run against freshly uploaded Connectathon bundles. Index consistency (POST/PUT blocking until Lucene is refreshed) is handled by `synchronization.strategy=sync` on both HAPI services — the Python-side compensator was removed in PR #214. The full HAPI consistency model lives in the *Recurring bug: HAPI async-indexing race* section of `CLAUDE.md`.
 
 ---
 

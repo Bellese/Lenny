@@ -34,20 +34,15 @@ The weekly Connectathon Measures workflow has four independent jobs: **Bundle Lo
 
 PUT/POST 200 means the resource is durable. Search consistency is async, governed by `hibernate.search.backend.io.refresh_interval` (we have 100ms). Hibernate Search 6's default strategy commits to disk but does NOT request an index refresh — searches see stale snapshots until the next refresh tick fires, or forever if it stalls under load.
 
-### Current consistency gate
-
-`HAPI_SYNC_AFTER_UPLOAD=true` (default) makes the backend wait for index refresh after uploads — code paths in `validation.py` and `orchestrator.py`. Setting it to `false` is the first lever to pull when debugging: if the symptom changes, async-indexing is the cause.
-
 ### Pitfalls (each one cost a PR)
 
-- Use `trigger_reindex_and_wait_for_patients(base_url, [pids], timeout)` in `backend/app/services/fhir_client.py` — **not** `trigger_reindex_and_wait(base_url)` (no probe id), which falls back to `Patient?_count=1` and silent-skips when the index isn't ready.
 - Reindex Condition / Observation / Procedure / MedicationRequest / MedicationAdministration — measures don't query Encounter alone.
 - `/validation/upload-bundle` returns 200 before CDR indexing completes; subsequent `/jobs` runs race the index. There is no CDR-side wait.
 - `$everything` is a victim of this bug, not a cause. Don't propose replacing it.
 
-### Structural fix (applied in PR #206)
+### Structural fix (applied in PR #206; compensator removed in PR #214)
 
-`spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync` is now set on both HAPI services in `docker-compose.yml`, `docker-compose.test.yml`, and both seeded Dockerfiles. POST/PUT blocks until the Lucene index is refreshed, eliminating the bug class. The Python-side compensator (`HAPI_SYNC_AFTER_UPLOAD` + `trigger_reindex_and_wait*`) is still present as a rollback safety net; removal is a follow-up.
+`spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync` is now set on both HAPI services in `docker-compose.yml`, `docker-compose.test.yml`, and both seeded Dockerfiles. POST/PUT blocks until the Lucene index is refreshed, eliminating the bug class. The Python-side compensator (`HAPI_SYNC_AFTER_UPLOAD` + `trigger_reindex_and_wait*`) has been removed — HS6 `synchronization.strategy=sync` is the sole mechanism.
 
 ### History
 

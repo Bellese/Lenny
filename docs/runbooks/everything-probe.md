@@ -17,8 +17,7 @@ assert 'Encounter' in types, 'FAIL: \$everything returned only Patient — HAPI 
 
 If the assertion fails:
 
-1. Confirm async-indexing is the culprit by setting `HAPI_SYNC_AFTER_UPLOAD=False`, restarting the backend, and re-running the wipe+push. If the symptom changes, async-indexing is the cause.
-2. Check that `trigger_reindex_and_wait_for_patients(base_url, [pids], timeout)` was called with the actual patient IDs (not the no-args variant, which silent-skips).
-3. If still failing under load, see issue #206 — applying `hibernate.search.indexing.plan.synchronization.strategy=sync` on both HAPI services eliminates the race entirely.
+1. Confirm async-indexing is the culprit using the triage rule in `CLAUDE.md`: read the resource directly (`GET /{Type}/{id}`) and compare to what the search endpoint returns. If the direct read has data and the search doesn't, `synchronization.strategy=sync` is not taking effect — check that both HAPI services were restarted with the updated docker-compose config.
+2. If still failing under load, see issue #206 — `hibernate.search.indexing.plan.synchronization.strategy=sync` on both HAPI services (applied in PR #206, compensator removed in PR #214) is the structural fix.
 
 Replace `<a-patient-id-in-scope>` with a patient that should have data, e.g. one of the Connectathon seed IDs from `docs/connectathon-measures-status.md`.
