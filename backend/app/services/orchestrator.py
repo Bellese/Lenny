@@ -349,8 +349,9 @@ async def _process_single_batch(
     """Process a single batch in two phases.
 
     Phase 1 — GATHER & PUSH: Fetch each patient's data from the CDR and push
-    it to the measure engine.  After all patients are pushed, pause briefly so
-    HAPI FHIR's asynchronous search indexes catch up.
+    it to the measure engine.  HAPI FHIR's synchronous indexing strategy
+    (synchronization.strategy=sync) ensures resources are immediately
+    searchable after each push — no post-push wait needed.
 
     Phase 2 — EVALUATE: Call $evaluate-measure for each patient.  Because all
     patient data is already indexed, CQL evaluation sees the correct resources.
@@ -398,10 +399,6 @@ async def _process_single_batch(
             # Partial-gather: some resource types failed but data was pushed.
             # Mapped to error_details dict for annotation after evaluate succeeds.
             partial_gather_patients: dict[str, dict] = {}
-            # Track patients with Encounters so the reindex probe uses them
-            # (not a phantom pre-baked patient from the measure engine image).
-            patients_with_encounters: list[str] = []
-
             for patient_id in patient_ids:
                 if await _stop_or_delete_job(job_id):
                     return
@@ -410,8 +407,6 @@ async def _process_single_batch(
                     gather_result = await strategy.gather_patient_data(cdr_url, patient_id, auth_headers)
                     if gather_result.resources:
                         await push_resources(gather_result.resources)
-                        if any(r.get("resourceType") == "Encounter" for r in gather_result.resources):
-                            patients_with_encounters.append(patient_id)
                     logger.info(
                         f"Pushed {len(gather_result.resources)} resources for {patient_id[:8]}",
                         extra={"job_id": job_id, "patient_id": patient_id},
