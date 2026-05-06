@@ -28,13 +28,6 @@ from app.services.validation import (
     triage_test_bundle,
 )
 
-
-@pytest.fixture(autouse=True)
-def disable_hapi_sync_after_upload(monkeypatch):
-    """Keep existing triage tests from exercising product HAPI sync waits."""
-    monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False)
-
-
 # ---------------------------------------------------------------------------
 # sanitize_error
 # ---------------------------------------------------------------------------
@@ -518,7 +511,6 @@ class TestTriageTestBundle:
         ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                mock_settings.HAPI_SYNC_AFTER_UPLOAD = False
                 result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         # Measure + Library = 2 measure defs → push_resources called once for defs
@@ -587,7 +579,6 @@ class TestTriageTestBundle:
         ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                mock_settings.HAPI_SYNC_AFTER_UPLOAD = False
                 result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
         # clinical data pushed with auth headers
@@ -640,7 +631,6 @@ class TestTriageTestBundle:
         ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                mock_settings.HAPI_SYNC_AFTER_UPLOAD = False
                 result = await triage_test_bundle(bundle, "defs-only.json", test_session)
 
         assert result["measures_loaded"] == 1
@@ -821,51 +811,8 @@ class TestTriageTestBundle:
         row_count = await test_session.scalar(select(func.count()).select_from(ExpectedResult))
         assert row_count == 0, "expected results must not be committed when clinical push fails"
 
-    async def test_hapi_sync_after_upload_calls_reindex_and_valueset_wait(
-        self, test_session, mock_test_bundle_with_expected, monkeypatch
-    ):
-        """When enabled, triage blocks on HAPI reindex and ValueSet expansion readiness."""
-        stub = {"resourceType": "ValueSet", "id": "stub-vs", "url": "http://example.com/ValueSet/stub"}
-        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", True)
-        monkeypatch.setattr("app.services.validation.settings.MEASURE_ENGINE_URL", "http://measure/fhir")
-
-        with (
-            patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()),
-            patch(
-                "app.services.validation._prepare_measure_support_resources",
-                new_callable=AsyncMock,
-                return_value=[stub],
-            ),
-            patch("app.services.validation.trigger_reindex_and_wait") as mock_reindex,
-            patch("app.services.validation.wait_for_valueset_expansion", return_value={stub["url"]: 1}) as mock_wait,
-        ):
-            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
-
-        assert result["measures_loaded"] == 1
-        mock_reindex.assert_called_once_with("http://measure/fhir")
-        mock_wait.assert_called_once()
-        assert mock_wait.call_args.args[0] == "http://measure/fhir"
-        assert stub["url"] in mock_wait.call_args.args[1]
-
-    async def test_hapi_sync_after_upload_false_skips_sync_helpers(
-        self, test_session, mock_test_bundle_with_expected, monkeypatch
-    ):
-        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False)
-
-        with (
-            patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()),
-            patch("app.services.validation.trigger_reindex_and_wait") as mock_reindex,
-            patch("app.services.validation.wait_for_valueset_expansion") as mock_wait,
-        ):
-            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
-
-        assert result["measures_loaded"] == 1
-        mock_reindex.assert_not_called()
-        mock_wait.assert_not_called()
-
     async def test_progress_fn_called_for_each_phase(self, test_session, mock_test_bundle_with_expected, monkeypatch):
         """progress_fn is called once per phase with the correct field name and count."""
-        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False)
         monkeypatch.setattr("app.services.validation.settings.DEFAULT_CDR_URL", "http://hapi-fhir-cdr:8080/fhir")
 
         calls: list[tuple[str, int]] = []
@@ -890,10 +837,8 @@ class TestTriageTestBundle:
         assert dict(calls)["expected_results_loaded"] == 1
         assert dict(calls)["patients_loaded"] == 1
 
-    async def test_progress_fn_none_does_not_raise(self, test_session, mock_test_bundle_with_expected, monkeypatch):
+    async def test_progress_fn_none_does_not_raise(self, test_session, mock_test_bundle_with_expected):
         """Omitting progress_fn (None) does not raise and returns correct summary."""
-        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", False)
-
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
@@ -1048,123 +993,6 @@ class TestRunValidation:
         ctx.__aexit__ = AsyncMock(return_value=False)
         return ctx
 
-    async def _run_one_patient_validation(
-        self,
-        test_session,
-        monkeypatch,
-        *,
-        hapi_sync_after_upload: bool,
-        to_thread_side_effect=None,
-    ):
-        run = ValidationRun(status=ValidationStatus.queued)
-        test_session.add(run)
-        test_session.add(
-            ExpectedResult(
-                measure_url="https://example.com/Measure/CMS124",
-                patient_ref="patient-1",
-                test_description="resolved",
-                expected_populations={"numerator": 1},
-                period_start="2026-01-01",
-                period_end="2026-12-31",
-                source_bundle="cms124.json",
-            )
-        )
-        await test_session.commit()
-        await test_session.refresh(run)
-
-        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", hapi_sync_after_upload)
-        monkeypatch.setattr("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 7)
-        monkeypatch.setattr("app.services.validation.settings.MEASURE_ENGINE_URL", "http://measure/fhir")
-
-        strategy = MagicMock()
-        strategy.gather_patient_data = AsyncMock(
-            return_value=[
-                {"resourceType": "Patient", "id": "patient-1"},
-                {
-                    "resourceType": "Encounter",
-                    "id": "encounter-1",
-                    "subject": {"reference": "Patient/patient-1"},
-                },
-            ]
-        )
-
-        def make_ctx():
-            return self._make_session_ctx(test_session)
-
-        with (
-            patch("app.services.validation.async_session", side_effect=lambda: make_ctx()),
-            patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="measure-1"),
-            patch(
-                "app.services.validation._reload_measures_from_seed_bundles",
-                new_callable=AsyncMock,
-                return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
-            ),
-            patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
-            patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()),
-            patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
-            patch(
-                "app.services.validation.evaluate_measure",
-                new_callable=AsyncMock,
-                return_value={
-                    "group": [
-                        {
-                            "population": [
-                                {
-                                    "code": {"coding": [{"code": "numerator"}]},
-                                    "count": 1,
-                                }
-                            ]
-                        }
-                    ],
-                    "evaluatedResource": [],
-                },
-            ),
-            patch("app.services.validation.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread,
-            patch("app.services.validation.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
-        ):
-            if to_thread_side_effect is not None:
-                mock_to_thread.side_effect = to_thread_side_effect
-            await run_validation(run.id)
-
-        return run, mock_to_thread, mock_sleep
-
-    async def test_reindexes_after_patient_push_when_hapi_sync_enabled(self, test_session, monkeypatch):
-        _, mock_to_thread, mock_sleep = await self._run_one_patient_validation(
-            test_session,
-            monkeypatch,
-            hapi_sync_after_upload=True,
-        )
-
-        mock_to_thread.assert_awaited_once()
-        assert mock_to_thread.await_args.args[0].__name__ == "trigger_reindex_and_wait_for_patients"
-        assert mock_to_thread.await_args.args[1] == "http://measure/fhir"
-        assert mock_to_thread.await_args.args[2] == ["patient-1"]
-        mock_sleep.assert_not_awaited()
-
-    async def test_hapi_sync_disabled_uses_sleep_fallback(self, test_session, monkeypatch):
-        _, mock_to_thread, mock_sleep = await self._run_one_patient_validation(
-            test_session,
-            monkeypatch,
-            hapi_sync_after_upload=False,
-        )
-
-        mock_to_thread.assert_not_awaited()
-        mock_sleep.assert_awaited_once_with(7)
-
-    async def test_reindex_failure_logs_warning_and_uses_sleep_fallback(self, test_session, monkeypatch, caplog):
-        caplog.set_level("WARNING", logger="app.services.validation")
-
-        _, mock_to_thread, mock_sleep = await self._run_one_patient_validation(
-            test_session,
-            monkeypatch,
-            hapi_sync_after_upload=True,
-            to_thread_side_effect=RuntimeError("unreachable"),
-        )
-
-        mock_to_thread.assert_awaited_once()
-        mock_sleep.assert_awaited_once_with(7)
-        assert "HAPI reindex failed during validation" in caplog.text
-
     async def test_missing_measure_creates_error_results_and_resolved_measure_still_runs(self, test_session):
         run = ValidationRun(status=ValidationStatus.queued)
         test_session.add(run)
@@ -1238,8 +1066,7 @@ class TestRunValidation:
                                         "evaluatedResource": [],
                                     },
                                 ) as mock_evaluate:
-                                    with patch("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0):
-                                        await run_validation(run.id)
+                                    await run_validation(run.id)
 
         await test_session.refresh(run)
         rows = (
@@ -1312,8 +1139,6 @@ class TestRunValidation:
         await test_session.commit()
         await test_session.refresh(run)
 
-        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", True)
-        monkeypatch.setattr("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0)
         monkeypatch.setattr("app.services.validation.settings.MEASURE_ENGINE_URL", "http://measure/fhir")
         monkeypatch.setattr("app.services.validation.settings.MAX_WORKERS", 2)
 
@@ -1450,7 +1275,6 @@ class TestRunValidation:
                     "evaluatedResource": [],
                 },
             ) as mock_evaluate,
-            patch("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0),
         ):
             await run_validation(run.id)
 
@@ -1500,8 +1324,6 @@ class TestRunValidation:
         await test_session.commit()
         await test_session.refresh(run)
 
-        monkeypatch.setattr("app.services.validation.settings.HAPI_SYNC_AFTER_UPLOAD", True)
-        monkeypatch.setattr("app.services.validation.settings.HAPI_INDEX_WAIT_SECONDS", 0)
         monkeypatch.setattr("app.services.validation.settings.MEASURE_ENGINE_URL", "http://measure/fhir")
 
         strategy = MagicMock()

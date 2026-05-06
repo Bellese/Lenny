@@ -172,7 +172,6 @@ Defined in `backend/app/config.py`. All overridable via environment variables.
 | `BATCH_SIZE` | `100` | Patients per `$evaluate-measure` batch |
 | `MAX_WORKERS` | `4` | Concurrent job worker threads |
 | `MAX_RETRIES` | `3` | Retry attempts for failed FHIR requests |
-| `HAPI_INDEX_WAIT_SECONDS` | `5` | Wait after uploading patients before evaluating (index propagation) |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `ALLOWED_ORIGINS` | `"*"` | Comma-separated CORS allowed origins; `"*"` for wildcard (local dev default). Set to `https://${CADDY_HOST}` in production via `docker-compose.prod.yml`. |
 | `CDR_FERNET_KEY` | _(none)_ | Fernet key for encrypting CDR auth credentials at rest. Required in production. Generate with: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. In prod, injected via Docker secret at `/run/secrets/cdr_fernet_key` (takes priority over env var). See `.env.example`. |

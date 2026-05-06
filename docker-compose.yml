@@ -27,7 +27,6 @@ services:
       - CONNECTATHON_BUNDLES_DIR=/seed/disabled-connectathon-bundles # Manual uploads exercise HAPI sync; don't gate health on startup replay.
       - PATIENT_DATA_STRATEGY=${PATIENT_DATA_STRATEGY:-batch}
       - VALUESET_RELOAD_MODE=${VALUESET_RELOAD_MODE:-delete}
-      - HAPI_SYNC_AFTER_UPLOAD=${HAPI_SYNC_AFTER_UPLOAD:-true}
       - CDR_FERNET_KEY=${CDR_FERNET_KEY:-}
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]

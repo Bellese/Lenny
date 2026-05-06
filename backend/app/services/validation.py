@@ -35,8 +35,6 @@ from app.services.fhir_client import (
     _build_auth_headers,
     evaluate_measure,
     push_resources,
-    trigger_reindex_and_wait,
-    trigger_reindex_and_wait_for_patients,
     wait_for_valueset_expansion,
     wipe_patient_data,
 )
@@ -805,23 +803,17 @@ async def triage_test_bundle(
     if progress_fn:
         await progress_fn("patients_loaded", patients_loaded)
 
-    if settings.HAPI_SYNC_AFTER_UPLOAD:
-        sync_started = datetime.now(timezone.utc)
-        await asyncio.to_thread(trigger_reindex_and_wait, settings.MEASURE_ENGINE_URL)
-        valueset_urls = _valueset_urls([*measure_defs, *clinical])
-        valueset_urls.extend(_valueset_urls(support_resources))
-        expanded = await asyncio.to_thread(wait_for_valueset_expansion, settings.MEASURE_ENGINE_URL, valueset_urls)
-        unique_valueset_count = len({url for url in valueset_urls if url})
-        logger.info(
-            "HAPI sync complete",
-            extra={
-                "reindex_duration_s": round((datetime.now(timezone.utc) - sync_started).total_seconds(), 3),
-                "vs_count_expanded": len(expanded),
-                "vs_count_timeout": max(unique_valueset_count - len(expanded), 0),
-            },
-        )
-    else:
-        logger.info("HAPI sync skipped (HAPI_SYNC_AFTER_UPLOAD=False)")
+    valueset_urls = _valueset_urls([*measure_defs, *clinical])
+    valueset_urls.extend(_valueset_urls(support_resources))
+    expanded = await asyncio.to_thread(wait_for_valueset_expansion, settings.MEASURE_ENGINE_URL, valueset_urls)
+    unique_valueset_count = len({url for url in valueset_urls if url})
+    logger.info(
+        "ValueSet expansion complete",
+        extra={
+            "vs_count_expanded": len(expanded),
+            "vs_count_timeout": max(unique_valueset_count - len(expanded), 0),
+        },
+    )
 
     warning_message = None
     if cdr_upload_error_details:
@@ -1206,43 +1198,12 @@ async def run_validation(validation_run_id: int) -> None:
                 for pr, r in zip(all_patient_refs, gather_results)
                 if isinstance(r, BaseException)
             }
-            reindex_probe_patient_ids = sorted(
-                {
-                    patient_id
-                    for result in gather_results
-                    if not isinstance(result, BaseException)
-                    for patient_id in result
-                }
-            )
             if failed_gathers:
                 logger.warning(
                     "Patient data gather partial failure — validation may reflect incomplete data",
                     extra={"failed": failed_gathers, "total": len(all_patient_refs), "run_id": validation_run_id},
                 )
 
-            if settings.HAPI_SYNC_AFTER_UPLOAD:
-                logger.info(
-                    "Waiting for HAPI reindex before validation evaluation",
-                    extra={"run_id": validation_run_id, "patient_count": len(all_patient_refs)},
-                )
-                try:
-                    if reindex_probe_patient_ids:
-                        await asyncio.to_thread(
-                            trigger_reindex_and_wait_for_patients,
-                            settings.MEASURE_ENGINE_URL,
-                            reindex_probe_patient_ids,
-                        )
-                    else:
-                        await asyncio.to_thread(trigger_reindex_and_wait, settings.MEASURE_ENGINE_URL)
-                except Exception as exc:
-                    logger.warning(
-                        "HAPI reindex failed during validation — falling back to sleep",
-                        extra={"run_id": validation_run_id, "error": sanitize_error(exc)},
-                    )
-                    await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
-            else:
-                # Rollback path: old sleep-based wait
-                await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
 
