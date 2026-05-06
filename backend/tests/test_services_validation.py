@@ -650,7 +650,7 @@ class TestTriageTestBundle:
         mock_push.assert_called_once()
 
     async def test_bundle_with_no_secondary_defs_still_loads_missing_valueset_stubs(self, test_session):
-        """Bundles like CMS1218 have Measure/Library resources but no bundled ValueSets."""
+        """Bundles that have Measure/Library resources but no bundled ValueSets still load stubs."""
         bundle = {
             "resourceType": "Bundle",
             "type": "transaction",

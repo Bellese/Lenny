@@ -12,7 +12,6 @@ Applies the same patches as the integration test suite so HAPI can evaluate corr
   - ValueSet compose synthesised from expansion codes (HAPI re-expands via compose)
   - Library dependency URLs rewritten ecqi.healthit.gov → madie.cms.gov
   - ValueSet ID conflicts remapped to existing HAPI resources (prevents HAPI-0902)
-  - Duplicate Claim IDs deduplicated (CMS71 MADiE v0.3.x export bug)
 
 Environment variables (for the Docker ENTRYPOINT / docker compose seed service):
   CDR_URL     (default http://hapi-fhir-cdr:8080/fhir)
@@ -28,7 +27,6 @@ import os
 import pathlib
 import sys
 import time
-from collections import Counter
 from typing import Any
 
 import httpx
@@ -152,37 +150,6 @@ def fix_library_deps(resources: list[dict]) -> list[dict]:
                 dep = ra.get("resource", "")
                 if ra.get("type") == "depends-on" and dep.startswith(_ECQI):
                     ra["resource"] = _MADIE + dep[len(_ECQI):]
-        result.append(r)
-    return result
-
-
-def fix_duplicate_claims(resources: list[dict]) -> list[dict]:
-    """Assign unique IDs to Claim resources that share a duplicate ID (CMS71)."""
-    id_counts: Counter = Counter(
-        r.get("id", "") for r in resources if r.get("resourceType") == "Claim"
-    )
-    duplicates = {id_ for id_, n in id_counts.items() if n > 1}
-    if not duplicates:
-        return resources
-    result = []
-    seen: dict[str, int] = {}
-    for r in resources:
-        if r.get("resourceType") != "Claim" or r.get("id") not in duplicates:
-            result.append(r)
-            continue
-        r = copy.deepcopy(r)
-        original_id = r["id"]
-        enc_ref = ""
-        for item in r.get("item", []):
-            for enc in item.get("encounter", []):
-                ref = enc.get("reference", "")
-                if ref:
-                    enc_ref = ref.split("/")[-1][:16]
-                    break
-            if enc_ref:
-                break
-        r["id"] = f"claim-{enc_ref}" if enc_ref else f"{original_id}-{seen.setdefault(original_id, 0) + 1}"
-        seen[original_id] = seen.get(original_id, 0) + 1
         result.append(r)
     return result
 
@@ -339,17 +306,13 @@ def load_connectathon_bundles(
         manifest = json.load(f)
 
     measures = manifest["measures"]
-    # CMS1017 last — scoring type causes HAPI-0902 on some HAPI versions
-    ordered = [m for m in measures if "CMS1017" not in m["id"]] + [
-        m for m in measures if "CMS1017" in m["id"]
-    ]
-    log(f"Found {len(ordered)} connectathon bundles to load")
+    log(f"Found {len(measures)} connectathon bundles to load")
 
     # Pass 1: collect + deduplicate measure defs; store raw bundles for Group synthesis
     all_measure_defs: dict[str, dict] = {}
     clinical_per_bundle: list[tuple[str, list[dict], dict]] = []  # (id, clinical, raw_bundle)
 
-    for entry in ordered:
+    for entry in measures:
         measure_id = entry["id"]
         bundle_path = bundle_dir / entry["bundle_file"]
         if not bundle_path.exists():
@@ -385,7 +348,6 @@ def load_connectathon_bundles(
 
     for measure_id, clinical, raw_bundle in clinical_per_bundle:
         log(f"Loading clinical data: {measure_id} ({len(clinical)} resources)...")
-        clinical = fix_duplicate_claims(clinical)
         tx = make_put_bundle(clinical)
         post_bundle(cdr_url, tx, f"{measure_id} clinical → CDR")
         post_bundle(measure_url, tx, f"{measure_id} clinical → measure engine")

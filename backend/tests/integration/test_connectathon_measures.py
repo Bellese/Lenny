@@ -39,7 +39,6 @@ from app.services.validation import (
 )
 from tests.integration._helpers import (
     fail_with_context,
-    fix_duplicate_claim_ids,
     fix_library_deps_for_hapi,
     fix_valueset_compose_for_hapi,
     make_put_bundle,
@@ -370,8 +369,6 @@ def _load_connectathon_bundles_to_hapi(_require_infrastructure):
 
     # Pass 4: load clinical data per bundle.
     for measure_id, clinical in clinical_per_bundle:
-        # Fix duplicate Claim IDs (MADiE v0.3.x CMS71 exports all Claims with the same ID).
-        clinical = fix_duplicate_claim_ids(clinical)
         tx = make_put_bundle(clinical)
         for target, label in [(TEST_CDR_URL, "CDR"), (TEST_MEASURE_URL, "measure server")]:
             resp = httpx.post(target, json=tx, headers=headers, timeout=120)

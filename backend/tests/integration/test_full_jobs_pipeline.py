@@ -1,12 +1,12 @@
 """Validate Lenny's Jobs pipeline against ground-truth connectathon expected populations.
 
-Runs all 12 connectathon measures (CMS1017 skipped — HTTP 400 from HAPI) through
-Lenny's orchestration pipeline and asserts per-patient population outputs match the
-expected populations embedded in the connectathon bundle test-case MeasureReports.
+Runs all 7 connectathon measures through Lenny's orchestration pipeline and asserts
+per-patient population outputs match the expected populations embedded in the
+connectathon bundle test-case MeasureReports.
 
 Requires prebaked HAPI images (HAPI_PREBAKED=1):
-  - CDR has all 568 test patients + FHIR Groups synthesized per measure_id
-  - Measure engine has all 12 measure definitions + Libraries + ValueSets
+  - CDR has all test patients + FHIR Groups synthesized per measure_id
+  - Measure engine has all 7 measure definitions + Libraries + ValueSets
 
 This test closes the gap between:
   - test_connectathon_measures.py (calls HAPI directly, validates correct counts)
@@ -33,9 +33,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _BUNDLE_DIR = _REPO_ROOT / "seed" / "connectathon-bundles"
 _MANIFEST_PATH = _BUNDLE_DIR / "manifest.json"
 
-# CMS1017 triggers HTTP 400 from HAPI on $evaluate-measure — skip entirely.
-_SKIP_MEASURES = {"CMS1017FHIRHHFI"}
-
 # Maps FHIR hyphenated population codes to Lenny's DB underscore keys.
 _FHIR_TO_DB_KEY: dict[str, str] = {
     "initial-population": "initial_population",
@@ -53,11 +50,7 @@ _MANIFEST: list[dict[str, Any]] = []
 if _MANIFEST_PATH.exists():
     _MANIFEST = json.loads(_MANIFEST_PATH.read_text(encoding="utf-8")).get("measures", [])
 
-MEASURES = [
-    (m["id"], m.get("expected_test_cases", 0), m.get("strict", False))
-    for m in _MANIFEST
-    if m["id"] not in _SKIP_MEASURES
-]
+MEASURES = [(m["id"], m.get("expected_test_cases", 0), m.get("strict", False)) for m in _MANIFEST]
 
 
 @pytest.fixture(scope="module", autouse=True)
