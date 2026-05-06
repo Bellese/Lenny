@@ -90,7 +90,7 @@ If the change is documentation-only (`*.md`, no code), steps 1–4 are not requi
 
 ## Workflow
 
-Branches: `feature/*`, `fix/*`, or `chore/*` off `main`, merged via PR. Always work in a git worktree (`git worktree add ../mct2-<branch> -b <branch> origin/main`) — never commit directly on the current branch.
+Branches: `feature/*`, `fix/*`, or `chore/*` off `main`, merged via PR. Always work in a git worktree (`git worktree add ../lenny-<branch> -b <branch> origin/main`) — never commit directly on the current branch.
 Work items: GitHub Issues on the [project board](https://github.com/orgs/Bellese/projects/33/views/3).
 
 | Phase | Command | Toolkit |
@@ -108,7 +108,7 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
 
 - **Profile:** `leonard` (account `439475769170`). Always use `AWS_PROFILE=leonard` for any AWS CLI commands.
 - EC2 instance: `i-0f00585639d2f3ef1`, t3.medium (4 GB RAM), Elastic IP `98.89.219.217`, region `us-east-1`
-- Live URLs: `https://98-89-219-217.nip.io` (UI), `https://api.98-89-219-217.nip.io` (API)
+- Live URLs: `https://lenny.bellese.dev` (UI), `https://api.lenny.bellese.dev` (API)
 
 ## Do NOT
 
@@ -116,3 +116,21 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
 - Use Python 3.9-style `Optional[X]` — `X | None` is preferred
 - Modify HAPI FHIR H2 storage paths without reading `docs/architecture.md`
 - Modify `TODOS.md` — it is frozen 2026-04-27. Open a GitHub Issue for any new work item.
+
+## Skill routing
+
+When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+
+Key routing rules:
+- Product ideas/brainstorming → invoke /office-hours
+- Strategy/scope → invoke /plan-ceo-review
+- Architecture → invoke /plan-eng-review
+- Design system/plan review → invoke /design-consultation or /plan-design-review
+- Full review pipeline → invoke /autoplan
+- Bugs/errors → invoke /investigate
+- QA/testing site behavior → invoke /qa or /qa-only
+- Code review/diff check → invoke /review
+- Visual polish → invoke /design-review
+- Ship/deploy/PR → invoke /ship or /land-and-deploy
+- Save progress → invoke /context-save
+- Resume context → invoke /context-restore

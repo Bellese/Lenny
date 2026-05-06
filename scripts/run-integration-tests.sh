@@ -57,10 +57,10 @@ if [ "$USE_PREBAKED" = "1" ]; then
         return 1
     }
 
-    CDR_HASH_IMAGE="ghcr.io/bellese/mct2-hapi-cdr:${SEED_HASH}"
-    CDR_LATEST_IMAGE="ghcr.io/bellese/mct2-hapi-cdr:latest"
-    MEASURE_HASH_IMAGE="ghcr.io/bellese/mct2-hapi-measure:${SEED_HASH}"
-    MEASURE_LATEST_IMAGE="ghcr.io/bellese/mct2-hapi-measure:latest"
+    CDR_HASH_IMAGE="ghcr.io/bellese/lenny-hapi-cdr:${SEED_HASH}"
+    CDR_LATEST_IMAGE="ghcr.io/bellese/lenny-hapi-cdr:latest"
+    MEASURE_HASH_IMAGE="ghcr.io/bellese/lenny-hapi-measure:${SEED_HASH}"
+    MEASURE_LATEST_IMAGE="ghcr.io/bellese/lenny-hapi-measure:latest"
     VANILLA_IMAGE="hapiproject/hapi:v8.8.0-1"
 
     if _cdr_image=$(_try_pull "$CDR_HASH_IMAGE") && _measure_image=$(_try_pull "$MEASURE_HASH_IMAGE"); then

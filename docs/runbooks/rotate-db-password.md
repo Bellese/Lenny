@@ -38,7 +38,7 @@ cd /opt/leonard && git fetch && git reset --hard origin/main && scripts/deploy-p
 
 ### 3. Verify
 ```bash
-curl -fsS https://api.98-89-219-217.nip.io/health
+curl -fsS https://api.lenny.bellese.dev/health
 ```
 Expected: HTTP 200.
 

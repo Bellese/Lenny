@@ -1,0 +1,11 @@
+{
+  "rewrites": [
+    { "source": "/", "destination": "/index.html" },
+    { "source": "/measures", "destination": "/index.html" },
+    { "source": "/jobs", "destination": "/index.html" },
+    { "source": "/results", "destination": "/index.html" },
+    { "source": "/results/:jobId", "destination": "/index.html" },
+    { "source": "/validation", "destination": "/index.html" },
+    { "source": "/settings", "destination": "/index.html" }
+  ]
+}

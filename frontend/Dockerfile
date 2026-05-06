@@ -17,4 +17,4 @@ COPY --from=build /app/build ./build
 RUN chown -R appuser:appgroup /app
 USER appuser
 EXPOSE 3001
-CMD ["serve", "-s", "build", "-l", "3001"]
+CMD ["serve", "build", "-l", "3001"]

@@ -85,8 +85,8 @@ jobs:
         if: success()
         run: |
           for i in $(seq 1 24); do
-            curl -fsS "https://api.98-89-219-217.nip.io/health" >/dev/null 2>&1 && break
+            curl -fsS "https://api.lenny.bellese.dev/health" >/dev/null 2>&1 && break
             [[ "$i" == "24" ]] && { echo "Health check failed after 2 min"; exit 1; }
             sleep 5
           done
-          echo "Deploy verified: https://api.98-89-219-217.nip.io/health is healthy"
+          echo "Deploy verified: https://api.lenny.bellese.dev/health is healthy"

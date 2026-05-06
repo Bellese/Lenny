@@ -777,6 +777,23 @@ async def evaluate_measure(
                     outcome=outcome,
                     latency_ms=latency_ms,
                 )
+            # 200 OK with MeasureReport.status == "error" — HAPI evaluated but hit a
+            # fatal error (e.g. Unknown ValueSet). Extract the contained OperationOutcome
+            # so the error surfaces as error_phase="evaluate" instead of silent all-false
+            # populations.
+            if isinstance(body, dict) and body.get("resourceType") == "MeasureReport" and body.get("status") == "error":
+                contained_oo = next(
+                    (c for c in body.get("contained", []) if c.get("resourceType") == "OperationOutcome"),
+                    None,
+                )
+                outcome = FhirOperationOutcome.from_dict(contained_oo) if contained_oo else None
+                raise FhirOperationError(
+                    operation="evaluate-measure",
+                    url=url,
+                    status_code=resp.status_code,
+                    outcome=outcome,
+                    latency_ms=latency_ms,
+                )
             return body
 
     raise RuntimeError("Measure evaluation failed without a response")
