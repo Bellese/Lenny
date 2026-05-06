@@ -91,7 +91,8 @@ export default function PatientDetail({ result, onClose }) {
   if (!result) return null;
 
   const patientName = result.patient_name || result.patient_id || 'Unknown Patient';
-  const activePops = POPULATIONS.filter(p => result[p.key] !== undefined);
+  const populations = result.populations || {};
+  const activePops = POPULATIONS.filter(p => populations[p.key] !== undefined);
   const resourceList = Array.isArray(resources) ? resources : resources?.resources || [];
 
   const measureReport = result.measure_report;
@@ -110,7 +111,7 @@ export default function PatientDetail({ result, onClose }) {
           <div className={styles.patientName}>{patientName}</div>
           <div className={styles.badges}>
             {activePops.map(p => {
-              if (!result[p.key]) return null;
+              if (!populations[p.key]) return null;
               const tone = p.key === 'numerator' ? 'info'
                 : p.key === 'denominator_exclusion' || p.key === 'numerator_exclusion' ? 'warn'
                 : 'ok';
@@ -128,7 +129,7 @@ export default function PatientDetail({ result, onClose }) {
             <h3 className={styles.sectionTitle}>Population membership</h3>
             <div className={styles.popList}>
               {activePops.map(pop => {
-                const inPop = result[pop.key];
+                const inPop = populations[pop.key];
                 return (
                   <div key={pop.key} className={styles.popItem}>
                     <span className={inPop ? styles.iconOk : styles.iconNo}>
