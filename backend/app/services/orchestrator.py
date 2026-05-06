@@ -27,7 +27,6 @@ from app.services.fhir_client import (
     get_group_members,
     push_resources,
     snapshot_evaluated_resources,
-    trigger_reindex_and_wait_for_patients,
     wipe_patient_data,
 )
 from app.services.fhir_errors import redact_outcome, sanitize_url
@@ -512,37 +511,6 @@ async def _process_single_batch(
                         await session.commit()
                     failed += 1
 
-            # Wait for HAPI FHIR search indexes to catch up.
-            # CQL evaluation relies on FHIR search internally; HAPI
-            # indexes transactions asynchronously.
-            if settings.HAPI_SYNC_AFTER_UPLOAD:
-                logger.info(
-                    "All patient data pushed — waiting for HAPI reindex",
-                    extra={"job_id": job_id, "batch_id": batch_id},
-                )
-                if patients_with_encounters:
-                    try:
-                        await asyncio.to_thread(
-                            trigger_reindex_and_wait_for_patients,
-                            settings.MEASURE_ENGINE_URL,
-                            patients_with_encounters,
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "HAPI reindex failed during job — falling back to sleep",
-                            extra={"job_id": job_id, "batch_id": batch_id, "error": str(exc)},
-                        )
-                        await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
-                else:
-                    # No Encounter-bearing patients in this batch; can't use the
-                    # Encounter-probe strategy, so fall back to a timed sleep.
-                    await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
-            else:
-                logger.info(
-                    "All patient data pushed — waiting for HAPI indexing",
-                    extra={"job_id": job_id, "batch_id": batch_id},
-                )
-                await asyncio.sleep(settings.HAPI_INDEX_WAIT_SECONDS)
             if await _stop_or_delete_job(job_id):
                 return
 
