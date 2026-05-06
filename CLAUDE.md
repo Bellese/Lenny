@@ -36,7 +36,7 @@ PUT/POST 200 means the resource is durable. Search consistency is async, governe
 
 ### Current consistency gate
 
-`HAPI_SYNC_AFTER_UPLOAD=true` (default) makes the backend wait for index refresh after uploads — code paths in `validation.py` and `orchestrator.py`. Setting it to `false` is the first lever to pull when debugging: if the symptom changes, async-indexing is the cause.
+`HAPI_SYNC_AFTER_UPLOAD=true` (default) makes the backend wait for index refresh after uploads — code paths in `backend/app/services/validation.py` and `backend/app/services/orchestrator.py`. Setting it to `false` is the first lever to pull when debugging: if the symptom changes, async-indexing is the cause.
 
 ### Pitfalls (each one cost a PR)
 
@@ -57,7 +57,7 @@ PRs #142, #155, #159, #161, #167+ each patched a slice of this same disease.
 
 > **DO NOT `git push` ANY PR until ALL of the checks below have run successfully on your machine.**
 > "Validate locally" does NOT mean "ran unit tests." It means EVERY check below.
-> CI is not a debugger. Prod is not a debugger. Sutton's time is not a debugger.
+> CI is not a debugger. Prod is not a debugger. Reviewers' time is not a debugger.
 
 **Required local checks before `git push` of ANY PR (no exceptions for "small" or "obvious" fixes):**
 
@@ -70,7 +70,7 @@ PRs #142, #155, #159, #161, #167+ each patched a slice of this same disease.
    - Bundle import / `$everything` / `$evaluate-measure` paths
    - After any wipe+push cycle in the smoke run, probe `$everything` on at least one patient — see `docs/runbooks/everything-probe.md` for the script (the shell strips `$`, so use Python).
 5. **New or modified `tests/integration/` files** — run those exact files locally before pushing. The CI-equivalent suite uses `--ignore` flags and will **silently skip** any new integration test; you must run it yourself. For prebaked-only tests (check for `HAPI_PREBAKED` guard or `_require_prebaked_stack`): `USE_PREBAKED=1 ./scripts/run-integration-tests.sh <test_file>`. No exceptions — not even for the test you just wrote.
-6. The "ship-or-not" gate: if steps 1–5 didn't all pass, **do not push.** Tell Sutton what's blocking instead.
+6. The "ship-or-not" gate: if steps 1–5 didn't all pass, **do not push.** Say what's blocking in the PR description instead.
 
 If the change is documentation-only (`*.md`, no code), steps 1–4 are not required, but step 5 still applies — confirm in the PR description that no code changed.
 
@@ -78,7 +78,7 @@ If the change is documentation-only (`*.md`, no code), steps 1–4 are not requi
 
 ## Architecture
 
-5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (bundles + IGs baked into the image, PR #199). Production currently runs vanilla `hapiproject/hapi:v8.8.0-1` — the `seed` service POSTs the connectathon bundles into a persistent H2 volume on first boot, and the volume keeps them warm across redeploys. Whether to switch prod to prebaked is an open question; see `docs/decisions/prebaked-in-prod.md` (TBD) or ask Sutton. Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`.
+5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (bundles + IGs baked into the image, PR #199). Production currently runs vanilla `hapiproject/hapi:v8.8.0-1` — the `seed` service POSTs the connectathon bundles into a persistent H2 volume on first boot, and the volume keeps them warm across redeploys. Whether to switch prod to prebaked is an open question; see `docs/decisions.md`. Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`.
 
 ## Code Conventions
 
@@ -106,9 +106,11 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
 
 ## AWS
 
-- **Profile:** `leonard` (account `439475769170`). Always use `AWS_PROFILE=leonard` for any AWS CLI commands.
-- EC2 instance: `i-0f00585639d2f3ef1`, t3.medium (4 GB RAM), Elastic IP `98.89.219.217`, region `us-east-1`
-- Live URLs: `https://lenny.bellese.dev` (UI), `https://api.lenny.bellese.dev` (API)
+**Always export `AWS_PROFILE=leonard` before any AWS CLI call.** Using any other profile/account is a bug — Claude has gotten this wrong before. Verify with `aws sts get-caller-identity` if unsure.
+
+- Region: `us-east-1`
+- Prod runs on a single t3.medium EC2 instance (look up by tag with `aws ec2 describe-instances --filters "Name=tag:Name,Values=lenny-prod"`).
+- Live: `https://lenny.bellese.dev` (UI), `https://api.lenny.bellese.dev` (API)
 
 ## Do NOT
 
@@ -117,20 +119,19 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
 - Modify HAPI FHIR H2 storage paths without reading `docs/architecture.md`
 - Modify `TODOS.md` — it is frozen 2026-04-27. Open a GitHub Issue for any new work item.
 
-## Skill routing
+## External toolkit commands
 
-When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+These are gstack / superpowers slash commands — **not** harness-loadable skills. Don't try to invoke them via the Skill tool; surface the right one when the user's intent matches and let them run it. (The Workflow table above maps phases to commands; this list maps intents.)
 
-Key routing rules:
-- Product ideas/brainstorming → invoke /office-hours
-- Strategy/scope → invoke /plan-ceo-review
-- Architecture → invoke /plan-eng-review
-- Design system/plan review → invoke /design-consultation or /plan-design-review
-- Full review pipeline → invoke /autoplan
-- Bugs/errors → invoke /investigate
-- QA/testing site behavior → invoke /qa or /qa-only
-- Code review/diff check → invoke /review
-- Visual polish → invoke /design-review
-- Ship/deploy/PR → invoke /ship or /land-and-deploy
-- Save progress → invoke /context-save
-- Resume context → invoke /context-restore
+- Product ideas / brainstorming → `/office-hours`
+- Strategy / scope → `/plan-ceo-review`
+- Architecture → `/plan-eng-review`
+- Design system / plan review → `/design-consultation` or `/plan-design-review`
+- Full review pipeline → `/autoplan`
+- Bugs / errors → `/investigate`
+- QA / testing site behavior → `/qa` or `/qa-only`
+- Code review / diff check → `/review`
+- Visual polish → `/design-review`
+- Ship / deploy / PR → `/ship` or `/land-and-deploy`
+- Save progress → `/context-save`
+- Resume context → `/context-restore`
