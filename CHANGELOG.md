@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.17.0] - 2026-05-06
+
+### Added
+- **Evaluated resources now survive subsequent jobs** — every successful patient evaluation persists a snapshot of its `evaluatedResource` FHIR resources alongside the MeasureReport, so the Results page's "Evaluated resources" section remains viewable after the next job's `wipe_patient_data()` would have cleared the engine-side data. New `evaluated_resources` JSON column on `measure_results`; `GET /results/{id}/evaluated-resources` now returns from the snapshot when present (`source: "snapshot"`) and falls back to live measure-engine resolution for legacy rows (`source: "live"`).
+
 ## [0.0.16.1] - 2026-05-06
 
 ### Fixed
