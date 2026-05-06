@@ -19,6 +19,18 @@ from app.services.orchestrator import (
 pytestmark = pytest.mark.asyncio
 
 
+@pytest.fixture(autouse=True)
+def _patch_snapshot_evaluated_resources():
+    """Default-patch the snapshot helper so orchestrator tests don't make real HTTP calls.
+    Individual tests can layer their own patch on top to assert specific behavior."""
+    with patch(
+        "app.services.orchestrator.snapshot_evaluated_resources",
+        new_callable=AsyncMock,
+        return_value=None,
+    ):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Unit tests for pure helpers
 # ---------------------------------------------------------------------------
@@ -193,6 +205,14 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
             new_callable=AsyncMock,
             return_value=mock_measure_report,
         ),
+        patch(
+            "app.services.orchestrator.snapshot_evaluated_resources",
+            new_callable=AsyncMock,
+            return_value=[
+                {"resourceType": "Patient", "id": "patient-1"},
+                {"resourceType": "Condition", "id": "cond-1"},
+            ],
+        ),
         patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
         patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
     ):
@@ -207,14 +227,121 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
         assert job.failed_patients == 0
         assert job.completed_at is not None
 
-        # Verify result was stored
+        # Verify result was stored, including the evaluated_resources snapshot
         result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
         results = result.scalars().all()
         assert len(results) == 1
         assert results[0].patient_id == "p1"
         assert results[0].patient_name == "Alice Test"
+        assert results[0].evaluated_resources == [
+            {"resourceType": "Patient", "id": "patient-1"},
+            {"resourceType": "Condition", "id": "cond-1"},
+        ]
 
     mock_wipe.assert_awaited_once_with(strict=False)
+
+
+async def test_run_job_stores_empty_list_when_snapshot_helper_returns_none(
+    test_session, session_factory, mock_measure_report
+):
+    """When the snapshot helper returns None (no refs to resolve), the orchestrator
+    stores [] not None — so the column distinguishes legacy rows (NULL) from new
+    rows that were snapshotted but had no refs ([])."""
+    job_id = await _setup_job(test_session)
+    patients = [
+        {"resourceType": "Patient", "id": "p1", "name": [{"given": ["Alice"], "family": "Test"}]},
+    ]
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patients",
+            new_callable=AsyncMock,
+            return_value=patients,
+        ),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patient_data",
+            new_callable=AsyncMock,
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]),
+        ),
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value=mock_measure_report,
+        ),
+        patch(
+            "app.services.orchestrator.snapshot_evaluated_resources",
+            new_callable=AsyncMock,
+            return_value=None,
+        ),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
+    ):
+        await run_job(job_id)
+
+    async with session_factory() as session:
+        result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
+        rows = result.scalars().all()
+        assert len(rows) == 1
+        assert rows[0].evaluated_resources == [], (
+            "Expected [] (snapshotted, no refs) — None would conflate with legacy rows"
+        )
+
+
+async def test_run_job_stores_none_when_snapshot_helper_raises(test_session, session_factory, mock_measure_report):
+    """When the snapshot helper raises (genuine failure), the orchestrator stores
+    None — the row falls back to live resolution at read time."""
+    job_id = await _setup_job(test_session)
+    patients = [
+        {"resourceType": "Patient", "id": "p1", "name": [{"given": ["Alice"], "family": "Test"}]},
+    ]
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patients",
+            new_callable=AsyncMock,
+            return_value=patients,
+        ),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patient_data",
+            new_callable=AsyncMock,
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]),
+        ),
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value=mock_measure_report,
+        ),
+        patch(
+            "app.services.orchestrator.snapshot_evaluated_resources",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("HAPI unreachable"),
+        ),
+        patch("app.services.orchestrator.settings.HAPI_SYNC_AFTER_UPLOAD", False),
+        patch("app.services.orchestrator.settings.HAPI_INDEX_WAIT_SECONDS", 0),
+    ):
+        await run_job(job_id)
+
+    async with session_factory() as session:
+        result = await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))
+        rows = result.scalars().all()
+        assert len(rows) == 1
+        assert rows[0].evaluated_resources is None, (
+            "Expected None (snapshot failed) — read path falls back to live resolution"
+        )
 
 
 async def test_run_job_no_patients(test_session, session_factory):

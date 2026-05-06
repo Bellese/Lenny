@@ -821,6 +821,73 @@ async def test_resolve_evaluated_resource():
 
 
 # ---------------------------------------------------------------------------
+# snapshot_evaluated_resources
+# ---------------------------------------------------------------------------
+
+
+async def test_snapshot_evaluated_resources_returns_resolved_list():
+    """Each evaluatedResource reference is resolved and returned in order."""
+    from app.services.fhir_client import snapshot_evaluated_resources
+
+    measure_report = {
+        "resourceType": "MeasureReport",
+        "evaluatedResource": [
+            {"reference": "Patient/p1"},
+            {"reference": "Encounter/e1"},
+        ],
+    }
+    fake_resources = {
+        "Patient/p1": {"resourceType": "Patient", "id": "p1"},
+        "Encounter/e1": {"resourceType": "Encounter", "id": "e1"},
+    }
+
+    async def fake_resolve(ref):
+        return fake_resources[ref]
+
+    with patch("app.services.fhir_client.resolve_evaluated_resource", side_effect=fake_resolve):
+        result = await snapshot_evaluated_resources(measure_report)
+
+    assert result == [fake_resources["Patient/p1"], fake_resources["Encounter/e1"]]
+
+
+async def test_snapshot_evaluated_resources_skips_failed_refs():
+    """Per-reference failures are logged and skipped, not raised — partial snapshots
+    are still useful and the caller has already persisted the MeasureReport."""
+    from app.services.fhir_client import snapshot_evaluated_resources
+
+    measure_report = {
+        "evaluatedResource": [
+            {"reference": "Patient/p1"},
+            {"reference": "Encounter/e1"},
+            {"reference": "Condition/c1"},
+        ],
+    }
+
+    async def fake_resolve(ref):
+        if ref == "Encounter/e1":
+            raise RuntimeError("404 not found")
+        return {"resourceType": ref.split("/")[0], "id": ref.split("/")[1]}
+
+    with patch("app.services.fhir_client.resolve_evaluated_resource", side_effect=fake_resolve):
+        result = await snapshot_evaluated_resources(measure_report)
+
+    assert len(result) == 2
+    assert {r["id"] for r in result} == {"p1", "c1"}
+
+
+async def test_snapshot_evaluated_resources_returns_none_when_no_refs():
+    """No evaluatedResource entries → helper returns None.
+
+    The orchestrator coalesces this to [] before storing so the column distinguishes
+    'legacy row, never snapshotted' (NULL) from 'new row, no refs to snapshot' ([])."""
+    from app.services.fhir_client import snapshot_evaluated_resources
+
+    assert await snapshot_evaluated_resources({"resourceType": "MeasureReport"}) is None
+    assert await snapshot_evaluated_resources({"evaluatedResource": []}) is None
+    assert await snapshot_evaluated_resources({}) is None
+
+
+# ---------------------------------------------------------------------------
 # list_measures
 # ---------------------------------------------------------------------------
 
