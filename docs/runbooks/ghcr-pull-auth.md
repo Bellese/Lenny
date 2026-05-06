@@ -22,7 +22,9 @@ No GHCR login step is needed. `docker compose pull` will pull from
 
 ## Verification
 
-After deploy, confirm images are present:
+> **Note (2026-05-06):** Production currently runs vanilla `hapiproject/hapi:v8.8.0-1`, not the pre-baked GHCR images. The steps below apply only if prod is switched to prebaked. For CI verification, this section remains accurate.
+
+After deploy (if using prebaked images), confirm images are present:
 
 ```bash
 sudo docker images | grep ghcr.io/bellese

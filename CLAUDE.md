@@ -78,7 +78,7 @@ If the change is documentation-only (`*.md`, no code), steps 1–4 are not requi
 
 ## Architecture
 
-5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Local dev uses vanilla `docker-compose.yml` with runtime IG load; CI and prod use `docker-compose.prebaked.yml` (bundles + IGs baked into the image, PR #199). Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`.
+5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (bundles + IGs baked into the image, PR #199). Production currently runs vanilla `hapiproject/hapi:v8.8.0-1` — the `seed` service POSTs the connectathon bundles into a persistent H2 volume on first boot, and the volume keeps them warm across redeploys. Whether to switch prod to prebaked is an open question; see `docs/decisions/prebaked-in-prod.md` (TBD) or ask Sutton. Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`.
 
 ## Code Conventions
 

@@ -28,7 +28,7 @@ Lenny runs 5 Docker containers:
 | **hapi-fhir-cdr** | Default clinical data repository | 8080 (internal) |
 | **hapi-fhir-measure** | Measure calculation engine ($evaluate-measure) | 8080 (internal) |
 
-Local dev uses vanilla `docker-compose.yml` with runtime IG load; CI and prod use `docker-compose.prebaked.yml` (HAPI images with QI-Core / US-Core IGs and connectathon bundles baked in for fast cold-start). See [docs/architecture.md](docs/architecture.md) for the full service map, data flow, HAPI configuration, and environment variables.
+Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (HAPI images with QI-Core / US-Core IGs and connectathon bundles baked in for fast cold-start). Production runs vanilla `hapiproject/hapi:v8.8.0-1` with bundles loaded by the `seed` service into a persistent H2 volume. See [docs/architecture.md](docs/architecture.md) for the full service map, data flow, HAPI configuration, and environment variables.
 
 ## Requirements
 
