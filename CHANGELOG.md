@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.16.1] - 2026-05-06
+
+### Fixed
+- **Population membership now displays in the patient detail fly-out** — the Results page's per-patient drawer was always showing an empty "Population membership" section and missing header badges. The component was reading population flags at the top level of the result object, but the API nests them under `result.populations`. Three accesses now read from the correct path, so each patient's Initial population / Denominator / Numerator status renders with the right Yes/No state.
+
 ## [0.0.16.0] - 2026-05-05
 
 ### Fixed
