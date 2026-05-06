@@ -748,7 +748,6 @@ async def test_process_batch_uses_everything_strategy(test_session, session_fact
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.BatchQueryStrategy") as mock_strategy_cls,
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
-        patch("app.services.orchestrator.asyncio.sleep", new_callable=AsyncMock),
         patch(
             "app.services.orchestrator.evaluate_measure",
             new_callable=AsyncMock,
@@ -823,7 +822,6 @@ async def test_process_batch_uses_data_requirements_strategy_when_configured(
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.DataRequirementsStrategy") as mock_strategy_cls,
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
-        patch("app.services.orchestrator.asyncio.sleep", new_callable=AsyncMock),
         patch(
             "app.services.orchestrator.evaluate_measure",
             new_callable=AsyncMock,
