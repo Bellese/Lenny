@@ -826,8 +826,10 @@ async def test_snapshot_evaluated_resources_skips_failed_refs():
 
 
 async def test_snapshot_evaluated_resources_returns_none_when_no_refs():
-    """No evaluatedResource entries → return None (caller stores NULL, distinct from []).
-    Distinguishes 'never snapshotted' (legacy) from 'snapshotted, no resources'."""
+    """No evaluatedResource entries → helper returns None.
+
+    The orchestrator coalesces this to [] before storing so the column distinguishes
+    'legacy row, never snapshotted' (NULL) from 'new row, no refs to snapshot' ([])."""
     from app.services.fhir_client import snapshot_evaluated_resources
 
     assert await snapshot_evaluated_resources({"resourceType": "MeasureReport"}) is None

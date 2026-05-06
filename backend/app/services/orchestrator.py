@@ -520,9 +520,16 @@ async def _process_single_batch(
                     # wipe_patient_data() makes them irretrievable. See routes/results.py
                     # — the historical "kept on the measure engine until the NEXT job
                     # starts" contract is what this snapshot replaces.
+                    #
+                    # Column semantics: NULL = no snapshot was written (legacy row, or
+                    # snapshot raised); list = snapshot succeeded ([] is a valid value
+                    # meaning "snapshotted, no refs to resolve"). Coalesce the helper's
+                    # None (no refs) to [] so the route can distinguish legacy rows from
+                    # new rows without refs.
                     evaluated_resources_snapshot: list[dict] | None = None
                     try:
-                        evaluated_resources_snapshot = await snapshot_evaluated_resources(measure_report)
+                        snapshot_result = await snapshot_evaluated_resources(measure_report)
+                        evaluated_resources_snapshot = snapshot_result if snapshot_result is not None else []
                     except Exception as snap_exc:
                         logger.warning(
                             "snapshot_evaluated_resources_failed",
