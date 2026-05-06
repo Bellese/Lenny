@@ -24,6 +24,7 @@ from app.services.fhir_client import (
     evaluate_measure,
     get_group_members,
     push_resources,
+    snapshot_evaluated_resources,
     trigger_reindex_and_wait_for_patients,
     wipe_patient_data,
 )
@@ -515,6 +516,19 @@ async def _process_single_batch(
                     populations = _extract_populations(measure_report)
                     patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
 
+                    # Snapshot evaluatedResource references before the next job's
+                    # wipe_patient_data() makes them irretrievable. See routes/results.py
+                    # — the historical "kept on the measure engine until the NEXT job
+                    # starts" contract is what this snapshot replaces.
+                    evaluated_resources_snapshot: list[dict] | None = None
+                    try:
+                        evaluated_resources_snapshot = await snapshot_evaluated_resources(measure_report)
+                    except Exception as snap_exc:
+                        logger.warning(
+                            "snapshot_evaluated_resources_failed",
+                            extra={"job_id": job_id, "patient_id": patient_id, "error": str(snap_exc)[:200]},
+                        )
+
                     if await _stop_or_delete_job(job_id):
                         return
                     async with async_session() as session:
@@ -530,6 +544,7 @@ async def _process_single_batch(
                         if existing_row:
                             existing_row.measure_report = measure_report
                             existing_row.populations = populations
+                            existing_row.evaluated_resources = evaluated_resources_snapshot
                             existing_row.patient_name = patient_name
                             existing_row.error_details = gather_partial_details
                             existing_row.error_phase = "gather_partial" if gather_partial_details else None
@@ -540,6 +555,7 @@ async def _process_single_batch(
                                 patient_name=patient_name,
                                 measure_report=measure_report,
                                 populations=populations,
+                                evaluated_resources=evaluated_resources_snapshot,
                                 error_details=gather_partial_details,
                                 error_phase="gather_partial" if gather_partial_details else None,
                             )

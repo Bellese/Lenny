@@ -93,6 +93,7 @@ class MeasureResult(Base):
     patient_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     measure_report: Mapped[dict] = mapped_column(JSON, nullable=False)
     populations: Mapped[dict] = mapped_column(JSON, nullable=False)
+    evaluated_resources: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     error_details: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     error_phase: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
