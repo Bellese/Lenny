@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.db import get_session
 from app.models.config import AuthType, CDRConfig
+from app.models.connection_base import ConnectionKind
 
 
 @dataclass
@@ -40,7 +41,7 @@ class ConnectionContext:
     auth_credentials: dict | None
     is_default: bool
     is_read_only: bool
-    kind: str = "cdr"
+    kind: ConnectionKind = ConnectionKind.cdr
 
 
 # Backwards-compat alias. Removed once call sites migrate to ConnectionContext.
@@ -64,7 +65,7 @@ async def get_active_cdr(session: AsyncSession = Depends(get_session)) -> Connec
             auth_credentials=None,
             is_default=True,
             is_read_only=False,
-            kind="cdr",
+            kind=ConnectionKind.cdr,
         )
     return ConnectionContext(
         id=cfg.id,

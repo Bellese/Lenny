@@ -31,6 +31,17 @@ class AuthType(str, enum.Enum):
     smart = "smart"
 
 
+class ConnectionKind(str, enum.Enum):
+    """Discriminator for which connection-management table a `ConnectionContext`
+    came from. New kinds (mcs, ts, mr, mrr) are added as their PRs land.
+
+    String-valued so JSON serialization is identical to a plain string field
+    (e.g., `ctx.kind` serializes to `"cdr"`, not `"ConnectionKind.cdr"`).
+    """
+
+    cdr = "cdr"
+
+
 class ConnectionConfigMixin:
     """Shared columns for connection-management tables."""
 
