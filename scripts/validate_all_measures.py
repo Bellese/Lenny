@@ -85,10 +85,6 @@ _HAPI_DE_XFAIL: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-# CMS1017 triggers HTTP 400 from HAPI on $evaluate-measure — skip entirely.
-_SKIP_MEASURES = {"CMS1017FHIRHHFI"}
-
-
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
@@ -516,9 +512,6 @@ def main() -> int:
                 file=sys.stderr,
             )
             sys.exit(2)
-
-    # Skip CMS1017 (HTTP 400 from HAPI on $evaluate-measure)
-    measures = [m for m in measures if m["id"] not in _SKIP_MEASURES]
 
     _check_api_reachable(base_url)
 

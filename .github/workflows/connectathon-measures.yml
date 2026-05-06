@@ -105,7 +105,7 @@ jobs:
     name: Jobs Pipeline Validation (pre-baked HAPI)
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    # Validates Lenny's orchestration layer end-to-end: runs all 11 connectathon measures
+    # Validates Lenny's orchestration layer end-to-end: runs all 7 connectathon measures
     # through the Jobs API and asserts per-patient numerator/denominator outputs match the
     # ground-truth expected populations from the connectathon bundles.
     # Requires prebaked CDR (has FHIR Groups per measure_id) — skips on vanilla HAPI.

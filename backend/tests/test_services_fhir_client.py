@@ -469,7 +469,7 @@ async def test_evaluate_measure_raises_on_200_with_error_status_measure_report()
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
         with pytest.raises(FhirOperationError) as exc_info:
-            await evaluate_measure("CMS1218FHIRHHRF", "p1", "2026-01-01", "2026-12-31")
+            await evaluate_measure("CMS122FHIRDiabetesAssessGreaterThan9Percent", "p1", "2026-01-01", "2026-12-31")
 
     err = exc_info.value
     assert err.status_code == 200

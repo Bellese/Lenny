@@ -108,15 +108,15 @@ New: "Measures not found on engine after reload attempt.
 Reloading validation bundles from: seed/connectathon-bundles
 API endpoint: http://localhost:8000
 
-Found 12 bundles to upload...
+Found 7 bundles to upload...
 
-Uploading CMS2FHIRPCSDepressionScreenAndFollowUp-bundle.json... ✓ (ID: 1)
-Uploading CMS122FHIRDiabetesAssessGreaterThan9Percent-bundle.json... ✓ (ID: 2)
+Uploading CMS122FHIRDiabetesAssessGreaterThan9Percent-bundle.json... ✓ (ID: 1)
+Uploading CMS124FHIRCervicalCancerScreening-bundle.json... ✓ (ID: 2)
 ...
 
 ==========================================
 Upload summary:
-  Uploaded: 12
+  Uploaded: 7
   Failed: 0
 ==========================================
 
@@ -178,7 +178,7 @@ docker-compose up -d
 sleep 10
 
 # Upload a bundle
-curl -X POST -F "file=@seed/connectathon-bundles/CMS2FHIRPCSDepressionScreenAndFollowUp-bundle.json" \
+curl -X POST -F "file=@seed/connectathon-bundles/CMS122FHIRDiabetesAssessGreaterThan9Percent-bundle.json" \
   http://localhost:8000/validation/upload-bundle
 
 # Verify expected results are loaded
@@ -214,6 +214,6 @@ docker logs lenny-backend-1 2>&1 | grep -E "missing_measures|Reloaded measures|a
 Example log output:
 ```
 WARNING: Measures not found on engine — attempting to reload from seed bundles
-INFO: Reloaded measures from seed bundle CMS2FHIRPCSDepressionScreenAndFollowUp-bundle.json
+INFO: Reloaded measures from seed bundle CMS122FHIRDiabetesAssessGreaterThan9Percent-bundle.json
 INFO: Seed bundle reload complete measures_loaded=1 libraries_loaded=0 failed=0
 ```

@@ -9,7 +9,7 @@ name: Bake HAPI Seeded Images
 # and targets the container's exposed port.
 #
 # Phase 2: After the base seed, both containers are restarted from their
-# locally-committed base images, all 12 connectathon bundles are loaded via
+# locally-committed base images, all 7 connectathon bundles are loaded via
 # load_connectathon_bundles.py, and the final images are pushed with :${seed-hash}.
 # :latest is NOT pushed here — that is gated on Phase 4 (verify-bake).
 
@@ -211,8 +211,8 @@ jobs:
   #
   # Pulls the just-pushed :${seed-hash} images, starts the integration test
   # stack, runs test_connectathon_measures.py with STRICT_STU6=1 (hard-fail
-  # on the 7 strict measures; the 5 non-strict measures with known issues
-  # auto-skip).  :latest is retagged and pushed ONLY if all strict assertions
+  # on all 7 connectathon measures (all strict=true);
+  # :latest is retagged and pushed ONLY if all strict assertions
   # pass.  This prevents shipping semantically-divergent images the way the
   # 815a1c6 → d4ff73b revert did.
   # -------------------------------------------------------------------------
