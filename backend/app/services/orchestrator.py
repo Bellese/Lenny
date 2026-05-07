@@ -237,6 +237,10 @@ async def run_job(job_id: int) -> None:
         # Step 5: Process batches with concurrency control
         semaphore = asyncio.Semaphore(settings.MAX_WORKERS)
 
+        # Resolve MCS URL once for the whole job. Falls back to the env-var
+        # default if Job.mcs_url is NULL (legacy rows pre-dating PR #4).
+        mcs_url = await _get_mcs_url(job_id)
+
         async def process_batch(batch_id: int) -> None:
             async with semaphore:
                 await _process_single_batch(
@@ -245,6 +249,7 @@ async def run_job(job_id: int) -> None:
                     patient_map=patient_map,
                     cdr_url=cdr_url,
                     auth_headers=auth_headers,
+                    mcs_url=mcs_url,
                 )
 
         # Check for cancellation before starting
@@ -339,12 +344,31 @@ async def _get_cdr_url(job_id: int) -> str:
     return settings.DEFAULT_CDR_URL
 
 
+async def _get_mcs_url(job_id: int) -> str:
+    """Resolve the MCS URL for a job.
+
+    Falls back to `settings.MEASURE_ENGINE_URL` when:
+    - The job pre-dates the mcs_url snapshot column (legacy row), AND
+    - The migration backfill couldn't run because MEASURE_ENGINE_URL was unset.
+
+    Both conditions together mean Job.mcs_url is NULL; the env-var fallback
+    keeps legacy jobs runnable, matching the historical behavior where every
+    job called `settings.MEASURE_ENGINE_URL` directly.
+    """
+    async with async_session() as session:
+        job = await session.get(Job, job_id)
+        if job and job.mcs_url:
+            return job.mcs_url
+    return settings.MEASURE_ENGINE_URL
+
+
 async def _process_single_batch(
     job_id: int,
     batch_id: int,
     patient_map: dict[str, dict[str, Any]],
     cdr_url: str,
     auth_headers: dict[str, str],
+    mcs_url: str,
 ) -> None:
     """Process a single batch in two phases.
 
@@ -520,7 +544,9 @@ async def _process_single_batch(
                     return
 
                 try:
-                    measure_report = await evaluate_measure(measure_id, patient_id, period_start, period_end)
+                    measure_report = await evaluate_measure(
+                        measure_id, patient_id, period_start, period_end, measure_engine_url=mcs_url
+                    )
 
                     populations = _extract_populations(measure_report)
                     patient_name = _extract_patient_name(patient_map.get(patient_id, {}))

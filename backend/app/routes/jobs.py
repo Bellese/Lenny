@@ -15,7 +15,7 @@ from sqlalchemy.orm import noload
 
 from app.config import settings
 from app.db import get_session
-from app.dependencies import CDRContext, get_active_cdr
+from app.dependencies import CDRContext, ConnectionContext, get_active_cdr, get_active_mcs
 from app.models.job import BatchStatus, Job, JobStatus, MeasureResult
 from app.models.validation import ExpectedResult
 from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups
@@ -175,8 +175,15 @@ async def create_job(
     body: JobCreate,
     session: AsyncSession = Depends(get_session),
     cdr: CDRContext = Depends(get_active_cdr),
+    mcs: ConnectionContext = Depends(get_active_mcs),
 ) -> dict:
-    """Create a new measure calculation job."""
+    """Create a new measure calculation job.
+
+    The active CDR and MCS connections are snapshotted onto the Job row at
+    creation time. Subsequent renders read the snapshot — never the live row
+    — so renaming/deleting/deactivating either connection mid-flight or
+    afterwards doesn't change what the job shows it ran against.
+    """
     if body.cdr_url:
         try:
             _validate_ssrf_url(body.cdr_url, label="cdr_url")
@@ -202,12 +209,24 @@ async def create_job(
         cdr_read_only=cdr.is_read_only,
         cdr_auth_type=cdr.auth_type.value if cdr.auth_type else None,
         cdr_id=cdr.id if cdr.id else None,
+        mcs_url=mcs.mcs_url,
+        mcs_name=mcs.name,
+        mcs_id=mcs.id if mcs.id else None,
     )
     session.add(job)
     await session.commit()
     await session.refresh(job)
 
-    logger.info("Job created", extra={"job_id": job.id, "measure_id": job.measure_id})
+    logger.info(
+        "Job created",
+        extra={
+            "job_id": job.id,
+            "measure_id": job.measure_id,
+            "cdr_id": job.cdr_id,
+            "mcs_id": job.mcs_id,
+            "mcs_url": job.mcs_url,
+        },
+    )
     return _job_to_response(job)
 
 

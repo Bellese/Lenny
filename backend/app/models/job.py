@@ -59,6 +59,15 @@ class Job(Base):
     cdr_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("cdr_configs.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # MCS connection snapshot — populated at job creation from the active MCS.
+    # All nullable so the migration backfill on existing rows can succeed even
+    # when MEASURE_ENGINE_URL is unset. Job rendering uses these snapshot
+    # fields, never re-queries the live MCSConfig row (per design doc rule).
+    mcs_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("mcs_configs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    mcs_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
+    mcs_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
 
     batches: Mapped[list["Batch"]] = relationship(
         "Batch", back_populates="job", cascade="all, delete-orphan", lazy="selectin"

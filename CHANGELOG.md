@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.5] - 2026-05-07
+
+### Added
+- **Job→MCS snapshot + active-MCS routing for measure evaluation** — every new measure-calculation job now snapshots the active MCS connection (`Job.mcs_id`, `Job.mcs_url`, `Job.mcs_name`) at creation time, mirroring the existing CDR snapshot fields. The orchestrator resolves the snapshot URL when the job runs and threads it into `evaluate_measure(...)` via the new `measure_engine_url` parameter, so jobs run against the MCS that was active at job creation — not whatever's active now. Connectathon attendees can switch between their MCS and a reference MCS without breaking in-flight jobs. Legacy rows with NULL `mcs_url` fall back to `settings.MEASURE_ENGINE_URL` (preserves the historical "always call the env var" behavior for jobs created before #12).
+- **`get_active_mcs()` FastAPI dependency** — parallel of `get_active_cdr()`, returns a `ConnectionContext` with `kind=ConnectionKind.mcs` and the active MCS row's URL/name/timeout.
+- **`ConnectionContext.mcs_url` field + `url` kind-agnostic property** — each kind populates its own URL field (`cdr_url` for CDR, `mcs_url` for MCS); the `url` property dispatches by `kind`. CDR consumers continue using `ctx.cdr_url` unchanged.
+
+### Changed
+- **`_run_schema_migrations()`** adds `Job.mcs_id` (FK to `mcs_configs.id` ON DELETE SET NULL), `Job.mcs_url`, `Job.mcs_name` — all nullable. Backfill UPDATE populates the snapshot for existing jobs from `MEASURE_ENGINE_URL` so the job-history view doesn't show "(unknown)" on legacy rows. If the env var is unset at migration time, the backfill skips and a warning logs (jobs render "(unknown)" for those rows; the orchestrator's env-var fallback keeps them runnable).
+
 ## [0.0.17.4] - 2026-05-07
 
 ### Added

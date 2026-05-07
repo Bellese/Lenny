@@ -625,15 +625,24 @@ async def evaluate_measure(
     patient_id: str,
     period_start: str,
     period_end: str,
+    measure_engine_url: str | None = None,
 ) -> dict[str, Any]:
     """Call $evaluate-measure on the measure engine for a single patient.
+
+    Args:
+        measure_engine_url: Base URL of the MCS to call. Defaults to
+            `settings.MEASURE_ENGINE_URL` for back-compat with callers that
+            haven't yet been wired to per-job active-MCS context. The
+            orchestrator passes `job.mcs_url` so jobs run against the MCS
+            that was active at job creation time, not whatever's active now.
 
     Raises FhirOperationError (with the MCS OperationOutcome preserved) on
     4xx/5xx responses and on 200 OK where the body is an OperationOutcome
     instead of a MeasureReport.
     """
+    base_url = measure_engine_url or settings.MEASURE_ENGINE_URL
     url = (
-        f"{settings.MEASURE_ENGINE_URL}/Measure/{measure_id}"
+        f"{base_url}/Measure/{measure_id}"
         f"/$evaluate-measure"
         f"?periodStart={period_start}"
         f"&periodEnd={period_end}"
