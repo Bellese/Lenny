@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.3] - 2026-05-07
+
+### Changed
+- **CDR connection routes refactored to a generic factory** — the seven CRUD endpoints (`list/create/get/update/delete/activate/test-connection`) now live in `app/routes/connection_factory.py:make_connection_router(...)`, parameterized by model, schemas, URL field name, kind, default name, and Job FK column. `app/routes/settings.py` becomes a single `make_connection_router(...)` instantiation for CDR (~75 LOC, down from ~480). Same routes, same response shapes, same audit-log structure — verified by all 31 existing CDR tests passing unchanged. The factory is the seam where MCS, TS, MR, and MRR will drop in with one-line additions in subsequent PRs.
+
 ## [0.0.17.2] - 2026-05-06
 
 ### Added
