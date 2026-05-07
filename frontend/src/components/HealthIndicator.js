@@ -1,28 +1,69 @@
 import React, { useState } from 'react';
 import styles from './HealthIndicator.module.css';
 
-export default function HealthIndicator({ status, name, errorDetails }) {
+const KIND_DEFAULTS = {
+  cdr: { fallbackName: 'Local CDR', noneLabel: 'No CDR active', errorPrefix: 'CDR' },
+  mcs: { fallbackName: 'Local Measure Engine', noneLabel: 'No MCS active', errorPrefix: 'Measure Engine' },
+};
+
+// Four-state chip: pending | healthy | unreachable | none-active.
+// state: 'pending' | 'healthy' | 'unreachable' | 'none'
+export default function HealthIndicator({
+  kind = 'cdr',
+  state = 'pending',
+  name,
+  errorDetails,
+  onClick,
+}) {
   const [popoverOpen, setPopoverOpen] = useState(false);
-  const ok = status === 'connected' || status === 'healthy';
-  const displayName = name || 'Local CDR';
+  const cfg = KIND_DEFAULTS[kind] || KIND_DEFAULTS.cdr;
+
+  const dotClass =
+    state === 'healthy' ? styles.dotOk
+    : state === 'unreachable' ? styles.dotErr
+    : state === 'none' ? styles.dotNone
+    : styles.dotPending;
+
+  const showsPopover = state === 'unreachable' && popoverOpen;
+  const isInteractive = state === 'unreachable' || state === 'none';
+  const displayName =
+    state === 'none' ? cfg.noneLabel
+    : (name || cfg.fallbackName);
+
+  const ariaLabel =
+    state === 'pending' ? `${cfg.errorPrefix}: checking…`
+    : state === 'unreachable' ? `${displayName} — connection error`
+    : state === 'none' ? `${cfg.noneLabel} — click to configure`
+    : displayName;
+
+  const handleKeyDown = (e) => {
+    if (!isInteractive || !onClick) return;
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onClick();
+    }
+  };
 
   return (
     <div
-      className={`${styles.chip} ${ok ? '' : styles.chipErr}`}
-      onMouseEnter={() => !ok && setPopoverOpen(true)}
+      className={`${styles.chip} ${state === 'unreachable' ? styles.chipErr : ''} ${isInteractive && onClick ? styles.chipClickable : ''}`}
+      onMouseEnter={() => state === 'unreachable' && setPopoverOpen(true)}
       onMouseLeave={() => setPopoverOpen(false)}
-      onFocus={() => !ok && setPopoverOpen(true)}
+      onFocus={() => state === 'unreachable' && setPopoverOpen(true)}
       onBlur={() => setPopoverOpen(false)}
-      tabIndex={ok ? -1 : 0}
-      aria-label={ok ? displayName : `${displayName} — connection error`}
+      onClick={isInteractive && onClick ? onClick : undefined}
+      onKeyDown={handleKeyDown}
+      tabIndex={isInteractive ? 0 : -1}
+      role={isInteractive && onClick ? 'button' : undefined}
+      aria-label={ariaLabel}
     >
-      <span className={`${styles.dot} ${ok ? styles.dotOk : styles.dotErr}`} />
+      <span className={`${styles.dot} ${dotClass}`} />
       {displayName}
-      {!ok && popoverOpen && (
+      {showsPopover && (
         <div className={styles.popover} role="tooltip">
           {errorDetails?.hint && <p className={styles.popoverHint}>{errorDetails.hint}</p>}
           {errorDetails?.url && <p className={styles.popoverUrl}>{errorDetails.url}</p>}
-          {!errorDetails?.hint && <p className={styles.popoverHint}>CDR connection failed.</p>}
+          {!errorDetails?.hint && <p className={styles.popoverHint}>{cfg.errorPrefix} connection failed.</p>}
         </div>
       )}
     </div>

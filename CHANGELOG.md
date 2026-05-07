@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.6] - 2026-05-07
+
+### Added
+- **Multi-MCS connection management UI** — frontend exposes the backend MCS connection-management surface from PRs #293/#294. Settings → Connections now stacks two cards (CDR Connections, MCS Connections) via a reusable `ConnectionSection` component, each with its own list/add/edit/activate/delete controls. `ConnectionModal` is `kind`-driven via a `KIND_SPECS` map (`cdr`, `mcs`); URL field name (`cdr_url` vs `mcs_url`), labels, and the `is_read_only` checkbox (CDR-only) all derive from the spec. One modal serves both kinds; future kinds add a `KIND_SPECS` entry.
+- **Topbar chip per connection kind** — replaces the single CDR `HealthIndicator` with an array of chips (one per kind). Four-state machine: `pending` (gray, initial), `healthy` (green), `unreachable` (red, hover tooltip with hint + sanitized URL), `none` (gray, plumbed for future "no active connection" case). Debounced: 2 consecutive failed probes before flipping to `unreachable`. Cadence: `setInterval` at 30 s + Page Visibility refresh on tab focus (no thundering herd on visibilitychange). Click on `unreachable`/`none` navigates to `/settings#{kind}-connections`.
+- **7 new MCS API client functions** in `frontend/src/api/client.js` — `getMcsConnections`, `createMcsConnection`, `getMcsConnection`, `updateMcsConnection`, `deleteMcsConnection`, `activateMcsConnection`, `testMcsConnection`. Mirror the CDR surface.
+- **`/health` resolves the active MCS via `get_active_mcs`** — was: probed `settings.MEASURE_ENGINE_URL`. Now uses the active row from `mcs_configs` (with the same legacy env-var fallback as `get_active_cdr`). Response gains `measure_engine.name` so the topbar chip can display the connection name.
+
+### Changed
+- **Test-connection routes are now per-kind** — were colliding at `/settings/test-connection` (both CDR and MCS factory instantiations registered the same path; CDR's schema won, so MCS sends were rejected with `field required: cdr_url`). The factory now registers `f"{prefix}/test-connection"`. New paths: CDR `/settings/connections/test-connection`, MCS `/settings/mcs-connections/test-connection`. Frontend `client.js` and 12 backend test callsites updated. This was originally deferred to a follow-up PR; folded in here once it surfaced during smoke testing of the MCS edit modal.
+
+### Known limitations
+- Measures page is not scoped to the active MCS (#296). The list is global, but only measures actually loaded on the active MCS will evaluate successfully. Switching MCS does not re-scope the page.
+- Failed-job detail surfacing is minimal (#297). Today the UI shows "Failed" with little context; backend logs hold the actual cause.
+
 ## [0.0.17.5] - 2026-05-07
 
 ### Added
