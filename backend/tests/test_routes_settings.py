@@ -365,7 +365,7 @@ async def test_test_connection_success(client):
         "software": "HAPI FHIR",
     }
     with patch(
-        "app.routes.settings.verify_fhir_connection",
+        "app.routes.connection_factory.verify_fhir_connection",
         new_callable=AsyncMock,
         return_value=mock_result,
     ):
@@ -383,7 +383,7 @@ async def test_test_connection_success(client):
 async def test_test_connection_failure(client):
     """POST /settings/test-connection returns 502 when connection fails."""
     with patch(
-        "app.routes.settings.verify_fhir_connection",
+        "app.routes.connection_factory.verify_fhir_connection",
         new_callable=AsyncMock,
         side_effect=ConnectionError("Connection refused"),
     ):
@@ -410,7 +410,7 @@ async def test_test_connection_401_surfaces_auth_hint(client):
         latency_ms=30,
     )
     with patch(
-        "app.routes.settings.verify_fhir_connection",
+        "app.routes.connection_factory.verify_fhir_connection",
         new_callable=AsyncMock,
         side_effect=exc,
     ):
@@ -443,7 +443,7 @@ async def test_test_connection_connect_error_surfaces_network_hint(client):
         cause=_httpx.ConnectError("Connection refused"),
     )
     with patch(
-        "app.routes.settings.verify_fhir_connection",
+        "app.routes.connection_factory.verify_fhir_connection",
         new_callable=AsyncMock,
         side_effect=exc,
     ):
@@ -471,7 +471,7 @@ async def test_test_connection_success_includes_response_time(client):
         "url": "http://example.com/fhir/metadata",
     }
     with patch(
-        "app.routes.settings.verify_fhir_connection",
+        "app.routes.connection_factory.verify_fhir_connection",
         new_callable=AsyncMock,
         return_value=mock_result,
     ):
@@ -489,7 +489,7 @@ async def test_test_connection_success_includes_response_time(client):
 async def test_test_connection_smart_missing_credentials(client):
     """POST /settings/test-connection with smart but missing fields returns 400 without HTTP call."""
     with patch(
-        "app.routes.settings.verify_fhir_connection",
+        "app.routes.connection_factory.verify_fhir_connection",
         new_callable=AsyncMock,
     ) as mock_verify:
         resp = await client.post(
@@ -527,7 +527,7 @@ async def test_test_connection_failure_does_not_leak_hostname(client):
     must strip it before the client sees it.
     """
     with patch(
-        "app.routes.settings.verify_fhir_connection",
+        "app.routes.connection_factory.verify_fhir_connection",
         new_callable=AsyncMock,
         side_effect=ConnectionError("Cannot connect to http://hapi-fhir-cdr:8080/fhir"),
     ):
