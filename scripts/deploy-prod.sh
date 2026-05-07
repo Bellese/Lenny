@@ -169,6 +169,13 @@ done
 printf '[+] Reconciling DB password...\n'
 LEONARD_DIR="$LEONARD_DIR" "$RECONCILE_SCRIPT"
 
+# ── export REACT_APP_API_TOKEN for frontend build arg ─────────────────────────
+# docker-compose.prod.yml passes REACT_APP_API_TOKEN as a build arg so the
+# React bundle can include the Bearer token. We read it from the already-
+# extracted secret file rather than re-parsing the env file.
+export REACT_APP_API_TOKEN
+REACT_APP_API_TOKEN=$(cat "$API_TOKEN_SECRET_FILE")
+
 # ── step 7: pull pre-built images from registries ─────────────────────────────
 # Without an explicit pull, `up --build` uses any locally-cached image even when
 # `:latest` upstream has been republished. This bit us when the bake workflow

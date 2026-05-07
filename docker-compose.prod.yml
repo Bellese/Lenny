@@ -5,6 +5,7 @@ services:
       context: ./frontend
       args:
         REACT_APP_API_URL: https://api.${CADDY_HOST}
+        REACT_APP_API_TOKEN: ${REACT_APP_API_TOKEN}
 
   backend:
     restart: unless-stopped
