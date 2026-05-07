@@ -13,6 +13,7 @@ services:
     secrets:
       - postgres_password
       - cdr_fernet_key
+      - api_token
     ulimits:
       core:
         soft: 0
@@ -53,6 +54,8 @@ secrets:
     file: /run/leonard/POSTGRES_PASSWORD
   cdr_fernet_key:
     file: /run/leonard/CDR_FERNET_KEY
+  api_token:
+    file: /run/leonard/API_TOKEN
 
 volumes:
   caddy_data:

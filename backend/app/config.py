@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     VALUESET_RELOAD_MODE: str = "delete"
     LOG_LEVEL: str = "INFO"
     ALLOWED_ORIGINS: str = "*"  # Comma-separated origins, or "*" for all (local dev default)
+    API_TOKEN: str = ""  # Bearer token required on all non-health routes; empty = open (local dev)
 
     model_config = {"env_prefix": "", "case_sensitive": True}
 

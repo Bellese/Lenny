@@ -525,14 +525,13 @@ class TestTriageTestBundle:
         """When an external CDR is active, clinical data IS pushed to that CDR."""
         from app.models.config import AuthType, CDRConfig
 
-        # Insert an active external CDR config (marked read-only in DB, but guard is removed)
         external_cdr = CDRConfig(
             cdr_url="http://external-cdr.example.com/fhir",
             auth_type=AuthType.none,
             is_active=True,
             name="External CDR",
             is_default=False,
-            is_read_only=True,
+            is_read_only=False,
         )
         test_session.add(external_cdr)
         await test_session.commit()
@@ -542,23 +541,43 @@ class TestTriageTestBundle:
         ) as mock_push:
             result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
-        # clinical data IS pushed to the external CDR
         assert result["patients_loaded"] == 1
         assert result.get("warning_message") is None
-        # Verify push_resources was called with the external CDR URL for clinical data
         clinical_push_calls = [
             call
             for call in mock_push.call_args_list
             if call.kwargs.get("target_url") == "http://external-cdr.example.com/fhir"
         ]
         assert len(clinical_push_calls) == 1
-        # Measure defs are still pushed (to measure engine, not the external CDR)
         push_calls_for_defs = [
             call
             for call in mock_push.call_args_list
             if call.kwargs.get("target_url") != "http://external-cdr.example.com/fhir"
         ]
         assert len(push_calls_for_defs) == 1
+
+    async def test_read_only_cdr_blocks_clinical_push(self, test_session, mock_test_bundle_with_expected):
+        """A read-only CDR must reject clinical data uploads."""
+        from app.models.config import AuthType, CDRConfig
+
+        read_only_cdr = CDRConfig(
+            cdr_url="http://external-cdr.example.com/fhir",
+            auth_type=AuthType.none,
+            is_active=True,
+            name="Read-Only CDR",
+            is_default=False,
+            is_read_only=True,
+        )
+        test_session.add(read_only_cdr)
+        await test_session.commit()
+
+        # Mock push_resources so measure-def uploads succeed; the read-only guard
+        # fires before push_resources is called for clinical data.
+        with patch(
+            "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
+        ):
+            with pytest.raises(ValueError, match="read-only"):
+                await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
     async def test_external_cdr_with_auth_forwards_headers(self, test_session, mock_test_bundle_with_expected):
         """When an external CDR has basic auth configured, auth headers are forwarded."""

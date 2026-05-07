@@ -1,4 +1,4 @@
-"""FastAPI dependencies for active connection configurations.
+"""FastAPI dependencies for active connection configurations and API token authentication.
 
 `ConnectionContext` is the canonical dataclass returned by `get_active_<kind>`
 dependencies. Future kinds (MCS, TS, MR, MRR) reuse this shape with the `kind`
@@ -14,7 +14,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from fastapi import Depends
+from fastapi import Depends, HTTPException, Security
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +23,16 @@ from app.config import settings
 from app.db import get_session
 from app.models.config import AuthType, CDRConfig
 from app.models.connection_base import ConnectionKind
+
+_bearer = HTTPBearer(auto_error=False)
+
+
+async def require_auth(credentials: HTTPAuthorizationCredentials = Security(_bearer)) -> None:
+    """Validate Bearer token. Skipped when API_TOKEN is empty (local dev)."""
+    if not settings.API_TOKEN:
+        return
+    if not credentials or credentials.credentials != settings.API_TOKEN:
+        raise HTTPException(status_code=401, detail="Invalid or missing API token")
 
 
 @dataclass

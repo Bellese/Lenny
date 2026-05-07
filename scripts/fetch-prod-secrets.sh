@@ -49,7 +49,7 @@ command -v jq >/dev/null 2>&1 || { printf '[!] jq is required but not installed.
 # ── constants ──────────────────────────────────────────────────────────────────
 readonly SSM_REGION="us-east-1"
 readonly SSM_PATH_PREFIX="/leonard/prod/"
-readonly REQUIRED_PARAMS=("POSTGRES_PASSWORD" "CDR_FERNET_KEY")
+readonly REQUIRED_PARAMS=("POSTGRES_PASSWORD" "CDR_FERNET_KEY" "API_TOKEN")
 readonly ENV_DIR="${LEONARD_ENV_DIR:-/run/leonard}"
 readonly ENV_FILE="${ENV_DIR}/env"
 # Value must be printable, no whitespace/quotes/semicolons, length 16–128.

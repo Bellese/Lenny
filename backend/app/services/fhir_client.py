@@ -116,6 +116,18 @@ def _validate_ssrf_url(url: str, label: str = "URL") -> None:
         )
 
 
+def _same_origin(base_url: str, next_url: str) -> bool:
+    """Return True if next_url shares the same scheme, host, and port as base_url.
+
+    Pagination next links must always point back to the same CDR server.
+    A malicious CDR returning a next link to a different host (e.g. an internal
+    Docker service) is the SSRF vector this check blocks.
+    """
+    a = urlparse(base_url)
+    b = urlparse(next_url)
+    return a.scheme == b.scheme and a.hostname == b.hostname and a.port == b.port
+
+
 async def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:
     """Build HTTP auth headers from CDR config. Async to support SMART token acquisition."""
     if auth_type == AuthType.none or not auth_credentials:
@@ -220,11 +232,20 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
                     resource = entry.get("resource", {})
                     if resource.get("resourceType") == "Patient":
                         patients.append(resource)
-                # Follow next link for pagination
+                # Follow next link only when it stays on the same CDR origin.
+                # A malicious CDR returning a next link to a different host is the
+                # SSRF vector we are blocking here.
                 url = None
                 for link in bundle.get("link", []):
                     if link.get("relation") == "next":
-                        url = link.get("url")
+                        next_url = link.get("url")
+                        if next_url and _same_origin(cdr_url, next_url):
+                            url = next_url
+                        elif next_url:
+                            logger.warning(
+                                "SSRF: pagination next link rejected (origin mismatch)",
+                                extra={"url": next_url},
+                            )
                         break
         logger.info("Gathered patients", extra={"count": len(patients)})
         return patients
@@ -258,7 +279,14 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
                 url = None
                 for link in bundle.get("link", []):
                     if link.get("relation") == "next":
-                        url = link.get("url")
+                        next_url = link.get("url")
+                        if next_url and _same_origin(cdr_url, next_url):
+                            url = next_url
+                        elif next_url:
+                            logger.warning(
+                                "SSRF: pagination next link rejected (origin mismatch)",
+                                extra={"url": next_url},
+                            )
                         break
         logger.info(
             "Gathered patient data",
@@ -388,7 +416,14 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                             page_url = None
                             for link in bundle.get("link", []):
                                 if link.get("relation") == "next":
-                                    page_url = link.get("url")
+                                    next_url = link.get("url")
+                                    if next_url and _same_origin(cdr_url, next_url):
+                                        page_url = next_url
+                                    elif next_url:
+                                        logger.warning(
+                                            "SSRF: pagination next link rejected (origin mismatch)",
+                                            extra={"url": next_url},
+                                        )
                                     break
                 except Exception as exc:
                     failed_type_names.add(resource_type)
@@ -947,7 +982,11 @@ async def list_groups(
             url = None
             for link in bundle.get("link", []):
                 if link.get("relation") == "next":
-                    url = link.get("url")
+                    next_url = link.get("url")
+                    if next_url and _same_origin(cdr_url, next_url):
+                        url = next_url
+                    elif next_url:
+                        logger.warning("SSRF: pagination next link rejected (origin mismatch)", extra={"url": next_url})
                     break
     return groups
 

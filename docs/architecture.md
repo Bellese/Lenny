@@ -175,6 +175,7 @@ Defined in `backend/app/config.py`. All overridable via environment variables.
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `ALLOWED_ORIGINS` | `"*"` | Comma-separated CORS allowed origins; `"*"` for wildcard (local dev default). Set to `https://${CADDY_HOST}` in production via `docker-compose.prod.yml`. |
 | `CDR_FERNET_KEY` | _(none)_ | Fernet key for encrypting CDR auth credentials at rest. Required in production. Generate with: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. In prod, injected via Docker secret at `/run/secrets/cdr_fernet_key` (takes priority over env var). See `.env.example`. |
+| `API_TOKEN` | `""` | Bearer token required on all non-health API routes. Empty = open (local dev). Required in production. Generate with: `python3 -c "import secrets; print(secrets.token_hex(32))"`. In prod, injected via Docker secret at `/run/secrets/api_token`. See `.env.example`. |
 
 ### Prod secrets
 
@@ -184,10 +185,11 @@ Production secrets are stored in **AWS SSM Parameter Store** under `/leonard/pro
 |---|---|---|
 | `/leonard/prod/POSTGRES_PASSWORD` | DB superuser password | backend, db (first-init) |
 | `/leonard/prod/CDR_FERNET_KEY` | Fernet key for CDR credential encryption | backend (credential_crypto.py) |
+| `/leonard/prod/API_TOKEN` | Bearer token for API authentication | backend (all non-health routes) |
 
 **Instance profile:** `leonard-ec2-prod` (attached to the prod EC2 instance) grants `ssm:GetParametersByPath` on `/leonard/prod/*` with `kms:ViaService` scoped to SSM only.
 
-**Boot flow:** On every deploy, `scripts/fetch-prod-secrets.sh` reads SSM and writes values to `/run/leonard/env` (tmpfs, mode 0600, cleared on reboot). `deploy-prod.sh` extracts `POSTGRES_PASSWORD` to `/run/leonard/POSTGRES_PASSWORD` (mode 0600) and `CDR_FERNET_KEY` to `/run/leonard/CDR_FERNET_KEY` (mode 0600). `docker-compose.prod.yml` mounts both as Docker secrets — the `backend` service reads `POSTGRES_PASSWORD` via `/run/secrets/postgres_password` (assembled into `DATABASE_URL` by `backend/docker-entrypoint.sh`) and `CDR_FERNET_KEY` via `/run/secrets/cdr_fernet_key` (read by `credential_crypto.py` at startup). The `db` service reads `POSTGRES_PASSWORD` via `POSTGRES_PASSWORD_FILE`. `scripts/reconcile-db-password.sh` then runs `ALTER ROLE mct2 PASSWORD :'newpw'` to synchronize the DB volume's embedded password.
+**Boot flow:** On every deploy, `scripts/fetch-prod-secrets.sh` reads SSM and writes values to `/run/leonard/env` (tmpfs, mode 0600, cleared on reboot). `deploy-prod.sh` extracts `POSTGRES_PASSWORD` to `/run/leonard/POSTGRES_PASSWORD` (mode 0600), `CDR_FERNET_KEY` to `/run/leonard/CDR_FERNET_KEY` (mode 0600), and `API_TOKEN` to `/run/leonard/API_TOKEN` (mode 0600). `docker-compose.prod.yml` mounts all three as Docker secrets — the `backend` service reads `POSTGRES_PASSWORD` via `/run/secrets/postgres_password` (assembled into `DATABASE_URL` by `backend/docker-entrypoint.sh`), `CDR_FERNET_KEY` via `/run/secrets/cdr_fernet_key` (read by `credential_crypto.py` at startup), and `API_TOKEN` via `/run/secrets/api_token` (exported as `API_TOKEN` env var by `docker-entrypoint.sh`). The `db` service reads `POSTGRES_PASSWORD` via `POSTGRES_PASSWORD_FILE`. `scripts/reconcile-db-password.sh` then runs `ALTER ROLE mct2 PASSWORD :'newpw'` to synchronize the DB volume's embedded password.
 
 **Rotation:** Update the SSM param, then run `scripts/deploy-prod.sh`. The backend must be restarted for the new `DATABASE_URL` to take effect (deploy-prod.sh handles this). See `docs/runbooks/rotate-db-password.md`.
 

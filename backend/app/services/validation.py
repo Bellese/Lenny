@@ -762,6 +762,8 @@ async def triage_test_bundle(
     if clinical:
         cdr_result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
         active_cdr = cdr_result.scalar_one_or_none()
+        if active_cdr and active_cdr.is_read_only:
+            raise ValueError("Cannot upload clinical data: the active CDR connection is configured as read-only.")
         cdr_url = active_cdr.cdr_url if active_cdr else settings.DEFAULT_CDR_URL
         cdr_auth = await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials) if active_cdr else {}
         cdr_push_result = await push_resources(clinical, target_url=cdr_url, auth_headers=cdr_auth)
