@@ -9,7 +9,7 @@
 | Coverage (≥70% floor) | `cd backend && python3 -m pytest tests/ --ignore=tests/integration --cov=app --cov-report=term-missing` | optional locally; CI reports |
 | Integration (CI-equivalent, what `pr-checks.yml` runs) | `./scripts/run-integration-tests.sh --ignore=tests/integration/test_golden_measures.py --ignore=tests/integration/test_connectathon_measures.py --ignore=tests/integration/test_full_workflow.py --ignore=tests/integration/test_groups_dropdown.py --ignore=tests/integration/test_full_jobs_pipeline.py` | **every PR + before push** (most-flaky-in-CI suite, ~3–5 min) |
 | Full workflow only | `./scripts/run-integration-tests.sh tests/integration/test_full_workflow.py` | before merging any change to the measure pipeline / FHIR data flow / job orchestration |
-| Integration (full / connectathon source-of-truth) | `./scripts/run-integration-tests.sh` (no flags — adds 600+ connectathon-measure patient tests CI skips on PRs) — or trigger nightly via Actions → Connectathon Measures | nightly automatic + manual pre-merge for measure-engine or HAPI-bump changes |
+| Integration (full / connectathon source-of-truth) | `./scripts/run-integration-tests.sh` (no flags — adds 600+ connectathon-measure patient tests CI skips on PRs) — or trigger weekly via Actions → Connectathon Measures | weekly automatic (Monday 03:00 UTC) + manual pre-merge for measure-engine or HAPI-bump changes |
 | Frontend dev server | `cd frontend && npm start` (port 3001) | local dev only |
 
 **Decision tree:**
@@ -18,7 +18,7 @@
 - Adding measures or bumping HAPI? → Run the full integration suite (or manually trigger the weekly Connectathon Measures workflow) before merge.
 - Validating that Lenny's Jobs API produces correct numerator/denominator counts? → `USE_PREBAKED=1 ./scripts/run-integration-tests.sh tests/integration/test_full_jobs_pipeline.py` (requires prebaked images with Groups; ~30–50 min for all 11 measures). Or run the standalone script: `python scripts/validate_all_measures.py`.
 
-The weekly Connectathon Measures workflow has four independent jobs: **Bundle Loader Test** (vanilla HAPI), **Connectathon Eval** (pre-baked HAPI), **Jobs Pipeline Validation** (pre-baked HAPI, validates Lenny orchestration layer), and **Full Workflow** (clean nightly run). See `docs/testing.md` for the full strategy.
+The weekly Connectathon Measures workflow has four independent jobs: **Bundle Loader Test** (vanilla HAPI), **Connectathon Eval** (pre-baked HAPI), **Jobs Pipeline Validation** (pre-baked HAPI, validates Lenny orchestration layer), and **Full Workflow** (clean weekly run). See `docs/testing.md` for the full strategy.
 
 ## Recurring bug: HAPI async-indexing race
 
@@ -63,7 +63,7 @@ PRs #142, #155, #159, #161, #167+ each patched a slice of this same disease.
 
 1. **Lint** (Build & Test table, "Lint" row) — clean.
 2. **Unit suite** ("Unit" row) — passes.
-3. **CI-equivalent integration suite** ("Integration (CI-equivalent…)" row) — **passes against real HAPI containers.** This is the suite that fails most often in CI; it MUST pass locally first (~3–5 min). The full integration suite (no `--ignore` flags) runs 600+ connectathon-measure patient tests CI skips on PRs — only run those when changing the measure evaluation pipeline or before a nightly run.
+3. **CI-equivalent integration suite** ("Integration (CI-equivalent…)" row) — **passes against real HAPI containers.** This is the suite that fails most often in CI; it MUST pass locally first (~3–5 min). The full integration suite (no `--ignore` flags) runs 600+ connectathon-measure patient tests CI skips on PRs — only run those when changing the measure evaluation pipeline or before the weekly run.
 4. End-to-end smoke against a local stack (`cp .env.example .env && docker compose up -d` — `.env.example` sets `COMPOSE_FILE=docker-compose.yml:docker-compose.prebaked.yml` plus the prebaked HAPI image vars so the fast path is the default; falls back to vanilla `hapiproject/hapi:v8.8.0-1` if those vars are removed) for any change touching:
    - The data flow (`fhir_client.py`, `validation.py`, `orchestrator.py`)
    - HAPI behavior or configuration
