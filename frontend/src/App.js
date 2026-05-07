@@ -11,7 +11,7 @@ import {
   MeasuresIcon, JobsIcon, ResultsIcon, ValidateIcon,
   SettingsIcon, SearchIcon, XIcon, SunIcon, MoonIcon,
 } from './components/Icons';
-import HealthIndicator from './components/HealthIndicator';
+import HealthChipGroup from './components/HealthChipGroup';
 import SearchContext from './contexts/SearchContext';
 
 const ALL_NAV_ITEMS = [
@@ -126,13 +126,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    checkHealth();
-    const onVisible = () => { if (document.visibilityState === 'visible') checkHealth(); };
-    document.addEventListener('visibilitychange', onVisible);
-    const interval = setInterval(checkHealth, 30000);
-    return () => {
+    let interval = null;
+    const start = () => {
+      if (interval !== null) return;
+      checkHealth();
+      interval = setInterval(checkHealth, 30000);
+    };
+    const stop = () => {
+      if (interval === null) return;
       clearInterval(interval);
-      document.removeEventListener('visibilitychange', onVisible);
+      interval = null;
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') start();
+      else stop();
+    };
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [checkHealth]);
 
@@ -211,19 +224,11 @@ export default function App() {
           <span className={styles.crumb}>{pageTitle}</span>
           <div className={styles.spacer} />
           <div className={styles.topbarRight}>
-            {HEALTH_KINDS.map(({ kind, settingsHash }) => {
-              const chip = chips[kind];
-              return (
-                <HealthIndicator
-                  key={kind}
-                  kind={kind}
-                  state={chip.state}
-                  name={chip.name}
-                  errorDetails={chip.errorDetails}
-                  onClick={() => navigate(`/settings${settingsHash}`)}
-                />
-              );
-            })}
+            <HealthChipGroup
+              chips={chips}
+              kinds={HEALTH_KINDS}
+              onChipClick={(hash) => navigate(`/settings${hash}`)}
+            />
             <div className={styles.searchWrap}>
               <SearchIcon className={styles.searchIcon} />
               <input

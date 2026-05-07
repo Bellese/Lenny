@@ -218,6 +218,50 @@
   gap: 4px;
 }
 
+/* Probe panel — inline result for the "Verify with sample evaluate" button */
+.probePanel {
+  margin: 0 12px 12px 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-sunken);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.probePanelOk  { border-color: var(--ok); }
+.probePanelErr { border-color: var(--err); }
+
+.probePanelHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+  font-size: 13px;
+}
+
+.probePanelTitle { flex: 1; }
+
+.probeDismiss {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.probePanelBody {
+  font-size: 12px;
+  color: var(--text);
+}
+
+.probeMessage {
+  margin: 0;
+  line-height: 1.4;
+}
+
 .btnLink {
   padding: 4px 8px;
   border: 1px solid var(--line);

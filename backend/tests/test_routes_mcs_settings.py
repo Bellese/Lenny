@@ -15,11 +15,14 @@ the duplication becomes painful, parameterize then.
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from sqlalchemy.exc import IntegrityError
 
 from app.models.connection_base import AuthType
 from app.models.mcs_config import MCSConfig
+from app.services.fhir_errors import FhirIssue, FhirOperationError, FhirOperationOutcome
 
 pytestmark = pytest.mark.asyncio
 
@@ -233,3 +236,134 @@ async def test_seed_default_connections_creates_local_measure_engine(test_engine
     await seed_default_connections()
     all_mcs = (await test_session.execute(select(MCSConfig))).scalars().all()
     assert len([c for c in all_mcs if c.is_default]) == 1
+
+
+# ---------------------------------------------------------------------------
+# POST /settings/mcs-connections/{id}/probe — deep $data-requirements probe
+# ---------------------------------------------------------------------------
+
+
+async def _create_mcs_row(test_session, *, mcs_url="https://probe.example.com/fhir", is_active=False):
+    cfg = MCSConfig(
+        name="Probe MCS",
+        mcs_url=mcs_url,
+        auth_type=AuthType.none,
+        is_active=is_active,
+        is_default=False,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+    return cfg
+
+
+async def test_mcs_probe_success(client, test_session):
+    """Probe returns the success envelope from probe_mcs_data_requirements."""
+    cfg = await _create_mcs_row(test_session)
+    fake_result = {
+        "status": "ok",
+        "measure_id": "CMS122",
+        "measure_name": "Diabetes A1c >9%",
+        "data_requirement_count": 4,
+        "list_latency_ms": 12,
+        "data_requirements_latency_ms": 45,
+        "url": "https://probe.example.com/fhir/Measure/CMS122/$data-requirements",
+    }
+    with patch(
+        "app.routes.settings.probe_mcs_data_requirements",
+        new_callable=AsyncMock,
+        return_value=fake_result,
+    ):
+        resp = await client.post(f"/settings/mcs-connections/{cfg.id}/probe")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["measure_id"] == "CMS122"
+    assert body["data_requirement_count"] == 4
+
+
+async def test_mcs_probe_404_when_connection_missing(client):
+    resp = await client.post("/settings/mcs-connections/99999/probe")
+    assert resp.status_code == 404
+
+
+async def test_mcs_probe_502_on_engine_error(client, test_session):
+    """A FhirOperationError with a 4xx/5xx status surfaces as a 502 envelope."""
+    cfg = await _create_mcs_row(test_session)
+    outcome = FhirOperationOutcome(
+        issues=[FhirIssue(severity="error", code="processing", diagnostics="Library not found")],
+        raw={
+            "resourceType": "OperationOutcome",
+            "issue": [{"severity": "error", "code": "processing", "diagnostics": "Library not found"}],
+        },
+    )
+    err = FhirOperationError(
+        operation="probe-data-requirements",
+        url=f"{cfg.mcs_url}/Measure/CMS122/$data-requirements",
+        status_code=500,
+        outcome=outcome,
+        latency_ms=20,
+    )
+    with patch(
+        "app.routes.settings.probe_mcs_data_requirements",
+        new_callable=AsyncMock,
+        side_effect=err,
+    ):
+        resp = await client.post(f"/settings/mcs-connections/{cfg.id}/probe")
+    assert resp.status_code == 500
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    assert "Library not found" in detail["issue"][0]["diagnostics"]
+
+
+async def test_mcs_probe_warning_when_mcs_empty(client, test_session):
+    """The empty-MCS path: 200 status with a synthesized OperationOutcome
+    surfaces as a 200 response with status='warning' so the UI can render it."""
+    cfg = await _create_mcs_row(test_session)
+    outcome = FhirOperationOutcome(
+        issues=[
+            FhirIssue(
+                severity="warning", code="not-found", diagnostics="MCS is reachable but has no Measure resources."
+            )
+        ],
+        raw={
+            "resourceType": "OperationOutcome",
+            "issue": [
+                {
+                    "severity": "warning",
+                    "code": "not-found",
+                    "diagnostics": "MCS is reachable but has no Measure resources.",
+                }
+            ],
+        },
+    )
+    err = FhirOperationError(
+        operation="probe-data-requirements",
+        url=f"{cfg.mcs_url}/Measure?_count=1",
+        status_code=200,
+        outcome=outcome,
+        latency_ms=10,
+    )
+    with patch(
+        "app.routes.settings.probe_mcs_data_requirements",
+        new_callable=AsyncMock,
+        side_effect=err,
+    ):
+        resp = await client.post(f"/settings/mcs-connections/{cfg.id}/probe")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "warning"
+    assert body["outcome"]["issue"][0]["severity"] == "warning"
+
+
+async def test_mcs_probe_400_on_ssrf_rejection(client, test_session):
+    """SSRF ValueError from probe_mcs_data_requirements surfaces as 400."""
+    cfg = await _create_mcs_row(test_session)
+    with patch(
+        "app.routes.settings.probe_mcs_data_requirements",
+        new_callable=AsyncMock,
+        side_effect=ValueError("SSRF protection: mcs_url scheme 'file' is not allowed."),
+    ):
+        resp = await client.post(f"/settings/mcs-connections/{cfg.id}/probe")
+    assert resp.status_code == 400
+    assert "SSRF protection" in resp.json()["detail"]["issue"][0]["diagnostics"]
