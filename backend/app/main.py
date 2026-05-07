@@ -5,7 +5,7 @@ import logging
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
@@ -13,7 +13,6 @@ from slowapi.errors import RateLimitExceeded
 from app.config import parse_allowed_origins
 from app.config import settings as app_settings
 from app.db import engine
-from app.dependencies import require_auth
 from app.limiter import limiter
 from app.models import Base
 from app.routes import health, jobs, measures, results, settings, validation
@@ -459,11 +458,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Register routers — health is unauthenticated (monitoring probes); all others require a token
-_auth = [Depends(require_auth)]
+# Register routers
 app.include_router(health.router)
-app.include_router(jobs.router, dependencies=_auth)
-app.include_router(measures.router, dependencies=_auth)
-app.include_router(results.router, dependencies=_auth)
-app.include_router(settings.router, dependencies=_auth)
-app.include_router(validation.router, dependencies=_auth)
+app.include_router(jobs.router)
+app.include_router(measures.router)
+app.include_router(results.router)
+app.include_router(settings.router)
+app.include_router(validation.router)

@@ -45,7 +45,6 @@ readonly ENV_DIR="/run/leonard"
 readonly ENV_FILE="${ENV_DIR}/env"
 readonly SECRET_FILE="${ENV_DIR}/POSTGRES_PASSWORD"
 readonly FERNET_SECRET_FILE="${ENV_DIR}/CDR_FERNET_KEY"
-readonly API_TOKEN_SECRET_FILE="${ENV_DIR}/API_TOKEN"
 readonly FETCH_SCRIPT="${LEONARD_DIR}/scripts/fetch-prod-secrets.sh"
 readonly RECONCILE_SCRIPT="${LEONARD_DIR}/scripts/reconcile-db-password.sh"
 readonly HEALTH_URL="https://api.lenny.bellese.dev/health"
@@ -110,9 +109,6 @@ fi
 if ! grep -qE '^CDR_FERNET_KEY=' "$ENV_FILE"; then
     die 1 "'${ENV_FILE}' does not contain a CDR_FERNET_KEY= line"
 fi
-if ! grep -qE '^API_TOKEN=' "$ENV_FILE"; then
-    die 1 "'${ENV_FILE}' does not contain an API_TOKEN= line"
-fi
 
 # Extract POSTGRES_PASSWORD to the Docker-secrets file.
 # Use install(1) to write mode 0600 atomically — avoids a window where the
@@ -126,9 +122,6 @@ grep -E '^POSTGRES_PASSWORD=' "$ENV_FILE" \
 grep -E '^CDR_FERNET_KEY=' "$ENV_FILE" \
     | cut -d= -f2- \
     | install -o root -g root -m 0644 /dev/stdin "$FERNET_SECRET_FILE"
-grep -E '^API_TOKEN=' "$ENV_FILE" \
-    | cut -d= -f2- \
-    | install -o root -g root -m 0600 /dev/stdin "$API_TOKEN_SECRET_FILE"
 
 # ── shared preflight done; branch on mode ─────────────────────────────────────
 if [[ "$POST_DB_RESTART" -eq 1 ]]; then
@@ -168,13 +161,6 @@ done
 # ── step 6: reconcile DB password ─────────────────────────────────────────────
 printf '[+] Reconciling DB password...\n'
 LEONARD_DIR="$LEONARD_DIR" "$RECONCILE_SCRIPT"
-
-# ── export REACT_APP_API_TOKEN for frontend build arg ─────────────────────────
-# docker-compose.prod.yml passes REACT_APP_API_TOKEN as a build arg so the
-# React bundle can include the Bearer token. We read it from the already-
-# extracted secret file rather than re-parsing the env file.
-export REACT_APP_API_TOKEN
-REACT_APP_API_TOKEN=$(cat "$API_TOKEN_SECRET_FILE")
 
 # ── step 7: pull pre-built images from registries ─────────────────────────────
 # Without an explicit pull, `up --build` uses any locally-cached image even when

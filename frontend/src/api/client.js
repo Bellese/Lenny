@@ -1,7 +1,6 @@
 import { parseFhirError } from './fhirError';
 
 const BASE_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
-const API_TOKEN = process.env.REACT_APP_API_TOKEN || '';
 
 class ApiError extends Error {
   constructor(message, status, body) {
@@ -20,7 +19,6 @@ async function request(path, { _timeout = 20000, ...options } = {}) {
   const config = {
     headers: {
       'Content-Type': 'application/json',
-      ...(API_TOKEN && { Authorization: `Bearer ${API_TOKEN}` }),
       ...options.headers,
     },
     ...options,

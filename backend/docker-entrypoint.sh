@@ -7,8 +7,5 @@ if [ -s /run/secrets/postgres_password ]; then
   export DATABASE_URL="postgresql+asyncpg://mct2:${PW}@db:5432/mct2"
   unset PW
 fi
-if [ -s /run/secrets/api_token ]; then
-  export API_TOKEN=$(cat /run/secrets/api_token)
-fi
 # Drop from root to the app user before exec so the process never runs as root.
 exec gosu app "$@"

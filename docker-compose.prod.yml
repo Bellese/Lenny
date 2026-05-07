@@ -5,7 +5,6 @@ services:
       context: ./frontend
       args:
         REACT_APP_API_URL: https://api.${CADDY_HOST}
-        REACT_APP_API_TOKEN: ${REACT_APP_API_TOKEN}
 
   backend:
     restart: unless-stopped
@@ -14,7 +13,6 @@ services:
     secrets:
       - postgres_password
       - cdr_fernet_key
-      - api_token
     ulimits:
       core:
         soft: 0
@@ -55,8 +53,6 @@ secrets:
     file: /run/leonard/POSTGRES_PASSWORD
   cdr_fernet_key:
     file: /run/leonard/CDR_FERNET_KEY
-  api_token:
-    file: /run/leonard/API_TOKEN
 
 volumes:
   caddy_data:
