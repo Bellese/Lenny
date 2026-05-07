@@ -420,7 +420,7 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
         {"resourceType": "Patient", "id": "p2", "name": [{"given": ["Bob"], "family": "Bad"}]},
     ]
 
-    async def mock_evaluate(measure_id, patient_id, period_start, period_end):
+    async def mock_evaluate(measure_id, patient_id, period_start, period_end, measure_engine_url=None):
         if patient_id == "p2":
             raise Exception("Evaluation failed for p2")
         return mock_measure_report
@@ -779,6 +779,7 @@ async def test_process_batch_uses_everything_strategy(test_session, session_fact
             patient_map=patient_map,
             cdr_url="http://cdr/fhir",
             auth_headers={},
+            mcs_url="http://mcs/fhir",
         )
 
     mock_strategy_cls.assert_called_once_with()
@@ -852,6 +853,7 @@ async def test_process_batch_uses_data_requirements_strategy_when_configured(
             patient_map=patient_map,
             cdr_url="http://cdr/fhir",
             auth_headers={},
+            mcs_url="http://mcs/fhir",
         )
 
     mock_strategy_cls.assert_called_once_with("CMS999")
