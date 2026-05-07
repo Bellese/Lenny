@@ -16,6 +16,7 @@ from app.models.app_setting import AppSetting
 from app.models.config import CDRConfig
 from app.models.connection_base import ConnectionKind
 from app.models.job import Job
+from app.models.mcs_config import MCSConfig
 from app.routes.connection_factory import make_connection_router
 from app.services.fhir_client import wipe_measure_definitions
 from app.services.validation import sanitize_error
@@ -56,6 +57,35 @@ class TestConnectionRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# MCS Schemas
+# ---------------------------------------------------------------------------
+
+
+class MCSConnectionResponse(BaseModel):
+    id: int
+    name: str
+    mcs_url: str
+    auth_type: str
+    is_active: bool
+    is_default: bool
+
+    model_config = {"from_attributes": True}
+
+
+class MCSConnectionCreate(BaseModel):
+    name: str
+    mcs_url: str
+    auth_type: str = "none"
+    auth_credentials: dict | None = None
+
+
+class MCSTestConnectionRequest(BaseModel):
+    mcs_url: str
+    auth_type: str = "none"
+    auth_credentials: dict | None = None
+
+
+# ---------------------------------------------------------------------------
 # CDR connection routes — delegated to the factory
 # ---------------------------------------------------------------------------
 
@@ -70,6 +100,27 @@ router.include_router(
         url_field="cdr_url",
         default_name="Local CDR",
         job_fk_column=Job.cdr_id,
+        audit_logger=logger,
+    )
+)
+
+
+# ---------------------------------------------------------------------------
+# MCS connection routes — same factory, different model+schemas
+# ---------------------------------------------------------------------------
+
+router.include_router(
+    make_connection_router(
+        model=MCSConfig,
+        response_schema=MCSConnectionResponse,
+        create_schema=MCSConnectionCreate,
+        test_request_schema=MCSTestConnectionRequest,
+        prefix="/mcs-connections",
+        kind=ConnectionKind.mcs,
+        url_field="mcs_url",
+        default_name="Local Measure Engine",
+        # Job FK to MCS lands in PR #4 alongside the fhir_client wiring.
+        job_fk_column=None,
         audit_logger=logger,
     )
 )

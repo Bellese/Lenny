@@ -58,6 +58,9 @@ class JSONFormatter(logging.Formatter):
             "action",
             "cdr_id",
             "cdr_name",
+            "mcs_id",
+            "mcs_name",
+            "mcs_url",
         )
         for key in _EXTRA_KEYS:
             val = getattr(record, key, None)
@@ -306,6 +309,50 @@ async def _run_schema_migrations(conn) -> None:
         await conn.execute(text("ALTER TABLE jobs DROP COLUMN IF EXISTS cdr_auth_credentials"))
 
 
+async def seed_default_connections() -> None:
+    """Seed Local <Kind> rows for each connection-management kind.
+
+    Idempotent: skips a kind if a row with `is_default=True` already exists in
+    its table (the seed has already run). For each missing seed, inserts a
+    row keyed off the env-var URL (`DEFAULT_CDR_URL` for CDR,
+    `MEASURE_ENGINE_URL` for MCS). Uses SQLAlchemy ORM, so it runs identically
+    on Postgres and SQLite — replaces the earlier raw-SQL CDR seed that
+    hardcoded the URL.
+
+    Future kinds (TS, MR, MRR) add a single tuple to `_KIND_SEEDS` below.
+    """
+    from sqlalchemy import select
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.config import settings as app_config
+    from app.models.config import CDRConfig
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    # (model, default-name, url-attribute, env-derived URL, kind-specific
+    # extra kwargs the model accepts).
+    _KIND_SEEDS = [
+        (CDRConfig, "Local CDR", "cdr_url", app_config.DEFAULT_CDR_URL, {"is_read_only": False}),
+        (MCSConfig, "Local Measure Engine", "mcs_url", app_config.MEASURE_ENGINE_URL, {}),
+    ]
+
+    async with AsyncSession(engine) as session:
+        for model, default_name, url_attr, default_url, extra_kwargs in _KIND_SEEDS:
+            existing = await session.execute(select(model.id).where(model.is_default.is_(True)).limit(1))
+            if existing.scalar_one_or_none() is not None:
+                continue  # Already seeded.
+            cfg = model(
+                name=default_name,
+                auth_type=AuthType.none,
+                is_active=True,
+                is_default=True,
+                **{url_attr: default_url},
+                **extra_kwargs,
+            )
+            session.add(cfg)
+        await session.commit()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: create DB tables and launch background worker.
@@ -320,33 +367,29 @@ async def lifespan(app: FastAPI):
     # Create any missing tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    # Enforce at most one active CDR row on fresh DBs (partial unique index).
-    # `__table_args__` on `CDRConfig` declares the index so `create_all` above
-    # generates it for both Postgres and SQLite. This raw-SQL is belt-and-
-    # suspenders for existing-DB upgrades where the model declaration didn't
-    # yet exist when the table was created.
+    # Enforce at most one active row per kind on fresh DBs (partial unique
+    # indexes). `__table_args__` on each subclass declares the index so
+    # `create_all` above generates it for both Postgres and SQLite. The raw-
+    # SQL below is belt-and-suspenders for existing-DB upgrades where the
+    # model declaration didn't yet exist when the table was created.
     async with engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
         if conn.dialect.name == "postgresql":
             where_clause = "is_active = TRUE"
         else:
             where_clause = "is_active = 1"
-        await conn.execute(
-            text(
-                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_cdr ON cdr_configs (is_active) WHERE {where_clause}"
-            )
-        )
-    # Seed built-in Local CDR row after tables exist (idempotent, separate connection)
-    async with engine.connect() as conn:
-        await conn.execution_options(isolation_level="AUTOCOMMIT")
-        if conn.dialect.name == "postgresql":
+        for table_name, index_name in [
+            ("cdr_configs", "idx_one_active_cdr"),
+            ("mcs_configs", "idx_one_active_mcs"),
+        ]:
             await conn.execute(
-                text("""
-                INSERT INTO cdr_configs (cdr_url, auth_type, is_active, name, is_default, is_read_only)
-                VALUES ('http://hapi-fhir-cdr:8080/fhir', 'none', TRUE, 'Local CDR', TRUE, FALSE)
-                ON CONFLICT (name) DO NOTHING
-            """)
+                text(f"CREATE UNIQUE INDEX IF NOT EXISTS {index_name} ON {table_name} (is_active) WHERE {where_clause}")
             )
+    # Seed built-in Local <Kind> rows across all connection kinds. Reads URLs
+    # from env vars (DEFAULT_CDR_URL, MEASURE_ENGINE_URL) — replaces the
+    # earlier raw-SQL CDR seed that hardcoded the URL in violation of the
+    # CLAUDE.md "no hardcoded URLs" rule.
+    await seed_default_connections()
     logger.info("Database tables created")
 
     # Encrypt any plaintext cdr_configs.auth_credentials rows left from before #219.
