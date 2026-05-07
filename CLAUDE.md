@@ -15,10 +15,10 @@
 **Decision tree:**
 - Pushing a PR? → Lint + Unit + CI-equivalent integration (no skipping).
 - Touching `measure_*` / `orchestrator.py` / `fhir_client.py` / `validation.py`? → Add Full workflow + Jobs pipeline validation (see below).
-- Adding measures or bumping HAPI? → Run the full integration suite (or manually trigger the weekly Connectathon Measures workflow) before merge.
+- Adding measures or bumping HAPI? → Run the full integration suite before merge.
 - Validating that Lenny's Jobs API produces correct numerator/denominator counts? → `USE_PREBAKED=1 ./scripts/run-integration-tests.sh tests/integration/test_full_jobs_pipeline.py` (requires prebaked images with Groups; ~30–50 min for all 11 measures). Or run the standalone script: `python scripts/validate_all_measures.py`.
 
-The weekly Connectathon Measures workflow has four independent jobs: **Bundle Loader Test** (vanilla HAPI), **Connectathon Eval** (pre-baked HAPI), **Jobs Pipeline Validation** (pre-baked HAPI, validates Lenny orchestration layer), and **Full Workflow** (clean weekly run). See `docs/testing.md` for the full strategy.
+`docs/testing.md` documents the four-job Connectathon Measures workflow in full.
 
 ## Recurring bug: HAPI async-indexing race
 
@@ -55,15 +55,12 @@ PRs #142, #155, #159, #161, #167+ each patched a slice of this same disease.
 
 ## Local-first iteration — MANDATORY pre-push checklist
 
-> **DO NOT `git push` ANY PR until ALL of the checks below have run successfully on your machine.**
-> "Validate locally" does NOT mean "ran unit tests." It means EVERY check below.
+> **DO NOT `git push` ANY PR until ALL the checks below pass locally** — no exceptions for "small" or "obvious" fixes. "Validate locally" means EVERY check, not just unit tests.
 > CI is not a debugger. Prod is not a debugger. Reviewers' time is not a debugger.
-
-**Required local checks before `git push` of ANY PR (no exceptions for "small" or "obvious" fixes):**
 
 1. **Lint** (Build & Test table, "Lint" row) — clean.
 2. **Unit suite** ("Unit" row) — passes.
-3. **CI-equivalent integration suite** ("Integration (CI-equivalent…)" row) — **passes against real HAPI containers.** This is the suite that fails most often in CI; it MUST pass locally first (~3–5 min). The full integration suite (no `--ignore` flags) runs 600+ connectathon-measure patient tests CI skips on PRs — only run those when changing the measure evaluation pipeline or before the weekly run.
+3. **CI-equivalent integration suite** ("Integration (CI-equivalent…)" row) — **passes against real HAPI containers**, locally first (~3–5 min). The full integration suite (no `--ignore` flags) runs 600+ connectathon-measure patient tests CI skips on PRs — only run those when changing the measure evaluation pipeline or before the weekly run.
 4. End-to-end smoke against a local stack (`cp .env.example .env && docker compose up -d` — `.env.example` sets `COMPOSE_FILE=docker-compose.yml:docker-compose.prebaked.yml` plus the prebaked HAPI image vars so the fast path is the default; falls back to vanilla `hapiproject/hapi:v8.8.0-1` if those vars are removed) for any change touching:
    - The data flow (`fhir_client.py`, `validation.py`, `orchestrator.py`)
    - HAPI behavior or configuration
@@ -74,7 +71,7 @@ PRs #142, #155, #159, #161, #167+ each patched a slice of this same disease.
 
 If the change is documentation-only (`*.md`, no code), steps 1–4 are not required, but step 5 still applies — confirm in the PR description that no code changed.
 
-**Reproduce the bug on the local stack FIRST** when investigating any "wrong populations" / "validation pass-rate" / "404 from HAPI" / "$everything returns only Patient" symptom. Don't propose code changes until you have a local repro that fails the same way as prod.
+**Reproduce on the local stack FIRST.** Don't propose code changes until you have a local repro that fails the same way as prod.
 
 ## Architecture
 
