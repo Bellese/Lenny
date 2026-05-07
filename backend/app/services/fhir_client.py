@@ -20,6 +20,7 @@ import httpx
 from app.config import settings
 from app.models.config import AuthType
 from app.services.fhir_errors import (
+    FhirIssue,
     FhirOperationError,
     FhirOperationOutcome,
     sanitize_url,
@@ -1054,6 +1055,125 @@ async def list_measures() -> dict[str, Any]:
         resp = await client.get(url)
         resp.raise_for_status()
         return resp.json()
+
+
+async def probe_mcs_data_requirements(
+    mcs_url: str,
+    auth_type: str = "none",
+    auth_credentials: Optional[dict] = None,
+) -> dict[str, Any]:
+    """Deep-probe an MCS by exercising `$data-requirements` on one of its measures.
+
+    Confirms the MCS can resolve a Measure's Library + ValueSets — a stricter
+    test than `verify_fhir_connection` (which only fetches /metadata). Picks
+    the first available measure on the MCS via `Measure?_count=1`, then calls
+    `$data-requirements` against it.
+
+    Returns a summary dict on success. Raises `FhirOperationError` on any
+    failure path so callers can convert to the standard error envelope.
+    """
+    _validate_ssrf_url(mcs_url, label="mcs_url")
+    headers = await _build_auth_headers(auth_type, auth_credentials)
+
+    # Step 1: find one measure on the MCS.
+    list_url = f"{mcs_url}/Measure?_count=1"
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(list_url, headers=headers)
+            list_latency_ms = round((time.monotonic() - t0) * 1000)
+            if not resp.is_success:
+                outcome = FhirOperationOutcome.from_response(resp)
+                raise FhirOperationError(
+                    operation="probe-data-requirements",
+                    url=list_url,
+                    status_code=resp.status_code,
+                    outcome=outcome,
+                    latency_ms=list_latency_ms,
+                )
+            bundle = resp.json()
+            entries = bundle.get("entry") or []
+            if not entries:
+                # Empty MCS — synthesize an OperationOutcome so the UI can render it.
+                empty_diagnostics = (
+                    "MCS is reachable but has no Measure resources. "
+                    "Load measures via the seed workflow or upload one via "
+                    "the Measures page."
+                )
+                empty_outcome = FhirOperationOutcome(
+                    issues=[FhirIssue(severity="warning", code="not-found", diagnostics=empty_diagnostics)],
+                    raw={
+                        "resourceType": "OperationOutcome",
+                        "issue": [{"severity": "warning", "code": "not-found", "diagnostics": empty_diagnostics}],
+                    },
+                )
+                raise FhirOperationError(
+                    operation="probe-data-requirements",
+                    url=list_url,
+                    status_code=200,
+                    outcome=empty_outcome,
+                    latency_ms=list_latency_ms,
+                )
+            measure = entries[0].get("resource") or {}
+            measure_id = measure.get("id")
+            if not measure_id:
+                raise FhirOperationError(
+                    operation="probe-data-requirements",
+                    url=list_url,
+                    status_code=200,
+                    outcome=None,
+                    latency_ms=list_latency_ms,
+                )
+    except FhirOperationError:
+        raise
+    except Exception as exc:
+        raise FhirOperationError(
+            operation="probe-data-requirements",
+            url=list_url,
+            status_code=None,
+            outcome=None,
+            latency_ms=round((time.monotonic() - t0) * 1000),
+            cause=exc,
+        )
+
+    # Step 2: call $data-requirements on that measure.
+    dr_url = f"{mcs_url}/Measure/{measure_id}/$data-requirements?periodStart=2024-01-01&periodEnd=2024-12-31"
+    t1 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(dr_url, headers=headers)
+            dr_latency_ms = round((time.monotonic() - t1) * 1000)
+            if not resp.is_success:
+                outcome = FhirOperationOutcome.from_response(resp)
+                raise FhirOperationError(
+                    operation="probe-data-requirements",
+                    url=dr_url,
+                    status_code=resp.status_code,
+                    outcome=outcome,
+                    latency_ms=dr_latency_ms,
+                )
+            library = resp.json()
+            requirements = library.get("dataRequirement") or []
+            return {
+                "status": "ok",
+                "measure_id": measure_id,
+                "measure_name": measure.get("name") or measure.get("title") or measure_id,
+                "data_requirement_count": len(requirements),
+                "list_latency_ms": list_latency_ms,
+                "data_requirements_latency_ms": dr_latency_ms,
+                "url": sanitize_url(dr_url),
+            }
+    except FhirOperationError:
+        raise
+    except Exception as exc:
+        raise FhirOperationError(
+            operation="probe-data-requirements",
+            url=dr_url,
+            status_code=None,
+            outcome=None,
+            latency_ms=round((time.monotonic() - t1) * 1000),
+            cause=exc,
+        )
 
 
 async def verify_fhir_connection(

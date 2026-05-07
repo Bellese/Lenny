@@ -232,6 +232,16 @@ export function testMcsConnection(data) {
   });
 }
 
+// Deep-probe — exercises $data-requirements on an MCS connection to confirm it
+// can resolve a Measure's Library + ValueSets. 35 s timeout because the
+// backend allows up to 30 s for the engine call itself.
+export function probeMcsConnection(id) {
+  return request(`/settings/mcs-connections/${id}/probe`, {
+    method: 'POST',
+    _timeout: 35000,
+  });
+}
+
 // Admin
 export function getAdminSettings() {
   return request('/settings/admin');

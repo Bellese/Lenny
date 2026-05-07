@@ -1,13 +1,19 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import styles from './HealthIndicator.module.css';
 
 const KIND_DEFAULTS = {
-  cdr: { fallbackName: 'Local CDR', noneLabel: 'No CDR active', errorPrefix: 'CDR' },
-  mcs: { fallbackName: 'Local Measure Engine', noneLabel: 'No MCS active', errorPrefix: 'Measure Engine' },
+  cdr: { label: 'CDR', fallbackName: 'Local CDR', noneLabel: 'No CDR active' },
+  mcs: { label: 'Measure Engine', fallbackName: 'Local Measure Engine', noneLabel: 'No MCS active' },
 };
 
-// Four-state chip: pending | healthy | unreachable | none-active.
-// state: 'pending' | 'healthy' | 'unreachable' | 'none'
+const STATE_LABEL = {
+  pending: 'checking',
+  healthy: 'connected',
+  unreachable: 'unreachable',
+  none: 'no active connection',
+};
+
+// Four-state chip: pending | healthy | unreachable | none.
 export default function HealthIndicator({
   kind = 'cdr',
   state = 'pending',
@@ -16,6 +22,7 @@ export default function HealthIndicator({
   onClick,
 }) {
   const [popoverOpen, setPopoverOpen] = useState(false);
+  const ref = useRef(null);
   const cfg = KIND_DEFAULTS[kind] || KIND_DEFAULTS.cdr;
 
   const dotClass =
@@ -24,37 +31,44 @@ export default function HealthIndicator({
     : state === 'none' ? styles.dotNone
     : styles.dotPending;
 
-  const showsPopover = state === 'unreachable' && popoverOpen;
-  const isInteractive = state === 'unreachable' || state === 'none';
+  const hasPopover = state === 'unreachable';
+  const showsPopover = hasPopover && popoverOpen;
   const displayName =
     state === 'none' ? cfg.noneLabel
     : (name || cfg.fallbackName);
 
-  const ariaLabel =
-    state === 'pending' ? `${cfg.errorPrefix}: checking…`
-    : state === 'unreachable' ? `${displayName} — connection error`
-    : state === 'none' ? `${cfg.noneLabel} — click to configure`
-    : displayName;
+  // ARIA pattern: "{kind}: {name}, {status}"
+  const ariaLabel = `${cfg.label}: ${displayName}, ${STATE_LABEL[state] || state}`;
 
   const handleKeyDown = (e) => {
-    if (!isInteractive || !onClick) return;
+    if (e.key === 'Escape' && popoverOpen) {
+      e.preventDefault();
+      setPopoverOpen(false);
+      return;
+    }
+    if (!onClick) return;
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       onClick();
     }
   };
 
+  const handleClick = () => {
+    if (onClick) onClick();
+  };
+
   return (
     <div
-      className={`${styles.chip} ${state === 'unreachable' ? styles.chipErr : ''} ${isInteractive && onClick ? styles.chipClickable : ''}`}
-      onMouseEnter={() => state === 'unreachable' && setPopoverOpen(true)}
+      ref={ref}
+      className={`${styles.chip} ${state === 'unreachable' ? styles.chipErr : ''} ${onClick ? styles.chipClickable : ''}`}
+      onMouseEnter={() => hasPopover && setPopoverOpen(true)}
       onMouseLeave={() => setPopoverOpen(false)}
-      onFocus={() => state === 'unreachable' && setPopoverOpen(true)}
+      onFocus={() => hasPopover && setPopoverOpen(true)}
       onBlur={() => setPopoverOpen(false)}
-      onClick={isInteractive && onClick ? onClick : undefined}
+      onClick={onClick ? handleClick : undefined}
       onKeyDown={handleKeyDown}
-      tabIndex={isInteractive ? 0 : -1}
-      role={isInteractive && onClick ? 'button' : undefined}
+      tabIndex={0}
+      role={onClick ? 'button' : undefined}
       aria-label={ariaLabel}
     >
       <span className={`${styles.dot} ${dotClass}`} />
@@ -63,7 +77,7 @@ export default function HealthIndicator({
         <div className={styles.popover} role="tooltip">
           {errorDetails?.hint && <p className={styles.popoverHint}>{errorDetails.hint}</p>}
           {errorDetails?.url && <p className={styles.popoverUrl}>{errorDetails.url}</p>}
-          {!errorDetails?.hint && <p className={styles.popoverHint}>{cfg.errorPrefix} connection failed.</p>}
+          {!errorDetails?.hint && <p className={styles.popoverHint}>{cfg.label} connection failed.</p>}
         </div>
       )}
     </div>

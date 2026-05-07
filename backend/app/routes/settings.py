@@ -18,7 +18,14 @@ from app.models.connection_base import ConnectionKind
 from app.models.job import Job
 from app.models.mcs_config import MCSConfig
 from app.routes.connection_factory import make_connection_router
-from app.services.fhir_client import wipe_measure_definitions
+from app.services.fhir_client import probe_mcs_data_requirements, wipe_measure_definitions
+from app.services.fhir_errors import (
+    HINT_BY_STATUS,
+    FhirOperationError,
+    build_error_envelope,
+    hint_for_network_exception,
+    sanitize_url,
+)
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -124,6 +131,78 @@ router.include_router(
         audit_logger=logger,
     )
 )
+
+
+# ---------------------------------------------------------------------------
+# MCS deep-probe — Verify with sample evaluate
+# ---------------------------------------------------------------------------
+
+
+@router.post("/mcs-connections/{connection_id}/probe")
+async def probe_mcs_connection(
+    connection_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Deep-probe an MCS connection by exercising `$data-requirements`.
+
+    Stricter than test-connection (which only fetches /metadata): this picks
+    a measure on the MCS and confirms the engine can resolve its Library +
+    ValueSets. Returns success summary on green; raises HTTPException with
+    the standard FHIR error envelope on any failure.
+    """
+    cfg = await session.get(MCSConfig, connection_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="MCS connection not found")
+
+    try:
+        return await probe_mcs_data_requirements(
+            mcs_url=cfg.mcs_url,
+            auth_type=cfg.auth_type,
+            auth_credentials=cfg.auth_credentials,
+        )
+    except FhirOperationError as exc:
+        logger.warning(
+            "mcs probe failed",
+            extra={
+                "mcs_url": sanitize_url(cfg.mcs_url),
+                "status_code": exc.status_code,
+                "error": sanitize_error(exc),
+            },
+        )
+        if exc.status_code is not None:
+            hint = HINT_BY_STATUS.get(exc.status_code)
+        else:
+            hint = hint_for_network_exception(exc.__cause__) if exc.__cause__ else None
+        # Empty-MCS path: status 200 with a synthesized OperationOutcome.
+        # Surface as 200 + envelope so the frontend can render the warning
+        # without treating it as a hard failure.
+        if exc.status_code == 200 and exc.outcome is not None:
+            return {
+                "status": "warning",
+                "outcome": exc.outcome.raw,
+                "url": sanitize_url(exc.url),
+            }
+        http_status = exc.status_code if exc.status_code and exc.status_code >= 400 else 502
+        raise HTTPException(
+            status_code=http_status,
+            detail=build_error_envelope(
+                operation="probe-data-requirements",
+                url=exc.url,
+                status_code=exc.status_code,
+                outcome=exc.outcome,
+                latency_ms=exc.latency_ms,
+                hint=hint,
+            ),
+        )
+    except ValueError as exc:
+        # SSRF rejection from _validate_ssrf_url
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "security", "diagnostics": sanitize_error(exc)}],
+            },
+        )
 
 
 # ---------------------------------------------------------------------------

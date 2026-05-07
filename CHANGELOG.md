@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.7] - 2026-05-07
+
+### Added
+- **Responsive topbar — collapse to a single "Connections" pill below 768 px.** New `HealthChipGroup` component renders the array of per-kind `HealthIndicator` chips on wider viewports and switches to an aggregate pill + popover on mobile (44 px touch targets per chip, click-outside / Esc closes the popover). Aggregate dot color is the worst-case across kinds: green if all healthy, red if any unreachable, gray otherwise. Container queries weren't usable because the topbar's intrinsic width depends on its children; falls back to a viewport media query.
+- **"Verify with sample evaluate" button on the active MCS connection card row.** Backend gains `POST /settings/mcs-connections/{id}/probe`; the route delegates to a new `probe_mcs_data_requirements()` helper in `fhir_client.py` that runs `Measure?_count=1` on the MCS, then calls `$data-requirements` against the first measure with a benign `periodStart=2024-01-01`/`periodEnd=2024-12-31` window. This is a stricter probe than `test-connection` (which only fetches `/metadata`) — it forces the engine to resolve a Library + ValueSets, which is the failure surface attendees actually hit at the connectathon. Empty-MCS path is non-fatal: returns `{status: "warning", outcome: ...}` with the OperationOutcome rendered via the existing `OperationOutcomeView`.
+
+### Changed
+- **Health polling pauses when the document is hidden.** Previously the 30 s `setInterval` fired regardless of tab visibility; on a session with multiple Lenny tabs open this was a small but real thundering-herd cost. The polling loop now starts/stops based on `document.visibilityState`, so background tabs don't probe `/health`. Refresh-on-visible (added in v0.0.17.6) is preserved — when a tab becomes visible again it does one immediate probe before re-arming the interval.
+- **Topbar chips are always tabbable with full keyboard activation.** `HealthIndicator` is now `tabIndex={0}` in every state (was `0` only when interactive); `role="button"` is set whenever `onClick` is provided regardless of state; Enter/Space activate the click handler; Esc closes the popover. ARIA label is `"{kind}: {name}, {status}"` per the saved spec, so screen readers get the full chip story instead of just the connection name.
+
 ## [0.0.17.6] - 2026-05-07
 
 ### Added
