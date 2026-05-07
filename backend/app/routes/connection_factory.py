@@ -441,7 +441,7 @@ def make_connection_router(
     # Test connection
     # -----------------------------------------------------------------------
 
-    @router.post("/test-connection")
+    @router.post(f"{prefix}/test-connection")
     async def test_connection(body: test_request_schema) -> dict:
         body_url = getattr(body, url_field)
         _validate_auth_type(body.auth_type)

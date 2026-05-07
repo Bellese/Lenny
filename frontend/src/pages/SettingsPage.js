@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import styles from './SettingsPage.module.css';
-import { getConnections, deleteConnection, activateConnection, getHealth, getAdminSettings, updateAdminSettings, wipeMeasureEngine } from '../api/client';
-import ConnectionModal from '../components/ConnectionModal';
+import { getHealth, getAdminSettings, updateAdminSettings, wipeMeasureEngine } from '../api/client';
+import ConnectionSection from '../components/ConnectionSection';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
 import OperationOutcomeView from '../components/OperationOutcomeView';
@@ -25,27 +25,13 @@ function Toggle({ checked, onChange, disabled }) {
 export default function SettingsPage() {
   const toast = useToast();
   const [tab, setTab] = useState('connections');
-  const [connections, setConnections] = useState([]);
   const [health, setHealth] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [editingConnection, setEditingConnection] = useState(null);
-  const [confirmConn, setConfirmConn] = useState(null);
 
   // Admin state
   const [adminSettings, setAdminSettings] = useState(null);
   const [adminSaving, setAdminSaving] = useState(false);
   const [confirmWipe, setConfirmWipe] = useState(false);
   const [wiping, setWiping] = useState(false);
-
-  const loadConnections = useCallback(async () => {
-    try {
-      const data = await getConnections();
-      setConnections(Array.isArray(data) ? data : data.connections || []);
-    } catch {
-      setConnections([]);
-    }
-  }, []);
 
   const loadHealth = useCallback(async () => {
     try {
@@ -66,38 +52,21 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    loadConnections().finally(() => setLoading(false));
     loadHealth();
     loadAdminSettings();
-  }, [loadConnections, loadHealth, loadAdminSettings]);
+  }, [loadHealth, loadAdminSettings]);
 
-  const handleModalSaved = async () => {
-    const wasEdit = !!editingConnection;
-    setModalOpen(false);
-    setEditingConnection(null);
-    await Promise.all([loadConnections(), loadHealth()]);
-    toast.success(wasEdit ? 'Connection updated' : 'Connection added');
-  };
-
-  const handleActivate = async (id) => {
+  const handleWipeConfirmed = async () => {
+    setConfirmWipe(false);
+    setWiping(true);
     try {
-      await activateConnection(id);
-      await Promise.all([loadConnections(), loadHealth()]);
-    } catch (err) {
-      toast.error(err.message || 'Failed to activate connection');
-    }
-  };
-
-  const handleDeleteConfirmed = async () => {
-    const conn = confirmConn;
-    setConfirmConn(null);
-    try {
-      await deleteConnection(conn.id);
-      await loadConnections();
-      toast.success('Connection deleted');
+      const result = await wipeMeasureEngine();
+      toast.success(result.message || 'Measure engine wiped');
     } catch (err) {
       const diag = err.body?.detail?.issue?.[0]?.diagnostics;
-      toast.error(diag || err.message || 'Failed to delete connection');
+      toast.error(diag || err.message || 'Wipe failed');
+    } finally {
+      setWiping(false);
     }
   };
 
@@ -115,22 +84,8 @@ export default function SettingsPage() {
     }
   };
 
-  const handleWipeConfirmed = async () => {
-    setConfirmWipe(false);
-    setWiping(true);
-    try {
-      const result = await wipeMeasureEngine();
-      toast.success(result.message || 'Measure engine wiped');
-    } catch (err) {
-      const diag = err.body?.detail?.issue?.[0]?.diagnostics;
-      toast.error(diag || err.message || 'Wipe failed');
-    } finally {
-      setWiping(false);
-    }
-  };
-
   const TABS = [
-    { id: 'connections', label: 'CDR Connections' },
+    { id: 'connections', label: 'Connections' },
     { id: 'status', label: 'System Status' },
     { id: 'admin', label: 'Admin' },
   ];
@@ -180,52 +135,10 @@ export default function SettingsPage() {
 
         {/* Content */}
         <div className={styles.content}>
-          {loading ? (
-            <div className={styles.card}>
-              <div className="skeleton" style={{ height: 80, borderRadius: 8 }} />
-            </div>
-          ) : tab === 'connections' ? (
-            <div className={styles.card}>
-              <div className={styles.cardHeader}>
-                <span className={styles.cardTitle}>CDR Connections</span>
-                <button className={styles.btnPrimary} onClick={() => { setEditingConnection(null); setModalOpen(true); }}>
-                  Add connection
-                </button>
-              </div>
-              {connections.length === 0 ? (
-                <div className={styles.emptyState}>No connections configured.</div>
-              ) : (
-                <div className={styles.connList}>
-                  {connections.map(conn => (
-                    <div key={conn.id} className={`${styles.connRow} ${conn.is_active ? styles.connRowActive : ''}`}>
-                      <span className={`${styles.connDot} ${conn.is_active ? styles.connDotActive : ''}`} />
-                      <div className={styles.connInfo}>
-                        <div className={styles.connName}>
-                          {conn.name}
-                          {conn.is_active && <span className={styles.activeTag}>(active)</span>}
-                        </div>
-                        <div className={styles.connUrl}>{conn.cdr_url}</div>
-                      </div>
-                      <div className={styles.connMeta}>
-                        <span className={styles.connBadge}>{{ none: 'No Auth', basic: 'Basic', bearer: 'Bearer', smart: 'SMART' }[conn.auth_type] || conn.auth_type || 'No Auth'}</span>
-                        {conn.is_read_only && <span className={`${styles.connBadge} ${styles.connBadgeReadOnly}`}>read-only</span>}
-                      </div>
-                      <div className={styles.connActions}>
-                        <button className={styles.btnLink} onClick={() => { setEditingConnection(conn); setModalOpen(true); }}>Edit</button>
-                        <button className={styles.btnLink} onClick={() => handleActivate(conn.id)} disabled={conn.is_active}>Activate</button>
-                        <button
-                          className={`${styles.btnLink} ${styles.btnLinkDanger}`}
-                          onClick={() => setConfirmConn(conn)}
-                          disabled={conn.is_default || conn.is_active}
-                          title={conn.is_default ? 'Cannot delete the built-in CDR' : conn.is_active ? 'Activate a different connection first' : undefined}
-                        >
-                          Delete
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
+          {tab === 'connections' ? (
+            <div className={styles.adminStack}>
+              <ConnectionSection kind="cdr" onChange={loadHealth} />
+              <ConnectionSection kind="mcs" onChange={loadHealth} />
             </div>
           ) : tab === 'status' ? (
             <div className={styles.card}>
@@ -310,16 +223,6 @@ export default function SettingsPage() {
       </div>
 
       <ConfirmDialog
-        open={!!confirmConn}
-        title={`Delete "${confirmConn?.name}"?`}
-        body="This connection will be permanently removed. Any active sessions using it will lose access."
-        confirmLabel="Delete connection"
-        tone="destructive"
-        onCancel={() => setConfirmConn(null)}
-        onConfirm={handleDeleteConfirmed}
-      />
-
-      <ConfirmDialog
         open={confirmWipe}
         title="Wipe measure engine definitions?"
         body="This removes all Library, Measure, ValueSet, CodeSystem, and ConceptMap resources from the HAPI measure engine. The engine re-seeds automatically on the next job run. This cannot be undone."
@@ -328,14 +231,6 @@ export default function SettingsPage() {
         onCancel={() => setConfirmWipe(false)}
         onConfirm={handleWipeConfirmed}
       />
-
-      {modalOpen && (
-        <ConnectionModal
-          connection={editingConnection}
-          onClose={() => { setModalOpen(false); setEditingConnection(null); }}
-          onSaved={handleModalSaved}
-        />
-      )}
     </div>
   );
 }

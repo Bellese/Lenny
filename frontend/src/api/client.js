@@ -188,7 +188,45 @@ export function activateConnection(id) {
 }
 
 export function testConnection(data) {
-  return request('/settings/test-connection', {
+  return request('/settings/connections/test-connection', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+// MCS Connections
+export function getMcsConnections() {
+  return request('/settings/mcs-connections');
+}
+
+export function createMcsConnection(data) {
+  return request('/settings/mcs-connections', {
+    method: 'POST',
+    body: JSON.stringify(data),
+  });
+}
+
+export function getMcsConnection(id) {
+  return request(`/settings/mcs-connections/${id}`);
+}
+
+export function updateMcsConnection(id, data) {
+  return request(`/settings/mcs-connections/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify(data),
+  });
+}
+
+export function deleteMcsConnection(id) {
+  return request(`/settings/mcs-connections/${id}`, { method: 'DELETE' });
+}
+
+export function activateMcsConnection(id) {
+  return request(`/settings/mcs-connections/${id}/activate`, { method: 'POST' });
+}
+
+export function testMcsConnection(data) {
+  return request('/settings/mcs-connections/test-connection', {
     method: 'POST',
     body: JSON.stringify(data),
   });

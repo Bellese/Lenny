@@ -23,7 +23,7 @@ TEST_CDR_URL = "http://localhost:8180/fhir"
 async def test_test_connection_401_bearer_returns_hint(integration_client):
     """401 from CDR with wrong bearer token → hint present in error_details."""
     resp = await integration_client.post(
-        "/settings/test-connection",
+        "/settings/connections/test-connection",
         json={
             "cdr_url": TEST_CDR_URL,
             "auth_type": "bearer",
@@ -49,7 +49,7 @@ async def test_test_connection_401_bearer_returns_hint(integration_client):
 async def test_test_connection_unreachable_url_returns_network_hint(integration_client):
     """Unreachable URL → 502 with a network-layer hint in error_details."""
     resp = await integration_client.post(
-        "/settings/test-connection",
+        "/settings/connections/test-connection",
         json={
             "cdr_url": "https://does-not-exist.invalid:9999/fhir",
             "auth_type": "none",
@@ -71,7 +71,7 @@ async def test_test_connection_unreachable_url_returns_network_hint(integration_
 async def test_test_connection_success_returns_response_time(integration_client):
     """Valid CDR URL → 200 with response_time_ms present."""
     resp = await integration_client.post(
-        "/settings/test-connection",
+        "/settings/connections/test-connection",
         json={
             "cdr_url": TEST_CDR_URL,
             "auth_type": "none",
@@ -88,7 +88,7 @@ async def test_test_connection_success_returns_response_time(integration_client)
 async def test_test_connection_wrong_basic_auth_returns_hint(integration_client):
     """Wrong basic auth credentials → error with auth hint."""
     resp = await integration_client.post(
-        "/settings/test-connection",
+        "/settings/connections/test-connection",
         json={
             "cdr_url": TEST_CDR_URL,
             "auth_type": "basic",

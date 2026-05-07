@@ -1,14 +1,43 @@
 import React, { useState, useEffect } from 'react';
 import styles from './ConnectionModal.module.css';
-import { createConnection, updateConnection, testConnection } from '../api/client';
+import {
+  createConnection,
+  updateConnection,
+  testConnection,
+  createMcsConnection,
+  updateMcsConnection,
+  testMcsConnection,
+} from '../api/client';
 import OperationOutcomeView from './OperationOutcomeView';
 import ErrorBanner from './ErrorBanner';
 
-export default function ConnectionModal({ connection, onClose, onSaved }) {
+const KIND_SPECS = {
+  cdr: {
+    label: 'CDR',
+    titleNoun: 'CDR Connection',
+    urlField: 'cdr_url',
+    urlLabel: 'CDR URL',
+    urlPlaceholder: 'http://localhost:8080/fhir',
+    showReadOnly: true,
+    api: { create: createConnection, update: updateConnection, test: testConnection },
+  },
+  mcs: {
+    label: 'Measure Engine',
+    titleNoun: 'Measure Engine Connection',
+    urlField: 'mcs_url',
+    urlLabel: 'Measure Engine URL',
+    urlPlaceholder: 'http://localhost:8081/fhir',
+    showReadOnly: false,
+    api: { create: createMcsConnection, update: updateMcsConnection, test: testMcsConnection },
+  },
+};
+
+export default function ConnectionModal({ kind = 'cdr', connection, onClose, onSaved }) {
+  const spec = KIND_SPECS[kind];
   const isEdit = !!connection;
   const [form, setForm] = useState({
     name: '',
-    cdr_url: '',
+    [spec.urlField]: '',
     auth_type: 'none',
     username: '',
     password: '',
@@ -28,12 +57,12 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
       setForm(prev => ({
         ...prev,
         name: connection.name || '',
-        cdr_url: connection.cdr_url || '',
+        [spec.urlField]: connection[spec.urlField] || '',
         auth_type: connection.auth_type || 'none',
         is_read_only: connection.is_read_only || false,
       }));
     }
-  }, [connection]);
+  }, [connection, spec.urlField]);
 
   const handleChange = (field) => (e) => {
     const value = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
@@ -64,8 +93,8 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
     setTesting(true);
     setTestResult(null);
     try {
-      const result = await testConnection({
-        cdr_url: form.cdr_url,
+      const result = await spec.api.test({
+        [spec.urlField]: form[spec.urlField],
         auth_type: form.auth_type,
         auth_credentials: buildAuthCredentials(),
       });
@@ -89,16 +118,18 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
     setError(null);
     const payload = {
       name: form.name,
-      cdr_url: form.cdr_url,
+      [spec.urlField]: form[spec.urlField],
       auth_type: form.auth_type,
       auth_credentials: buildAuthCredentials(),
-      is_read_only: form.is_read_only,
     };
+    if (spec.showReadOnly) {
+      payload.is_read_only = form.is_read_only;
+    }
     try {
       if (isEdit) {
-        await updateConnection(connection.id, payload);
+        await spec.api.update(connection.id, payload);
       } else {
-        await createConnection(payload);
+        await spec.api.create(payload);
       }
       onSaved();
     } catch (err) {
@@ -109,11 +140,13 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
     }
   };
 
+  const titlePrefix = isEdit ? 'Edit' : 'Add';
+
   return (
     <div className={styles.overlay} onClick={(e) => e.target === e.currentTarget && onClose()}>
-      <div className={styles.modal} role="dialog" aria-modal="true" aria-label={isEdit ? 'Edit connection' : 'Add connection'}>
+      <div className={styles.modal} role="dialog" aria-modal="true" aria-label={`${titlePrefix} ${spec.titleNoun}`}>
         <div className={styles.header}>
-          <h2 className={styles.title}>{isEdit ? 'Edit Connection' : 'Add Connection'}</h2>
+          <h2 className={styles.title}>{titlePrefix} {spec.titleNoun}</h2>
           <button className={styles.closeBtn} onClick={onClose} aria-label="Close">&#x2715;</button>
         </div>
 
@@ -122,12 +155,12 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
 
           <div className={styles.formGroup}>
             <label htmlFor="conn-name" className={styles.label}>Name</label>
-            <input id="conn-name" type="text" value={form.name} onChange={handleChange('name')} required className={styles.input} placeholder="e.g. Local CDR, Production" />
+            <input id="conn-name" type="text" value={form.name} onChange={handleChange('name')} required className={styles.input} placeholder={`e.g. Local ${spec.label}, Production`} />
           </div>
 
           <div className={styles.formGroup}>
-            <label htmlFor="conn-url" className={styles.label}>CDR URL</label>
-            <input id="conn-url" type="url" value={form.cdr_url} onChange={handleChange('cdr_url')} required className={styles.input} placeholder="http://localhost:8080/fhir" />
+            <label htmlFor="conn-url" className={styles.label}>{spec.urlLabel}</label>
+            <input id="conn-url" type="url" value={form[spec.urlField]} onChange={handleChange(spec.urlField)} required className={styles.input} placeholder={spec.urlPlaceholder} />
           </div>
 
           <div className={styles.formGroup}>
@@ -177,16 +210,18 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
             </>
           )}
 
-          <div className={styles.formGroup}>
-            <label className={styles.checkboxLabel}>
-              <input type="checkbox" checked={form.is_read_only} onChange={handleChange('is_read_only')} className={styles.checkbox} />
-              Read-only (never write to this CDR)
-            </label>
-          </div>
+          {spec.showReadOnly && (
+            <div className={styles.formGroup}>
+              <label className={styles.checkboxLabel}>
+                <input type="checkbox" checked={form.is_read_only} onChange={handleChange('is_read_only')} className={styles.checkbox} />
+                Read-only (never write to this {spec.label})
+              </label>
+            </div>
+          )}
 
           {testResult && (
             <div className={`${styles.testResult} ${testResult.success ? styles.testSuccess : styles.testFailure}`} role="status">
-              <span aria-hidden="true">{testResult.success ? '\u2713' : '\u2717'}</span>
+              <span aria-hidden="true">{testResult.success ? '✓' : '✗'}</span>
               <div className={styles.testContent}>
                 {testResult.success
                   ? <p className={styles.testMessage}>Connected{testResult.response_time_ms != null ? ` in ${testResult.response_time_ms}ms` : ' successfully'}</p>
@@ -201,7 +236,7 @@ export default function ConnectionModal({ connection, onClose, onSaved }) {
           )}
 
           <div className={styles.actions}>
-            <button type="button" className={styles.secondaryBtn} onClick={handleTest} disabled={testing || !form.cdr_url} aria-busy={testing}>
+            <button type="button" className={styles.secondaryBtn} onClick={handleTest} disabled={testing || !form[spec.urlField]} aria-busy={testing}>
               {testing ? 'Testing...' : 'Test Connection'}
             </button>
             <div className={styles.actionsSpacer} />
