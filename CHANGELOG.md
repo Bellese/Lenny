@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.4] - 2026-05-07
+
+### Added
+- **Measure Calculation Server (MCS) connection management** — new `MCSConfig` model + `/settings/mcs-connections` routes, mirroring the CDR connection-management surface. Connectathon attendees can configure multiple MCS endpoints (their own + reference servers like cqf-ruler) and switch between them via the same CRUD + activate API as CDR. Full feature surface: list, create, get, update, delete, activate, test-connection. Schema differences vs CDR: `mcs_url` field name (per the doc-locked decision to defer generic `url` until kind #3), no `is_read_only` flag (Lenny only POSTs `$evaluate-measure` and `$data-requirements` to the MCS, so the read/write distinction doesn't apply).
+- **`ConnectionKind.mcs`** enum value alongside `cdr`. Future kinds (TS, MR, MRR) extend the same enum.
+- **`seed_default_connections()` lifespan hook** — replaces the old hardcoded-URL CDR seed with a Python function that reads URLs from env vars (`DEFAULT_CDR_URL`, `MEASURE_ENGINE_URL`). Idempotent across restarts. Runs identically on Postgres and SQLite (no more raw-SQL Postgres-only gate). Fixes the pre-existing CLAUDE.md "no hardcoded URLs" violation in the seed path.
+
+### Changed
+- **Activation-race partial-unique-index** now created for both `cdr_configs` and `mcs_configs` (declared via `__table_args__` on each model + raw-SQL belt-and-suspenders in lifespan, both dialects).
+- **JSONFormatter** structured-log allowlist extended with `mcs_id`, `mcs_name`, `mcs_url` so MCS audit events serialize correctly.
+
 ## [0.0.17.3] - 2026-05-07
 
 ### Changed
