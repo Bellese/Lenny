@@ -16,10 +16,8 @@ class Settings(BaseSettings):
     BATCH_SIZE: int = 100
     MAX_WORKERS: int = 4
     MAX_RETRIES: int = 3
-    HAPI_INDEX_WAIT_SECONDS: int = 5  # Wait after pushing patients before evaluating measures
     PATIENT_DATA_STRATEGY: str = "batch"
     VALUESET_RELOAD_MODE: str = "delete"
-    HAPI_SYNC_AFTER_UPLOAD: bool = True
     LOG_LEVEL: str = "INFO"
     ALLOWED_ORIGINS: str = "*"  # Comma-separated origins, or "*" for all (local dev default)
 

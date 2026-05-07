@@ -11,6 +11,11 @@ All notable changes to this project will be documented in this file.
 - **`CDRContext` renamed to `ConnectionContext`** in `backend/app/dependencies.py`, with a `kind` field defaulting to `"cdr"`. Existing imports continue to work via the `CDRContext = ConnectionContext` alias. No call-site changes required for the rename to land.
 - Removed 5 broken connectathon measures (CMS2, CMS71, CMS165, CMS1017, CMS1218) from seed bundles, manifest, and test suite due to upstream bundle/HAPI issues that cannot be fixed before the connectathon. See issue #278. The 7 remaining strict=true measures (CMS122, CMS124, CMS125, CMS130, CMS506, CMS816, CMS529) are unaffected. Re-add any measure once MADiE/HAPI ships a fix by dropping the refreshed bundle into `seed/connectathon-bundles/` and adding its manifest entry.
 
+## [0.0.17.1] - 2026-05-06
+
+### Removed
+- **HAPI async-indexing compensator retired** — the `HAPI_SYNC_AFTER_UPLOAD` flag and `trigger_reindex_and_wait*` functions (609 lines) are gone. The underlying fix — `hibernate.search.indexing.plan.synchronization.strategy=sync` on both HAPI services (PR #214) — makes POST/PUT block until the Lucene index is refreshed, so the Python-side polling and sleep fallbacks are no longer needed. Startup, validation uploads, and job runs are unaffected in behavior.
+
 ## [0.0.17.0] - 2026-05-06
 
 ### Added
