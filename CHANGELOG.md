@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.2] - 2026-05-06
+
+### Added
+- **Per-connection `request_timeout_seconds`** — every connection-config row (CDR today, MCS in a follow-up PR) carries its own httpx-timeout setting, defaulting to 30 seconds. `ConnectionContext` exposes the value to route handlers so `fhir_client.py` can pass it through to each `httpx.AsyncClient`. Sets up issue #12's "measure runs are long-running synchronous transactions" requirement: connectathon attendees with slow servers can crank the timeout up per-connection without affecting other connections.
+- **`ConnectionKind` enum** — `dependencies.ConnectionContext.kind` is now typed as a closed enum (`{cdr}` today, `{mcs, ts, mr, mrr}` added as their PRs land). String-valued so JSON serialization is unchanged. Replaces the free-form `str` from PR #1a's review fixes.
+- **Activation-race regression test** — `test_activate_concurrent_raises_integrity_error` asserts the partial unique index `idx_one_active_cdr` rejects a second row with `is_active=True`. The index is now declared in `CDRConfig.__table_args__` so `Base.metadata.create_all` generates it for both Postgres and SQLite, closing the test gap where SQLite previously didn't exercise the constraint.
+
+### Changed
+- **Schema migrations** add `request_timeout_seconds INTEGER NOT NULL DEFAULT 30` to `cdr_configs` (idempotent; `ADD COLUMN IF NOT EXISTS` style) and the lifespan partial-index creation now runs on both Postgres and SQLite (with dialect-appropriate WHERE clause: `is_active = TRUE` vs `is_active = 1`). Forward-safe; rollback is code-only.
+
 ## [0.0.17.1] - 2026-05-06
 
 ### Changed

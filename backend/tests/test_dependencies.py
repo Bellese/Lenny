@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 from sqlalchemy import String
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from app.dependencies import CDRContext, ConnectionContext, get_active_cdr
@@ -73,3 +74,65 @@ def test_mixin_auth_credentials_is_per_subclass():
     )
     assert a_col.table.name == "_probe_a"
     assert b_col.table.name == "_probe_b"
+
+
+@pytest.mark.asyncio
+async def test_get_active_cdr_populates_request_timeout_seconds(test_session):
+    """The DB-backed branch carries the column value through to the context."""
+    cfg = CDRConfig(
+        cdr_url="http://example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        name="Slow CDR",
+        is_default=False,
+        is_read_only=False,
+        request_timeout_seconds=120,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+
+    ctx = await get_active_cdr(session=test_session)
+    assert ctx.request_timeout_seconds == 120
+
+
+@pytest.mark.asyncio
+async def test_get_active_cdr_fallback_uses_default_timeout(test_session):
+    """Empty table → fallback context returns the dataclass default of 30s."""
+    ctx = await get_active_cdr(session=test_session)
+    assert ctx.request_timeout_seconds == 30
+
+
+@pytest.mark.asyncio
+async def test_activate_concurrent_raises_integrity_error(test_session):
+    """Regression test (per IRON RULE) for the activation race.
+
+    The partial unique index `idx_one_active_cdr` (declared via
+    `CDRConfig.__table_args__`) must reject a second row with `is_active=True`.
+    Without it, two concurrent `/activate` requests on different rows could
+    both end up active. SQLite supports partial unique indexes since 3.8.0;
+    this test runs on the in-memory SQLite test DB.
+    """
+    first = CDRConfig(
+        cdr_url="http://example.com/first",
+        auth_type=AuthType.none,
+        is_active=True,
+        name="First Active",
+        is_default=False,
+        is_read_only=False,
+    )
+    test_session.add(first)
+    await test_session.commit()
+
+    second = CDRConfig(
+        cdr_url="http://example.com/second",
+        auth_type=AuthType.none,
+        is_active=True,
+        name="Second Active",
+        is_default=False,
+        is_read_only=False,
+    )
+    test_session.add(second)
+
+    with pytest.raises(IntegrityError):
+        await test_session.commit()
+    await test_session.rollback()

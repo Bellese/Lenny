@@ -107,6 +107,7 @@ async def _run_schema_migrations(conn) -> None:
             "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS name VARCHAR(512)",
             "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS is_read_only BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS request_timeout_seconds INTEGER NOT NULL DEFAULT 30",
         ]:
             await conn.execute(text(stmt))
 
@@ -319,16 +320,22 @@ async def lifespan(app: FastAPI):
     # Create any missing tables
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    # Enforce at most one active CDR row on fresh DBs (partial unique index — Postgres only)
+    # Enforce at most one active CDR row on fresh DBs (partial unique index).
+    # `__table_args__` on `CDRConfig` declares the index so `create_all` above
+    # generates it for both Postgres and SQLite. This raw-SQL is belt-and-
+    # suspenders for existing-DB upgrades where the model declaration didn't
+    # yet exist when the table was created.
     async with engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")
         if conn.dialect.name == "postgresql":
-            await conn.execute(
-                text(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_cdr"
-                    " ON cdr_configs (is_active) WHERE is_active = TRUE"
-                )
+            where_clause = "is_active = TRUE"
+        else:
+            where_clause = "is_active = 1"
+        await conn.execute(
+            text(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_cdr ON cdr_configs (is_active) WHERE {where_clause}"
             )
+        )
     # Seed built-in Local CDR row after tables exist (idempotent, separate connection)
     async with engine.connect() as conn:
         await conn.execution_options(isolation_level="AUTOCOMMIT")

@@ -41,6 +41,7 @@ class ConnectionContext:
     auth_credentials: dict | None
     is_default: bool
     is_read_only: bool
+    request_timeout_seconds: int = 30
     kind: ConnectionKind = ConnectionKind.cdr
 
 
@@ -65,6 +66,7 @@ async def get_active_cdr(session: AsyncSession = Depends(get_session)) -> Connec
             auth_credentials=None,
             is_default=True,
             is_read_only=False,
+            request_timeout_seconds=30,
             kind=ConnectionKind.cdr,
         )
     return ConnectionContext(
@@ -75,5 +77,6 @@ async def get_active_cdr(session: AsyncSession = Depends(get_session)) -> Connec
         auth_credentials=cfg.auth_credentials,
         is_default=cfg.is_default,
         is_read_only=cfg.is_read_only,
-        kind="cdr",
+        request_timeout_seconds=cfg.request_timeout_seconds,
+        kind=ConnectionKind.cdr,
     )
