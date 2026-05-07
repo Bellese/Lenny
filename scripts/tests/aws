@@ -19,7 +19,7 @@ case "$2" in
     get-parameters-by-path)
         case "$SCENARIO" in
             happy)
-                printf '{"Parameters":[{"Name":"/leonard/prod/POSTGRES_PASSWORD","Value":"testpassword12345678901234567"},{"Name":"/leonard/prod/CDR_FERNET_KEY","Value":"testcdrsecretkey12345678901234567890abcde="}],"NextToken":""}\n'
+                printf '{"Parameters":[{"Name":"/leonard/prod/POSTGRES_PASSWORD","Value":"testpassword12345678901234567"},{"Name":"/leonard/prod/CDR_FERNET_KEY","Value":"testcdrsecretkey12345678901234567890abcde="},{"Name":"/leonard/prod/API_TOKEN","Value":"testapitoken1234567890abcdef12345678901234"}],"NextToken":""}\n'
                 ;;
             invalid)
                 printf '{"Parameters":[{"Name":"/leonard/prod/POSTGRES_PASSWORD","Value":"testpassword/invalid"}],"NextToken":""}\n'

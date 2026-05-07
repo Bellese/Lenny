@@ -573,9 +573,7 @@ class TestTriageTestBundle:
 
         # Mock push_resources so measure-def uploads succeed; the read-only guard
         # fires before push_resources is called for clinical data.
-        with patch(
-            "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
-        ):
+        with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             with pytest.raises(ValueError, match="read-only"):
                 await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
