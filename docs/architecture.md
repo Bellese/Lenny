@@ -185,7 +185,7 @@ Production secrets are stored in **AWS SSM Parameter Store** under `/leonard/pro
 | `/leonard/prod/POSTGRES_PASSWORD` | DB superuser password | backend, db (first-init) |
 | `/leonard/prod/CDR_FERNET_KEY` | Fernet key for CDR credential encryption | backend (credential_crypto.py) |
 
-**Instance profile:** `leonard-ec2-prod` (attached to EC2 `i-0f00585639d2f3ef1`) grants `ssm:GetParametersByPath` on `/leonard/prod/*` with `kms:ViaService` scoped to SSM only.
+**Instance profile:** `leonard-ec2-prod` (attached to the prod EC2 instance) grants `ssm:GetParametersByPath` on `/leonard/prod/*` with `kms:ViaService` scoped to SSM only.
 
 **Boot flow:** On every deploy, `scripts/fetch-prod-secrets.sh` reads SSM and writes values to `/run/leonard/env` (tmpfs, mode 0600, cleared on reboot). `deploy-prod.sh` extracts `POSTGRES_PASSWORD` to `/run/leonard/POSTGRES_PASSWORD` (mode 0600) and `CDR_FERNET_KEY` to `/run/leonard/CDR_FERNET_KEY` (mode 0600). `docker-compose.prod.yml` mounts both as Docker secrets — the `backend` service reads `POSTGRES_PASSWORD` via `/run/secrets/postgres_password` (assembled into `DATABASE_URL` by `backend/docker-entrypoint.sh`) and `CDR_FERNET_KEY` via `/run/secrets/cdr_fernet_key` (read by `credential_crypto.py` at startup). The `db` service reads `POSTGRES_PASSWORD` via `POSTGRES_PASSWORD_FILE`. `scripts/reconcile-db-password.sh` then runs `ALTER ROLE mct2 PASSWORD :'newpw'` to synchronize the DB volume's embedded password.
 

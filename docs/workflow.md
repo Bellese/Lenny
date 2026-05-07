@@ -44,7 +44,7 @@ The sequence:
 
 1. Unit tests and frontend build gate the deploy — a failure here blocks the deploy step entirely.
 2. OIDC federated credentials assume the `leonard-github-deploy` IAM role (no long-lived AWS keys stored in GitHub).
-3. SSM Run Command invokes the `leonard-deploy` document on instance `i-0f00585639d2f3ef1`.
+3. SSM Run Command invokes the `leonard-deploy` document on the prod EC2 instance.
 4. The document runs `git fetch origin && git reset --hard FETCH_HEAD && scripts/deploy-prod.sh` on the instance.
 5. The workflow polls SSM for up to 16 minutes, then hits the health endpoint to confirm the deploy succeeded.
 

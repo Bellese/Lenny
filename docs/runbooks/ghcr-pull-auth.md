@@ -13,7 +13,7 @@ permission) — no change there.
 ## Manual deploy
 
 ```bash
-ssh ec2-user@98.89.219.217 -i ~/.ssh/leonard-ec2.pem
+ssh ec2-user@api.lenny.bellese.dev -i ~/.ssh/leonard-ec2.pem
 cd /opt/leonard && sudo ./scripts/deploy-prod.sh
 ```
 

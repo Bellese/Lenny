@@ -9,16 +9,16 @@
 | Coverage (≥70% floor) | `cd backend && python3 -m pytest tests/ --ignore=tests/integration --cov=app --cov-report=term-missing` | optional locally; CI reports |
 | Integration (CI-equivalent, what `pr-checks.yml` runs) | `./scripts/run-integration-tests.sh --ignore=tests/integration/test_golden_measures.py --ignore=tests/integration/test_connectathon_measures.py --ignore=tests/integration/test_full_workflow.py --ignore=tests/integration/test_groups_dropdown.py --ignore=tests/integration/test_full_jobs_pipeline.py` | **every PR + before push** (most-flaky-in-CI suite, ~3–5 min) |
 | Full workflow only | `./scripts/run-integration-tests.sh tests/integration/test_full_workflow.py` | before merging any change to the measure pipeline / FHIR data flow / job orchestration |
-| Integration (full / connectathon source-of-truth) | `./scripts/run-integration-tests.sh` (no flags — adds 600+ connectathon-measure patient tests CI skips on PRs) — or trigger nightly via Actions → Connectathon Measures | nightly automatic + manual pre-merge for measure-engine or HAPI-bump changes |
+| Integration (full / connectathon source-of-truth) | `./scripts/run-integration-tests.sh` (no flags — adds 600+ connectathon-measure patient tests CI skips on PRs) — or trigger weekly via Actions → Connectathon Measures | weekly automatic (Monday 03:00 UTC) + manual pre-merge for measure-engine or HAPI-bump changes |
 | Frontend dev server | `cd frontend && npm start` (port 3001) | local dev only |
 
 **Decision tree:**
 - Pushing a PR? → Lint + Unit + CI-equivalent integration (no skipping).
 - Touching `measure_*` / `orchestrator.py` / `fhir_client.py` / `validation.py`? → Add Full workflow + Jobs pipeline validation (see below).
-- Adding measures or bumping HAPI? → Run the full integration suite (or manually trigger the weekly Connectathon Measures workflow) before merge.
+- Adding measures or bumping HAPI? → Run the full integration suite before merge.
 - Validating that Lenny's Jobs API produces correct numerator/denominator counts? → `USE_PREBAKED=1 ./scripts/run-integration-tests.sh tests/integration/test_full_jobs_pipeline.py` (requires prebaked images with Groups; ~30–50 min for all 11 measures). Or run the standalone script: `python scripts/validate_all_measures.py`.
 
-The weekly Connectathon Measures workflow has four independent jobs: **Bundle Loader Test** (vanilla HAPI), **Connectathon Eval** (pre-baked HAPI), **Jobs Pipeline Validation** (pre-baked HAPI, validates Lenny orchestration layer), and **Full Workflow** (clean nightly run). See `docs/testing.md` for the full strategy.
+`docs/testing.md` documents the four-job Connectathon Measures workflow in full.
 
 ## Recurring bug: HAPI async-indexing race
 
@@ -50,30 +50,27 @@ PRs #142, #155, #159, #161, #167+ each patched a slice of this same disease.
 
 ## Local-first iteration — MANDATORY pre-push checklist
 
-> **DO NOT `git push` ANY PR until ALL of the checks below have run successfully on your machine.**
-> "Validate locally" does NOT mean "ran unit tests." It means EVERY check below.
-> CI is not a debugger. Prod is not a debugger. Sutton's time is not a debugger.
-
-**Required local checks before `git push` of ANY PR (no exceptions for "small" or "obvious" fixes):**
+> **DO NOT `git push` ANY PR until ALL the checks below pass locally** — no exceptions for "small" or "obvious" fixes. "Validate locally" means EVERY check, not just unit tests.
+> CI is not a debugger. Prod is not a debugger. Reviewers' time is not a debugger.
 
 1. **Lint** (Build & Test table, "Lint" row) — clean.
 2. **Unit suite** ("Unit" row) — passes.
-3. **CI-equivalent integration suite** ("Integration (CI-equivalent…)" row) — **passes against real HAPI containers.** This is the suite that fails most often in CI; it MUST pass locally first (~3–5 min). The full integration suite (no `--ignore` flags) runs 600+ connectathon-measure patient tests CI skips on PRs — only run those when changing the measure evaluation pipeline or before a nightly run.
+3. **CI-equivalent integration suite** ("Integration (CI-equivalent…)" row) — **passes against real HAPI containers**, locally first (~3–5 min). The full integration suite (no `--ignore` flags) runs 600+ connectathon-measure patient tests CI skips on PRs — only run those when changing the measure evaluation pipeline or before the weekly run.
 4. End-to-end smoke against a local stack (`cp .env.example .env && docker compose up -d` — `.env.example` sets `COMPOSE_FILE=docker-compose.yml:docker-compose.prebaked.yml` plus the prebaked HAPI image vars so the fast path is the default; falls back to vanilla `hapiproject/hapi:v8.8.0-1` if those vars are removed) for any change touching:
    - The data flow (`fhir_client.py`, `validation.py`, `orchestrator.py`)
    - HAPI behavior or configuration
    - Bundle import / `$everything` / `$evaluate-measure` paths
    - After any wipe+push cycle in the smoke run, probe `$everything` on at least one patient — see `docs/runbooks/everything-probe.md` for the script (the shell strips `$`, so use Python).
 5. **New or modified `tests/integration/` files** — run those exact files locally before pushing. The CI-equivalent suite uses `--ignore` flags and will **silently skip** any new integration test; you must run it yourself. For prebaked-only tests (check for `HAPI_PREBAKED` guard or `_require_prebaked_stack`): `USE_PREBAKED=1 ./scripts/run-integration-tests.sh <test_file>`. No exceptions — not even for the test you just wrote.
-6. The "ship-or-not" gate: if steps 1–5 didn't all pass, **do not push.** Tell Sutton what's blocking instead.
+6. The "ship-or-not" gate: if steps 1–5 didn't all pass, **do not push.** Say what's blocking in the PR description instead.
 
 If the change is documentation-only (`*.md`, no code), steps 1–4 are not required, but step 5 still applies — confirm in the PR description that no code changed.
 
-**Reproduce the bug on the local stack FIRST** when investigating any "wrong populations" / "validation pass-rate" / "404 from HAPI" / "$everything returns only Patient" symptom. Don't propose code changes until you have a local repro that fails the same way as prod.
+**Reproduce on the local stack FIRST.** Don't propose code changes until you have a local repro that fails the same way as prod.
 
 ## Architecture
 
-5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (bundles + IGs baked into the image, PR #199). Production currently runs vanilla `hapiproject/hapi:v8.8.0-1` — the `seed` service POSTs the connectathon bundles into a persistent H2 volume on first boot, and the volume keeps them warm across redeploys. Whether to switch prod to prebaked is an open question; see `docs/decisions/prebaked-in-prod.md` (TBD) or ask Sutton. Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`.
+5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (bundles + IGs baked into the image, PR #199). Production currently runs vanilla `hapiproject/hapi:v8.8.0-1` — the `seed` service POSTs the connectathon bundles into a persistent H2 volume on first boot, and the volume keeps them warm across redeploys. Whether to switch prod to prebaked is an open question; see `docs/decisions.md`. Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`.
 
 ## Code Conventions
 
@@ -101,9 +98,11 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
 
 ## AWS
 
-- **Profile:** `leonard` (account `439475769170`). Always use `AWS_PROFILE=leonard` for any AWS CLI commands.
-- EC2 instance: `i-0f00585639d2f3ef1`, t3.medium (4 GB RAM), Elastic IP `98.89.219.217`, region `us-east-1`
-- Live URLs: `https://lenny.bellese.dev` (UI), `https://api.lenny.bellese.dev` (API)
+**Always export `AWS_PROFILE=leonard` before any AWS CLI call.** Using any other profile/account is a bug — Claude has gotten this wrong before. Verify with `aws sts get-caller-identity` if unsure.
+
+- Region: `us-east-1`
+- Prod runs on a single t3.medium EC2 instance (look up by tag with `aws ec2 describe-instances --filters "Name=tag:Name,Values=lenny-prod"`).
+- Live: `https://lenny.bellese.dev` (UI), `https://api.lenny.bellese.dev` (API)
 
 ## Do NOT
 
@@ -112,20 +111,19 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
 - Modify HAPI FHIR H2 storage paths without reading `docs/architecture.md`
 - Modify `TODOS.md` — it is frozen 2026-04-27. Open a GitHub Issue for any new work item.
 
-## Skill routing
+## External toolkit commands
 
-When the user's request matches an available skill, invoke it via the Skill tool. When in doubt, invoke the skill.
+These are gstack / superpowers slash commands — **not** harness-loadable skills. Don't try to invoke them via the Skill tool; surface the right one when the user's intent matches and let them run it. (The Workflow table above maps phases to commands; this list maps intents.)
 
-Key routing rules:
-- Product ideas/brainstorming → invoke /office-hours
-- Strategy/scope → invoke /plan-ceo-review
-- Architecture → invoke /plan-eng-review
-- Design system/plan review → invoke /design-consultation or /plan-design-review
-- Full review pipeline → invoke /autoplan
-- Bugs/errors → invoke /investigate
-- QA/testing site behavior → invoke /qa or /qa-only
-- Code review/diff check → invoke /review
-- Visual polish → invoke /design-review
-- Ship/deploy/PR → invoke /ship or /land-and-deploy
-- Save progress → invoke /context-save
-- Resume context → invoke /context-restore
+- Product ideas / brainstorming → `/office-hours`
+- Strategy / scope → `/plan-ceo-review`
+- Architecture → `/plan-eng-review`
+- Design system / plan review → `/design-consultation` or `/plan-design-review`
+- Full review pipeline → `/autoplan`
+- Bugs / errors → `/investigate`
+- QA / testing site behavior → `/qa` or `/qa-only`
+- Code review / diff check → `/review`
+- Visual polish → `/design-review`
+- Ship / deploy / PR → `/ship` or `/land-and-deploy`
+- Save progress → `/context-save`
+- Resume context → `/context-restore`
