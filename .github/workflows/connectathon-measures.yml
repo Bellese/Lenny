@@ -10,8 +10,8 @@ name: Connectathon Measures
 #     tests since the data is already loaded.
 #   - connectathon-eval: pre-baked HAPI; golden isolation + full connectathon coverage
 #     (test_golden_measures.py + test_connectathon_measures.py).  Pre-baked images make
-#     PUT uploads idempotent/fast; eval-gate + 568 connectathon evals dominate the clock.
-#   - jobs-pipeline-validation: pre-baked HAPI; runs all 11 measures through Lenny's
+#     PUT uploads idempotent/fast; eval-gate + 319 connectathon evals dominate the clock.
+#   - jobs-pipeline-validation: pre-baked HAPI; runs all 7 active measures through Lenny's
 #     Jobs API and validates per-patient numerator/denominator outputs against ground-truth
 #     expected populations from the connectathon bundles.  Closes the gap between
 #     test_connectathon_measures.py (bypasses Lenny) and test_full_workflow.py (no count
@@ -68,8 +68,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     # Runs golden isolation and full connectathon coverage against pre-baked images.
-    # Pre-baked images already contain all 12 bundles; PUT uploads are fast idempotent
-    # upserts.  Clock is dominated by eval-gate (≤600s) + 568 connectathon evals.
+    # Pre-baked images already contain the active connectathon bundles; PUT uploads are fast idempotent
+    # upserts.  Clock is dominated by eval-gate (≤600s) + 319 connectathon evals.
     # verify-bake (superset) finishes in ~45 min — 60 min is safe headroom.
     env:
       STRICT_STU6: ${{ github.event.inputs.strict_stu6 || '0' }}

@@ -6,15 +6,14 @@ A free, open-source utility for calculating FHIR-based digital quality measures 
 
 ```bash
 cp .env.example .env
-# Edit .env: set CDR_FERNET_KEY (see comment for the one-liner to generate one).
-# If you have GHCR access (Bellese org), the prebaked images and COMPOSE_FILE are
-# already set in .env.example — just docker login ghcr.io first.
 docker compose up
 ```
 
-Open http://localhost:3001. All 12 connectathon measures and their test patients are pre-loaded via the prebaked HAPI images — ready to run calculations immediately.
+Open http://localhost:3001. The 7 active connectathon measures and their test patients are pre-loaded via the prebaked HAPI images — ready to run calculations immediately.
 
-**No GHCR access?** Remove or comment out `HAPI_CDR_IMAGE`, `HAPI_MEASURE_IMAGE`, and `COMPOSE_FILE` in `.env`. Lenny will use vanilla HAPI images and the seed loader will populate data at startup (~10–15 min first run).
+> **Configuring your own CDR?** See [Connecting Your CDR](#connecting-your-cdr) for the one extra setup step (set `CDR_FERNET_KEY` so saved credentials encrypt at rest).
+
+> **Want vanilla upstream HAPI instead?** Comment out `HAPI_CDR_IMAGE`, `HAPI_MEASURE_IMAGE`, and `COMPOSE_FILE` in `.env`. The seed loader will populate connectathon data at startup (~10–15 min first run).
 
 ## Architecture
 
@@ -42,10 +41,12 @@ Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (HAPI im
 1. **Measures** — View loaded measures or upload new FHIR Measure bundles
 2. **Jobs** — Create a calculation job: select a measure, set the measurement period, optionally filter by FHIR Group, click Calculate
 3. **Results** — Inspect aggregate population summaries and drill into individual patient results
-4. **Validation** — Upload a FHIR test bundle with expected population results; Lenny runs the measure and compares actual vs. expected populations, reporting pass/fail per patient
-5. **Settings** — Configure your organization's clinical data repository (CDR) connection
+4. **Validation** — Upload a FHIR test bundle with expected population results; Lenny runs the measure and compares actual vs. expected populations, reporting pass/fail per patient *(hidden by default; enable via Settings → Admin → Features → Validation toggle)*
+5. **Settings** — Manage clinical data repository (CDR) and measure calculation server (MCS) connections. Add multiple of each, switch the active one, test connectivity per connection (with a deeper "Verify with sample evaluate" probe on the active MCS). The active CDR provides patient/clinical data; the active MCS runs `$evaluate-measure`. Useful at connectathons for swapping between your own server and a reference server.
 
 ## Validation Pipeline
+
+> **Note:** The Validation tab is hidden by default. Enable it via Settings → Admin → Features → Validation toggle.
 
 Lenny includes a validation workflow for verifying measure logic against known test cases:
 
@@ -69,11 +70,11 @@ By default, Lenny uses a bundled CDR with test data. To connect to your organiza
 4. Click "Test Connection" to verify
 5. Save
 
-Auth credentials (passwords, bearer tokens) are encrypted at rest using Fernet (AES-128-CBC + HMAC-SHA256). The encryption key is set via `CDR_FERNET_KEY` — see `.env.example` for the local dev setup and `docs/architecture.md` for the production SSM/Docker-secrets pipeline.
+Auth credentials (passwords, bearer tokens) are encrypted at rest using Fernet (AES-128-CBC + HMAC-SHA256). **Set `CDR_FERNET_KEY` in `.env` before saving a custom CDR — generate one with `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.** See `.env.example` and `docs/architecture.md` for the production SSM/Docker-secrets pipeline.
 
 ## Connectathon Measures
 
-Lenny ships with the 12 measures targeted for the MADiE May 2026 Connectathon, pre-loaded into the bundled CDR for immediate testing. Per-measure pass/fail status, excluded bundles with root-cause notes, and resource baselines (Patient: 568, Measure: ≥12, Library: 24, ValueSet: ≈123) are tracked in [docs/connectathon-measures-status.md](docs/connectathon-measures-status.md). The nightly **Connectathon Measures** GitHub Actions workflow runs the source-of-truth suite (golden + connectathon-measures + full-workflow tests) against pre-baked HAPI images and surfaces drift.
+Lenny ships with the 7 active measures targeted for the MADiE May 2026 Connectathon, pre-loaded into the bundled CDR for immediate testing. Per-measure pass/fail status, removed-bundle rationale (5 measures removed 2026-05-06, issue #278), and resource baselines (Patient: 319, Measure: 8 [7 connectathon + 1 seed], Library: 18, ValueSet: 78) are tracked in [docs/connectathon-measures-status.md](docs/connectathon-measures-status.md). The nightly **Connectathon Measures** GitHub Actions workflow runs the source-of-truth suite (golden + connectathon-measures + full-workflow tests) against pre-baked HAPI images and surfaces drift.
 
 ## Development
 

@@ -76,7 +76,7 @@ export default function App() {
     return 'light';
   });
   const [query, setQuery] = useState('');
-  const [features, setFeatures] = useState({ validation: true });
+  const [features, setFeatures] = useState({ validation: false });
   const searchRef = useRef(null);
 
   useEffect(() => {
@@ -152,9 +152,9 @@ export default function App() {
 
   useEffect(() => {
     getAdminSettings()
-      .then(s => setFeatures({ validation: s.validation_enabled ?? true }))
+      .then(s => setFeatures({ validation: s.validation_enabled ?? false }))
       .catch(() => {});
-    const h = (e) => setFeatures({ validation: e.detail.validation_enabled ?? true });
+    const h = (e) => setFeatures({ validation: e.detail.validation_enabled ?? false });
     window.addEventListener('admin-settings-changed', h);
     return () => window.removeEventListener('admin-settings-changed', h);
   }, []);

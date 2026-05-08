@@ -328,6 +328,25 @@ async def _run_schema_migrations(conn) -> None:
         # Drop the old plaintext credential snapshot column.
         await conn.execute(text("ALTER TABLE jobs DROP COLUMN IF EXISTS cdr_auth_credentials"))
 
+        # Preserve validation_enabled=true for existing deployments that relied
+        # on the previous default. The in-code default flipped to "false" so that
+        # fresh installs start with the Validation tab hidden; existing installs
+        # that never explicitly set this key would otherwise lose the tab on
+        # upgrade. ON CONFLICT (key) DO NOTHING preserves any explicit admin choice.
+        await conn.execute(
+            text("""
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'app_settings') THEN
+                    INSERT INTO app_settings (key, value)
+                    VALUES ('validation_enabled', 'true')
+                    ON CONFLICT (key) DO NOTHING;
+                END IF;
+            END
+            $$;
+            """)
+        )
+
 
 async def seed_default_connections() -> None:
     """Seed Local <Kind> rows for each connection-management kind.

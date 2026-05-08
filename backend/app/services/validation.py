@@ -255,7 +255,7 @@ def _warn_unknown_bundle_types(bundle_json: dict[str, Any]) -> None:
     Runs once per bundle upload so unknown types are visible in logs rather than
     silently misrouted. Does not affect routing — call before _classify_bundle_entries.
     """
-    # Known clinical types present in the 12 connectathon bundles or seed/patient-bundle.json
+    # Known clinical types present in the active connectathon bundles or seed/patient-bundle.json
     _KNOWN_CLINICAL_TYPES = {
         "Patient",
         "Condition",

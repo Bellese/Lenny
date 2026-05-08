@@ -690,3 +690,57 @@ async def test_delete_connection_blocked_when_active_jobs(client, test_session):
 
     resp2 = await client.delete(f"/settings/connections/{cfg.id}")
     assert resp2.status_code == 204
+
+
+# ---------------------------------------------------------------------------
+# GET /settings/admin
+# ---------------------------------------------------------------------------
+
+
+async def test_get_admin_settings_defaults_validation_disabled(client):
+    """GET /settings/admin with no AppSetting rows returns validation_enabled=False.
+
+    This is the critical path introduced when the default was flipped from
+    True to False — a fresh deployment with no seeded AppSetting row must
+    advertise validation as disabled.
+    """
+    resp = await client.get("/settings/admin")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["validation_enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# PUT /settings/admin
+# ---------------------------------------------------------------------------
+
+
+async def test_put_admin_settings_enables_validation(client):
+    """PUT /settings/admin can enable validation and GET reflects the change."""
+    put_resp = await client.put("/settings/admin", json={"validation_enabled": True})
+    assert put_resp.status_code == 200
+    assert put_resp.json()["validation_enabled"] is True
+
+    get_resp = await client.get("/settings/admin")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["validation_enabled"] is True
+
+
+async def test_put_admin_settings_disables_validation(client):
+    """PUT /settings/admin can disable validation after it was enabled."""
+    await client.put("/settings/admin", json={"validation_enabled": True})
+    put_resp = await client.put("/settings/admin", json={"validation_enabled": False})
+    assert put_resp.status_code == 200
+    assert put_resp.json()["validation_enabled"] is False
+
+    get_resp = await client.get("/settings/admin")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["validation_enabled"] is False
+
+
+async def test_put_admin_settings_empty_body_is_noop(client):
+    """PUT /settings/admin with no recognized fields is a no-op (returns current state)."""
+    resp = await client.put("/settings/admin", json={})
+    assert resp.status_code == 200
+    # Default state is validation disabled
+    assert resp.json()["validation_enabled"] is False
