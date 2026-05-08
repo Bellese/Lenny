@@ -9,10 +9,11 @@ import ValidationPage from './pages/ValidationPage';
 import { getHealth, getAdminSettings } from './api/client';
 import {
   MeasuresIcon, JobsIcon, ResultsIcon, ValidateIcon,
-  SettingsIcon, SearchIcon, XIcon, SunIcon, MoonIcon,
+  SettingsIcon, SearchIcon, XIcon, SunIcon, MoonIcon, GithubIcon,
 } from './components/Icons';
 import HealthChipGroup from './components/HealthChipGroup';
 import SearchContext from './contexts/SearchContext';
+import pkg from '../package.json';
 
 const ALL_NAV_ITEMS = [
   { path: '/measures',   label: 'Measures',   Icon: MeasuresIcon,  kbd: 'M', feature: null },
@@ -303,7 +304,17 @@ export default function App() {
               <span className={`${styles.statusDot} ${cdrOk ? styles.statusDotOk : ''}`} />
               {cdrOk ? 'All services healthy' : 'CDR unavailable'}
             </div>
-            <div className={styles.statusVersion}>Lenny · v0.0.3</div>
+            <div className={styles.statusVersion}>Lenny · v{pkg.version}</div>
+            <a
+              className={styles.repoLink}
+              href="https://github.com/Bellese/Lenny"
+              target="_blank"
+              rel="noopener noreferrer"
+              aria-label="View Lenny source on GitHub (opens in new tab)"
+            >
+              <GithubIcon className={styles.repoLinkIcon} />
+              <span>github.com/Bellese/Lenny</span>
+            </a>
           </div>
         </nav>
 
