@@ -109,4 +109,4 @@ See [docs/testing.md](docs/testing.md) for the full testing strategy, the three-
 
 ## License
 
-Apache 2.0
+Licensed under the [Apache License 2.0](LICENSE).
