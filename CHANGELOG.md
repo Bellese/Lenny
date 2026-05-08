@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.11] - 2026-05-08
+
+### Added
+- **GitHub repo link in sidebar footer.** A `github.com/Bellese/Lenny` link now appears below the version string in the bottom-left sidebar — surfacing the open-source nature of the project without requiring users to open Settings. The link opens in a new tab with proper `noopener noreferrer` attrs. Hover and focus states raise opacity and underline the link for discoverability.
+
+### Fixed
+- **Stale `v0.0.3` version string corrected.** The sidebar footer now reads the version from `frontend/package.json` at build time (`pkg.version`) instead of a hardcoded constant, so the displayed version stays in sync with each release.
+
 ### Fixed
 - **"Test connection" on the seeded Local CDR and "Verify with sample evaluate" on the seeded Local MCS now succeed in local Docker.** Both flows previously returned `SSRF protection: must use https for non-localhost hosts` because `_validate_ssrf_url`'s http allowlist was just `{localhost, 127.0.0.1, ::1}` — the seeded connections use Docker service hostnames (`hapi-fhir-cdr`, `hapi-fhir-measure`) baked into `DEFAULT_CDR_URL` / `MEASURE_ENGINE_URL`. The allowlist now extends with hosts parsed from those settings at import time. Arbitrary http hosts and private/loopback IP literals remain blocked. (#302)
 
