@@ -340,6 +340,30 @@
   opacity: 0.65;
 }
 
+.repoLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-dim);
+  text-decoration: none;
+  opacity: 0.65;
+  transition: opacity 120ms ease, color 120ms ease;
+  margin-top: 2px;
+}
+.repoLink:hover,
+.repoLink:focus-visible {
+  opacity: 1;
+  color: var(--text);
+  text-decoration: underline;
+}
+.repoLinkIcon {
+  flex-shrink: 0;
+  width: 12px;
+  height: 12px;
+}
+
 /* Main content area */
 .main {
   grid-area: main;
