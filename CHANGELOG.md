@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.9] - 2026-05-08
+
+### Added
+- **Validation tab is now opt-in.** The Validation nav item is hidden by default and appears only after an admin enables it via Settings → Admin → Features → Validation toggle. Existing deployments that relied on the previous always-on default are preserved by a startup migration that seeds `validation_enabled = true` with `ON CONFLICT DO NOTHING`, so no admin intervention is needed on upgrade.
+- **In-app explanation of what Validation does.** The page header subtitle now describes the mechanism in plain language: Lenny loads a FHIR test bundle (test patients plus expected population counts), re-runs `$evaluate-measure` against each patient, and flags mismatches. Previously the subtitle described the goal without the how.
+- **KPI card captions.** Each of the three headline numbers on the Validation tab now has a one-line caption clarifying what it counts: "Test bundles available to validate against", "Patients tested across all runs", and "Test patients whose populations matched expected, across all runs".
+- **Admin settings test coverage.** `GET /settings/admin` and `PUT /settings/admin` now have 4 unit tests covering the no-row default, enable/disable round-trip, and empty-body no-op.
+
+### Fixed
+- **Smushed action buttons in the Validation page header.** The "Upload bundle" and "New run" buttons were compressed by the longer subtitle text. Fixed by adding `flex-shrink: 0` and `margin-left: 24px` to `.headerActions`; the desktop margin is reset to 0 at the 820 px mobile breakpoint so the buttons stay flush on narrow screens.
+- **Docker `npm ci` failure.** `tailwindcss/postcss-load-config` declares `yaml@^2.4.2` as a peer dependency. npm 10 in the Docker node:20-alpine image enforces this strictly while npm 11 (used locally) does not. Adding `yaml@2.8.4` as an explicit dev dependency fixes the CI build without changing production behavior.
+
 ## [0.0.17.8] - 2026-05-08
 
 ### Security
