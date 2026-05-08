@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.8] - 2026-05-08
+
+### Security
+- **Cap `request_timeout_seconds` at 1800s in CDR + MCS create schemas.** The DB column has always been settable, but the Pydantic create schemas didn't expose it; now they do, with `Field(default=30, ge=1, le=1800)`. Closes the timeout-as-DoS-vector identified in the multi-MCS design doc — an attacker (or a misconfigured admin) can no longer set a 24-hour timeout to hold a backend worker. 8 new regression tests cover the cap, zero-rejection, the within-cap accept path, and the 30s default. Surfaced via the `/cso`-style audit at PR #6's threat-surface walkthrough.
+- **Sanitize URLs in `fhir_client.py` log payloads.** 10 call sites (`logger.info` / `logger.warning` with `extra={"url": ...}` or `extra={"valueset_url": ...}`) were emitting raw URLs that could carry embedded credentials (`https://user:pass@host/fhir`) if a connection had been configured with userinfo in the URL. All call sites now wrap the URL through the existing `sanitize_url()` helper, which strips userinfo, redacts auth-shaped query params, and replaces single-label internal Docker hostnames with `[host]`. No prior incident — defense-in-depth fix from the same audit.
+
+### Added
+- **`CONTRIBUTING.md` — "How to add a connection kind" recipe.** Five-step walkthrough (model + migration + factory wiring + dependency + frontend) with the MCS implementation called out as the canonical reference. Captures the things a contributor would otherwise re-derive: the partial-unique-index pattern, the SAME factory mounting two `include_router` calls, where to NOT touch (the factory itself, EncryptedJSON), and the documented out-of-scope decisions (per-kind key isolation, CDR_FERNET_KEY env-var rename).
+
+### Changed
+- **`CDRConnectionResponse` and `MCSConnectionResponse`** now include `request_timeout_seconds` so the field round-trips. Previously the create schemas didn't expose it at all; now both response and create schemas do.
+
 ## [0.0.17.7] - 2026-05-07
 
 ### Added

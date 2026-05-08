@@ -117,6 +117,66 @@ async def test_mcs_create_connection_ssrf_blocked(client):
     assert resp.status_code == 400
 
 
+async def test_mcs_create_rejects_oversized_request_timeout(client):
+    """request_timeout_seconds is capped at 1800s to bound worker hold time
+    (timeout-as-DoS-vector — design-doc threat surface #3)."""
+    resp = await client.post(
+        "/settings/mcs-connections",
+        json={
+            "name": "DoS Timeout",
+            "mcs_url": "https://example.com/fhir",
+            "auth_type": "none",
+            "request_timeout_seconds": 86400,  # 1 day — far above the 1800 cap
+        },
+    )
+    assert resp.status_code == 422
+
+
+async def test_mcs_create_rejects_zero_request_timeout(client):
+    """request_timeout_seconds must be >= 1 — zero/negative would short-circuit
+    httpx and surface as misleading 'connection refused' errors."""
+    resp = await client.post(
+        "/settings/mcs-connections",
+        json={
+            "name": "Zero Timeout",
+            "mcs_url": "https://example.com/fhir",
+            "auth_type": "none",
+            "request_timeout_seconds": 0,
+        },
+    )
+    assert resp.status_code == 422
+
+
+async def test_mcs_create_accepts_explicit_request_timeout_within_cap(client):
+    """Within-cap values are accepted and round-trip in the response."""
+    resp = await client.post(
+        "/settings/mcs-connections",
+        json={
+            "name": "Long-but-legal",
+            "mcs_url": "https://example.com/fhir",
+            "auth_type": "none",
+            "request_timeout_seconds": 600,
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["request_timeout_seconds"] == 600
+
+
+async def test_mcs_create_defaults_request_timeout_to_30(client):
+    """Default request_timeout_seconds is 30 — preserves prior behavior when
+    the field is omitted from the create payload."""
+    resp = await client.post(
+        "/settings/mcs-connections",
+        json={
+            "name": "Default Timeout",
+            "mcs_url": "https://example.com/fhir",
+            "auth_type": "none",
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["request_timeout_seconds"] == 30
+
+
 async def test_mcs_get_update_delete_activate(client):
     create = await client.post(
         "/settings/mcs-connections",

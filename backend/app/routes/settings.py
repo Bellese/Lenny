@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -31,6 +31,11 @@ from app.services.validation import sanitize_error
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
 
+# Hard cap on `request_timeout_seconds` to prevent timeout-as-DoS-vector. 1800s
+# (30 min) covers the slowest legitimate measure-evaluation runs we've seen at
+# the connectathon while still bounding worst-case worker hold time.
+_MAX_REQUEST_TIMEOUT_SECONDS = 1800
+
 
 # ---------------------------------------------------------------------------
 # CDR Schemas
@@ -45,6 +50,7 @@ class CDRConnectionResponse(BaseModel):
     is_active: bool
     is_default: bool
     is_read_only: bool
+    request_timeout_seconds: int
 
     model_config = {"from_attributes": True}
 
@@ -55,6 +61,7 @@ class CDRConnectionCreate(BaseModel):
     auth_type: str = "none"
     auth_credentials: dict | None = None
     is_read_only: bool = False
+    request_timeout_seconds: int = Field(default=30, ge=1, le=_MAX_REQUEST_TIMEOUT_SECONDS)
 
 
 class TestConnectionRequest(BaseModel):
@@ -75,6 +82,7 @@ class MCSConnectionResponse(BaseModel):
     auth_type: str
     is_active: bool
     is_default: bool
+    request_timeout_seconds: int
 
     model_config = {"from_attributes": True}
 
@@ -84,6 +92,7 @@ class MCSConnectionCreate(BaseModel):
     mcs_url: str
     auth_type: str = "none"
     auth_credentials: dict | None = None
+    request_timeout_seconds: int = Field(default=30, ge=1, le=_MAX_REQUEST_TIMEOUT_SECONDS)
 
 
 class MCSTestConnectionRequest(BaseModel):
