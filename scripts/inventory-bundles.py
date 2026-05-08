@@ -2,7 +2,7 @@
 """Inventory script: audit resource types across all connectathon bundles.
 
 Outputs a JSON report with:
-  - bundle_resource_types: {resourceType: count} across all 12 bundles
+  - bundle_resource_types: {resourceType: count} across all active bundles
   - missing_from_measure_def: types present in bundles but not in _MEASURE_DEF_TYPES
   - missing_from_wipe: types present in bundles but not in wipe_patient_data list
   - in_skip_types: types present in bundles that _SKIP_TYPES would filter out
