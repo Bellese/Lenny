@@ -11,7 +11,7 @@
 | hapi-fhir-measure | hapiproject/hapi:v8.8.0-1 | Measure calculation engine | internal (8080) |
 | seed | local build | One-time data loader (exits after run) | none |
 
-The CDR and Measure Engine are intentionally separate. The CDR is replaceable — users connect their own FHIR server in Settings. The Measure Engine is permanent and is the only service with `hapi.fhir.cr.enabled=true`.
+The CDR and Measure Engine are intentionally separate. Both are user-configurable in Settings: multiple CDR and MCS (Measure Calculation Server) connections can be saved, with one of each active at a time. The bundled `hapi-fhir-measure` service is the default MCS — the only one with `hapi.fhir.cr.enabled=true` — but attendees can point at their own MCS via Settings → MCS Connections (issue #12).
 
 ### Compose modes: vanilla vs. prebaked
 
@@ -33,9 +33,10 @@ backend/app/
   dependencies.py   FastAPI dependency providers (DB session, config lookups)
 
   models/
-    job.py          Job, MeasureReport
+    job.py          Job, MeasureReport (each Job snapshots cdr_id + mcs_id at creation)
     validation.py   ExpectedResult, ValidationRun
-    config.py       AppConfig (CDR URL, auth)
+    config.py       CDRConfig + ConnectionConfigMixin (URL, auth, encrypted credentials)
+    mcs_config.py   MCSConfig (parallel of CDRConfig, no is_read_only flag)
     base.py         SQLAlchemy declarative base
 
   routes/
@@ -45,13 +46,19 @@ backend/app/
                     GET /jobs/{id}/comparison (actual vs. expected population counts)
     measures.py     GET /measures, POST /measures/upload
     results.py      GET /results, GET /results/{job_id}
-    settings.py     GET /settings, PUT /settings, POST /settings/test
+    settings.py     /settings/admin (feature flags), seeds CDR + MCS routers from connection_factory
+    connection_factory.py
+                    Generic per-kind CRUD + activate + test-connection. Mounted twice:
+                    /settings/connections (CDR) and /settings/mcs-connections (MCS).
+                    Plus /settings/mcs-connections/{id}/probe (deep $data-requirements probe).
     validation.py   POST /validation/upload, GET /validation/runs
 
   services/
     orchestrator.py      Core job execution. Pulls patients, runs $evaluate-measure in batches,
                          stores MeasureReports. Group filtering via group_id param. Reads live
-                         CDR credentials from cdr_configs via job.cdr_id FK.
+                         CDR credentials from cdr_configs via job.cdr_id FK; routes
+                         $evaluate-measure at the per-job MCS snapshot (job.mcs_url, falling
+                         back to settings.MEASURE_ENGINE_URL for legacy rows).
     fhir_client.py       All FHIR server communication. DataAcquisitionStrategy ABC with two
                          implementations: BatchQueryStrategy (paginated /Patient + $everything)
                          and DataRequirementsStrategy (DEQM spec — calls $data-requirements on
@@ -79,11 +86,11 @@ frontend/src/
     JobsPage.js       Create and monitor calculation jobs
     MeasuresPage.js   Upload and view FHIR Measure bundles
     ResultsPage.js    Aggregate population summaries + patient drill-down
-    SettingsPage.js   CDR connection configuration
+    SettingsPage.js   CDR + MCS connection management (two stacked sections), admin tab
     ValidationPage.js Upload test bundles, view pass/fail results
   components/
     ComparisonView.js  Per-patient actual vs. expected population comparison panel
-    ConnectionModal.js CDR connection test / credentials modal used by SettingsPage
+    ConnectionModal.js Kind-driven connection modal (KIND_SPECS for cdr/mcs); shared by both connection sections
     PatientDetail.js   Per-patient result expansion panel
     ProgressBar.js     Job progress indicator
     Toast.js           Notification component
