@@ -13,16 +13,16 @@ infrastructure (run via scripts/run-integration-tests.sh).
 
 CI subset (bundle-loader-test job)
 -----------------------------------
-Structural tests (file presence, SHA256) run against all 12 bundles — they are
-fast and guard against checked-in corruption.
+Structural tests (file presence, SHA256) run against all bundles in the manifest —
+they are fast and guard against checked-in corruption.
 
 Loader-replay tests (test_loader_*) exercise load_connectathon_bundles() against
 a 2-bundle subset (_CI_SUBSET) to keep vanilla-HAPI CI runtime under 60 min.
 The subset was chosen to cover two distinct clinical domains that share VSAC
 ValueSets (race/ethnicity/payer demographics), exercising the shared-VS PUT path
-without loading all 12 bundles.  All 12 bundles are still loaded nightly by the
-bake job (scripts/load_connectathon_bundles.py) which is the authoritative
-source-of-truth coverage.
+without loading all bundles in the manifest.  All manifest bundles are still loaded
+nightly by the bake job (scripts/load_connectathon_bundles.py) which is the
+authoritative source-of-truth coverage.
 
 See: https://github.com/Bellese/lenny/issues/202
 """
@@ -58,7 +58,7 @@ _MANIFEST_PATH = _BUNDLE_DIR / "manifest.json"
 _QICORE_IG_URL = "http://hl7.org/fhir/us/qicore/ImplementationGuide/hl7.fhir.us.qicore"
 
 # Loader-replay tests run against this 2-bundle subset to keep CI runtime manageable.
-# Structural tests (file presence, SHA256) still cover all 12 bundles.
+# Structural tests (file presence, SHA256) still cover all bundles in the manifest.
 _CI_SUBSET = frozenset(
     {
         "CMS122FHIRDiabetesAssessGreaterThan9Percent-bundle.json",
@@ -156,8 +156,8 @@ async def loader_result(integration_session_factory, tmp_path_factory):
     the test PostgreSQL session factory (via the async_session context manager
     used inside bundle_loader).
 
-    Runs against _CI_SUBSET (2 bundles) rather than the full 12 to keep
-    vanilla-HAPI CI runtime under 60 min.  All 12 bundles are covered nightly
+    Runs against _CI_SUBSET (2 bundles) rather than the full manifest to keep
+    vanilla-HAPI CI runtime under 60 min.  All manifest bundles are covered nightly
     by the bake job (scripts/load_connectathon_bundles.py).
 
     Returns a dict with keys:

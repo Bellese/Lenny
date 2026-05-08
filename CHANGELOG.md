@@ -7,6 +7,13 @@ All notable changes to this project will be documented in this file.
 ### Fixed
 - **"Test connection" on the seeded Local CDR and "Verify with sample evaluate" on the seeded Local MCS now succeed in local Docker.** Both flows previously returned `SSRF protection: must use https for non-localhost hosts` because `_validate_ssrf_url`'s http allowlist was just `{localhost, 127.0.0.1, ::1}` — the seeded connections use Docker service hostnames (`hapi-fhir-cdr`, `hapi-fhir-measure`) baked into `DEFAULT_CDR_URL` / `MEASURE_ENGINE_URL`. The allowlist now extends with hosts parsed from those settings at import time. Arbitrary http hosts and private/loopback IP literals remain blocked. (#302)
 
+## [0.0.17.10] - 2026-05-08
+
+### Changed
+- **README Quick Start simplified.** Removed stale GHCR auth (`docker login`) and `CDR_FERNET_KEY` setup steps from the two-command quickstart. GHCR images are public; `CDR_FERNET_KEY` is only needed when saving custom CDR credentials via Settings.
+- **README resource baselines re-baselined to 7 active measures.** Updated from pre-removal counts (Patient: 568, Measure: ≥12, Library: 24, ValueSet: ≈123) to post-removal actuals (Patient: 319, Measure: 8 [7 connectathon + 1 seed], Library: 18, ValueSet: 78). Documents that 5 measures were removed 2026-05-06 (issue #278).
+- **"12 bundles" language updated to count-agnostic form** in `.env.example`, `.github/workflows/connectathon-measures.yml`, `scripts/inventory-bundles.py`, `backend/tests/integration/test_smart_load.py`, and `backend/app/services/validation.py` so the count does not drift when measures are added or removed.
+
 ## [0.0.17.9] - 2026-05-08
 
 ### Added
