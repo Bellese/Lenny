@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -18,11 +18,23 @@ from app.models.connection_base import ConnectionKind
 from app.models.job import Job
 from app.models.mcs_config import MCSConfig
 from app.routes.connection_factory import make_connection_router
-from app.services.fhir_client import wipe_measure_definitions
+from app.services.fhir_client import probe_mcs_data_requirements, wipe_measure_definitions
+from app.services.fhir_errors import (
+    HINT_BY_STATUS,
+    FhirOperationError,
+    build_error_envelope,
+    hint_for_network_exception,
+    sanitize_url,
+)
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/settings", tags=["settings"])
+
+# Hard cap on `request_timeout_seconds` to prevent timeout-as-DoS-vector. 1800s
+# (30 min) covers the slowest legitimate measure-evaluation runs we've seen at
+# the connectathon while still bounding worst-case worker hold time.
+_MAX_REQUEST_TIMEOUT_SECONDS = 1800
 
 
 # ---------------------------------------------------------------------------
@@ -38,6 +50,7 @@ class CDRConnectionResponse(BaseModel):
     is_active: bool
     is_default: bool
     is_read_only: bool
+    request_timeout_seconds: int
 
     model_config = {"from_attributes": True}
 
@@ -48,6 +61,7 @@ class CDRConnectionCreate(BaseModel):
     auth_type: str = "none"
     auth_credentials: dict | None = None
     is_read_only: bool = False
+    request_timeout_seconds: int = Field(default=30, ge=1, le=_MAX_REQUEST_TIMEOUT_SECONDS)
 
 
 class TestConnectionRequest(BaseModel):
@@ -68,6 +82,7 @@ class MCSConnectionResponse(BaseModel):
     auth_type: str
     is_active: bool
     is_default: bool
+    request_timeout_seconds: int
 
     model_config = {"from_attributes": True}
 
@@ -77,6 +92,7 @@ class MCSConnectionCreate(BaseModel):
     mcs_url: str
     auth_type: str = "none"
     auth_credentials: dict | None = None
+    request_timeout_seconds: int = Field(default=30, ge=1, le=_MAX_REQUEST_TIMEOUT_SECONDS)
 
 
 class MCSTestConnectionRequest(BaseModel):
@@ -124,6 +140,78 @@ router.include_router(
         audit_logger=logger,
     )
 )
+
+
+# ---------------------------------------------------------------------------
+# MCS deep-probe — Verify with sample evaluate
+# ---------------------------------------------------------------------------
+
+
+@router.post("/mcs-connections/{connection_id}/probe")
+async def probe_mcs_connection(
+    connection_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Deep-probe an MCS connection by exercising `$data-requirements`.
+
+    Stricter than test-connection (which only fetches /metadata): this picks
+    a measure on the MCS and confirms the engine can resolve its Library +
+    ValueSets. Returns success summary on green; raises HTTPException with
+    the standard FHIR error envelope on any failure.
+    """
+    cfg = await session.get(MCSConfig, connection_id)
+    if cfg is None:
+        raise HTTPException(status_code=404, detail="MCS connection not found")
+
+    try:
+        return await probe_mcs_data_requirements(
+            mcs_url=cfg.mcs_url,
+            auth_type=cfg.auth_type,
+            auth_credentials=cfg.auth_credentials,
+        )
+    except FhirOperationError as exc:
+        logger.warning(
+            "mcs probe failed",
+            extra={
+                "mcs_url": sanitize_url(cfg.mcs_url),
+                "status_code": exc.status_code,
+                "error": sanitize_error(exc),
+            },
+        )
+        if exc.status_code is not None:
+            hint = HINT_BY_STATUS.get(exc.status_code)
+        else:
+            hint = hint_for_network_exception(exc.__cause__) if exc.__cause__ else None
+        # Empty-MCS path: status 200 with a synthesized OperationOutcome.
+        # Surface as 200 + envelope so the frontend can render the warning
+        # without treating it as a hard failure.
+        if exc.status_code == 200 and exc.outcome is not None:
+            return {
+                "status": "warning",
+                "outcome": exc.outcome.raw,
+                "url": sanitize_url(exc.url),
+            }
+        http_status = exc.status_code if exc.status_code and exc.status_code >= 400 else 502
+        raise HTTPException(
+            status_code=http_status,
+            detail=build_error_envelope(
+                operation="probe-data-requirements",
+                url=exc.url,
+                status_code=exc.status_code,
+                outcome=exc.outcome,
+                latency_ms=exc.latency_ms,
+                hint=hint,
+            ),
+        )
+    except ValueError as exc:
+        # SSRF rejection from _validate_ssrf_url
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "security", "diagnostics": sanitize_error(exc)}],
+            },
+        )
 
 
 # ---------------------------------------------------------------------------

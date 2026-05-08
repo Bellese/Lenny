@@ -4,6 +4,53 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.8] - 2026-05-08
+
+### Security
+- **Cap `request_timeout_seconds` at 1800s in CDR + MCS create schemas.** The DB column has always been settable, but the Pydantic create schemas didn't expose it; now they do, with `Field(default=30, ge=1, le=1800)`. Closes the timeout-as-DoS-vector identified in the multi-MCS design doc — an attacker (or a misconfigured admin) can no longer set a 24-hour timeout to hold a backend worker. 8 new regression tests cover the cap, zero-rejection, the within-cap accept path, and the 30s default. Surfaced via the `/cso`-style audit at PR #6's threat-surface walkthrough.
+- **Sanitize URLs in `fhir_client.py` log payloads.** 10 call sites (`logger.info` / `logger.warning` with `extra={"url": ...}` or `extra={"valueset_url": ...}`) were emitting raw URLs that could carry embedded credentials (`https://user:pass@host/fhir`) if a connection had been configured with userinfo in the URL. All call sites now wrap the URL through the existing `sanitize_url()` helper, which strips userinfo, redacts auth-shaped query params, and replaces single-label internal Docker hostnames with `[host]`. No prior incident — defense-in-depth fix from the same audit.
+
+### Added
+- **`CONTRIBUTING.md` — "How to add a connection kind" recipe.** Five-step walkthrough (model + migration + factory wiring + dependency + frontend) with the MCS implementation called out as the canonical reference. Captures the things a contributor would otherwise re-derive: the partial-unique-index pattern, the SAME factory mounting two `include_router` calls, where to NOT touch (the factory itself, EncryptedJSON), and the documented out-of-scope decisions (per-kind key isolation, CDR_FERNET_KEY env-var rename).
+
+### Changed
+- **`CDRConnectionResponse` and `MCSConnectionResponse`** now include `request_timeout_seconds` so the field round-trips. Previously the create schemas didn't expose it at all; now both response and create schemas do.
+
+## [0.0.17.7] - 2026-05-07
+
+### Added
+- **Responsive topbar — collapse to a single "Connections" pill below 768 px.** New `HealthChipGroup` component renders the array of per-kind `HealthIndicator` chips on wider viewports and switches to an aggregate pill + popover on mobile (44 px touch targets per chip, click-outside / Esc closes the popover). Aggregate dot color is the worst-case across kinds: green if all healthy, red if any unreachable, gray otherwise. Container queries weren't usable because the topbar's intrinsic width depends on its children; falls back to a viewport media query.
+- **"Verify with sample evaluate" button on the active MCS connection card row.** Backend gains `POST /settings/mcs-connections/{id}/probe`; the route delegates to a new `probe_mcs_data_requirements()` helper in `fhir_client.py` that runs `Measure?_count=1` on the MCS, then calls `$data-requirements` against the first measure with a benign `periodStart=2024-01-01`/`periodEnd=2024-12-31` window. This is a stricter probe than `test-connection` (which only fetches `/metadata`) — it forces the engine to resolve a Library + ValueSets, which is the failure surface attendees actually hit at the connectathon. Empty-MCS path is non-fatal: returns `{status: "warning", outcome: ...}` with the OperationOutcome rendered via the existing `OperationOutcomeView`.
+
+### Changed
+- **Health polling pauses when the document is hidden.** Previously the 30 s `setInterval` fired regardless of tab visibility; on a session with multiple Lenny tabs open this was a small but real thundering-herd cost. The polling loop now starts/stops based on `document.visibilityState`, so background tabs don't probe `/health`. Refresh-on-visible (added in v0.0.17.6) is preserved — when a tab becomes visible again it does one immediate probe before re-arming the interval.
+- **Topbar chips are always tabbable with full keyboard activation.** `HealthIndicator` is now `tabIndex={0}` in every state (was `0` only when interactive); `role="button"` is set whenever `onClick` is provided regardless of state; Enter/Space activate the click handler; Esc closes the popover. ARIA label is `"{kind}: {name}, {status}"` per the saved spec, so screen readers get the full chip story instead of just the connection name.
+
+## [0.0.17.6] - 2026-05-07
+
+### Added
+- **Multi-MCS connection management UI** — frontend exposes the backend MCS connection-management surface from PRs #293/#294. Settings → Connections now stacks two cards (CDR Connections, MCS Connections) via a reusable `ConnectionSection` component, each with its own list/add/edit/activate/delete controls. `ConnectionModal` is `kind`-driven via a `KIND_SPECS` map (`cdr`, `mcs`); URL field name (`cdr_url` vs `mcs_url`), labels, and the `is_read_only` checkbox (CDR-only) all derive from the spec. One modal serves both kinds; future kinds add a `KIND_SPECS` entry.
+- **Topbar chip per connection kind** — replaces the single CDR `HealthIndicator` with an array of chips (one per kind). Four-state machine: `pending` (gray, initial), `healthy` (green), `unreachable` (red, hover tooltip with hint + sanitized URL), `none` (gray, plumbed for future "no active connection" case). Debounced: 2 consecutive failed probes before flipping to `unreachable`. Cadence: `setInterval` at 30 s + Page Visibility refresh on tab focus (no thundering herd on visibilitychange). Click on `unreachable`/`none` navigates to `/settings#{kind}-connections`.
+- **7 new MCS API client functions** in `frontend/src/api/client.js` — `getMcsConnections`, `createMcsConnection`, `getMcsConnection`, `updateMcsConnection`, `deleteMcsConnection`, `activateMcsConnection`, `testMcsConnection`. Mirror the CDR surface.
+- **`/health` resolves the active MCS via `get_active_mcs`** — was: probed `settings.MEASURE_ENGINE_URL`. Now uses the active row from `mcs_configs` (with the same legacy env-var fallback as `get_active_cdr`). Response gains `measure_engine.name` so the topbar chip can display the connection name.
+
+### Changed
+- **Test-connection routes are now per-kind** — were colliding at `/settings/test-connection` (both CDR and MCS factory instantiations registered the same path; CDR's schema won, so MCS sends were rejected with `field required: cdr_url`). The factory now registers `f"{prefix}/test-connection"`. New paths: CDR `/settings/connections/test-connection`, MCS `/settings/mcs-connections/test-connection`. Frontend `client.js` and 12 backend test callsites updated. This was originally deferred to a follow-up PR; folded in here once it surfaced during smoke testing of the MCS edit modal.
+
+### Known limitations
+- Measures page is not scoped to the active MCS (#296). The list is global, but only measures actually loaded on the active MCS will evaluate successfully. Switching MCS does not re-scope the page.
+- Failed-job detail surfacing is minimal (#297). Today the UI shows "Failed" with little context; backend logs hold the actual cause.
+
+## [0.0.17.5] - 2026-05-07
+
+### Added
+- **Job→MCS snapshot + active-MCS routing for measure evaluation** — every new measure-calculation job now snapshots the active MCS connection (`Job.mcs_id`, `Job.mcs_url`, `Job.mcs_name`) at creation time, mirroring the existing CDR snapshot fields. The orchestrator resolves the snapshot URL when the job runs and threads it into `evaluate_measure(...)` via the new `measure_engine_url` parameter, so jobs run against the MCS that was active at job creation — not whatever's active now. Connectathon attendees can switch between their MCS and a reference MCS without breaking in-flight jobs. Legacy rows with NULL `mcs_url` fall back to `settings.MEASURE_ENGINE_URL` (preserves the historical "always call the env var" behavior for jobs created before #12).
+- **`get_active_mcs()` FastAPI dependency** — parallel of `get_active_cdr()`, returns a `ConnectionContext` with `kind=ConnectionKind.mcs` and the active MCS row's URL/name/timeout.
+- **`ConnectionContext.mcs_url` field + `url` kind-agnostic property** — each kind populates its own URL field (`cdr_url` for CDR, `mcs_url` for MCS); the `url` property dispatches by `kind`. CDR consumers continue using `ctx.cdr_url` unchanged.
+
+### Changed
+- **`_run_schema_migrations()`** adds `Job.mcs_id` (FK to `mcs_configs.id` ON DELETE SET NULL), `Job.mcs_url`, `Job.mcs_name` — all nullable. Backfill UPDATE populates the snapshot for existing jobs from `MEASURE_ENGINE_URL` so the job-history view doesn't show "(unknown)" on legacy rows. If the env var is unset at migration time, the backfill skips and a warning logs (jobs render "(unknown)" for those rows; the orchestrator's env-var fallback keeps them runnable).
+
 ## [0.0.17.4] - 2026-05-07
 
 ### Added

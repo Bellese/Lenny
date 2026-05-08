@@ -8,9 +8,8 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.db import get_session
-from app.dependencies import CDRContext, get_active_cdr
+from app.dependencies import ConnectionContext, get_active_cdr, get_active_mcs
 from app.services.fhir_errors import HINT_BY_STATUS, hint_for_network_exception, sanitize_url
 from app.services.validation import sanitize_error
 
@@ -41,7 +40,8 @@ def _network_error_details(url: str, exc: Exception, latency_ms: int) -> dict:
 @router.get("/health")
 async def health_check(
     session: AsyncSession = Depends(get_session),
-    cdr: CDRContext = Depends(get_active_cdr),
+    cdr: ConnectionContext = Depends(get_active_cdr),
+    mcs: ConnectionContext = Depends(get_active_mcs),
 ) -> dict:
     """Check connectivity to database, measure engine, and CDR."""
     status: dict = {
@@ -69,18 +69,19 @@ async def health_check(
         }
         status["status"] = "degraded"
 
-    # Measure engine check
-    me_url = f"{settings.MEASURE_ENGINE_URL}/metadata"
+    # Measure engine check (active MCS connection)
+    me_url = f"{mcs.mcs_url}/metadata"
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=3.0) as client:
             resp = await client.get(me_url)
             latency_ms = round((time.monotonic() - t0) * 1000)
             if resp.status_code == 200:
-                status["measure_engine"] = {"status": "connected"}
+                status["measure_engine"] = {"status": "connected", "name": mcs.name}
             else:
                 status["measure_engine"] = {
                     "status": "disconnected",
+                    "name": mcs.name,
                     "error": f"HTTP {resp.status_code}",
                     "error_details": _http_error_details(me_url, resp.status_code, latency_ms),
                 }
@@ -89,6 +90,7 @@ async def health_check(
         latency_ms = round((time.monotonic() - t0) * 1000)
         status["measure_engine"] = {
             "status": "disconnected",
+            "name": mcs.name,
             "error": sanitize_error(exc)[:200],
             "error_details": _network_error_details(me_url, exc, latency_ms),
         }

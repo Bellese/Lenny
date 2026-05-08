@@ -181,9 +181,29 @@ async def _run_schema_migrations(conn) -> None:
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_auth_type VARCHAR(32)",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS cdr_auth_credentials JSONB",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS delete_requested BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_id INTEGER REFERENCES mcs_configs(id) ON DELETE SET NULL",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_url VARCHAR(1024)",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_name VARCHAR(512)",
             "ALTER TABLE validation_runs ADD COLUMN IF NOT EXISTS delete_requested BOOLEAN NOT NULL DEFAULT FALSE",
         ]:
             await conn.execute(text(stmt))
+
+        # Backfill MCS snapshot for jobs created before #12. Existing rows
+        # ran against `MEASURE_ENGINE_URL` (the only MCS Lenny knew at the
+        # time), so populate them with that value + the seeded
+        # `Local Measure Engine` name. If the env var is unset, leaves NULL
+        # and logs a warning — UI displays "(unknown)" for those rows.
+        env_measure_url = app_settings.MEASURE_ENGINE_URL or ""
+        if env_measure_url:
+            await conn.execute(
+                text("UPDATE jobs SET   mcs_url = :url,   mcs_name = 'Local Measure Engine' WHERE mcs_url IS NULL"),
+                {"url": env_measure_url},
+            )
+        else:
+            logger.warning(
+                "MEASURE_ENGINE_URL is unset — skipping mcs_url backfill on existing jobs",
+                extra={"event": "mcs_backfill_skipped"},
+            )
 
         # Add warning_message to bundle_uploads if the table exists
         await conn.execute(

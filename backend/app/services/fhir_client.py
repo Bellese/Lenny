@@ -20,6 +20,7 @@ import httpx
 from app.config import settings
 from app.models.config import AuthType
 from app.services.fhir_errors import (
+    FhirIssue,
     FhirOperationError,
     FhirOperationOutcome,
     sanitize_url,
@@ -224,7 +225,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
         url: Optional[str] = f"{cdr_url}/Patient?_count=100"
         async with httpx.AsyncClient(timeout=60.0) as client:
             while url:
-                logger.info("Fetching patients", extra={"url": url})
+                logger.info("Fetching patients", extra={"url": sanitize_url(url)})
                 resp = await client.get(url, headers=auth_headers)
                 resp.raise_for_status()
                 bundle = resp.json()
@@ -244,7 +245,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
                         elif next_url:
                             logger.warning(
                                 "SSRF: pagination next link rejected (origin mismatch)",
-                                extra={"url": next_url},
+                                extra={"url": sanitize_url(next_url)},
                             )
                         break
         logger.info("Gathered patients", extra={"count": len(patients)})
@@ -263,7 +264,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
             while url:
                 logger.info(
                     "Fetching patient data",
-                    extra={"patient_id": patient_id, "url": url},
+                    extra={"patient_id": patient_id, "url": sanitize_url(url)},
                 )
                 resp = await client.get(url, headers=auth_headers)
                 resp.raise_for_status()
@@ -285,7 +286,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
                         elif next_url:
                             logger.warning(
                                 "SSRF: pagination next link rejected (origin mismatch)",
-                                extra={"url": next_url},
+                                extra={"url": sanitize_url(next_url)},
                             )
                         break
         logger.info(
@@ -422,7 +423,7 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                                     elif next_url:
                                         logger.warning(
                                             "SSRF: pagination next link rejected (origin mismatch)",
-                                            extra={"url": next_url},
+                                            extra={"url": sanitize_url(next_url)},
                                         )
                                     break
                 except Exception as exc:
@@ -487,17 +488,19 @@ def wait_for_valueset_expansion(base_url: str, valueset_urls: list[str], timeout
                 lookup.raise_for_status()
                 entries = lookup.json().get("entry", [])
                 if not entries:
-                    logger.warning("ValueSet not found for expansion wait", extra={"valueset_url": valueset_url})
+                    logger.warning(
+                        "ValueSet not found for expansion wait", extra={"valueset_url": sanitize_url(valueset_url)}
+                    )
                     continue
                 valueset_id = entries[0].get("resource", {}).get("id")
                 if not valueset_id:
-                    logger.warning("ValueSet lookup returned no id", extra={"valueset_url": valueset_url})
+                    logger.warning("ValueSet lookup returned no id", extra={"valueset_url": sanitize_url(valueset_url)})
                     continue
                 pending[valueset_url] = valueset_id
             except Exception as exc:
                 logger.warning(
                     "ValueSet lookup failed before expansion wait",
-                    extra={"valueset_url": valueset_url, "error": str(exc)},
+                    extra={"valueset_url": sanitize_url(valueset_url), "error": str(exc)},
                 )
 
         deadline = time.monotonic() + timeout_s
@@ -524,7 +527,7 @@ def wait_for_valueset_expansion(base_url: str, valueset_urls: list[str], timeout
         for valueset_url, valueset_id in pending.items():
             logger.warning(
                 "ValueSet expansion timed out",
-                extra={"valueset_url": valueset_url, "valueset_id": valueset_id, "polls": polls},
+                extra={"valueset_url": sanitize_url(valueset_url), "valueset_id": valueset_id, "polls": polls},
             )
 
     return expanded
@@ -660,15 +663,24 @@ async def evaluate_measure(
     patient_id: str,
     period_start: str,
     period_end: str,
+    measure_engine_url: str | None = None,
 ) -> dict[str, Any]:
     """Call $evaluate-measure on the measure engine for a single patient.
+
+    Args:
+        measure_engine_url: Base URL of the MCS to call. Defaults to
+            `settings.MEASURE_ENGINE_URL` for back-compat with callers that
+            haven't yet been wired to per-job active-MCS context. The
+            orchestrator passes `job.mcs_url` so jobs run against the MCS
+            that was active at job creation time, not whatever's active now.
 
     Raises FhirOperationError (with the MCS OperationOutcome preserved) on
     4xx/5xx responses and on 200 OK where the body is an OperationOutcome
     instead of a MeasureReport.
     """
+    base_url = measure_engine_url or settings.MEASURE_ENGINE_URL
     url = (
-        f"{settings.MEASURE_ENGINE_URL}/Measure/{measure_id}"
+        f"{base_url}/Measure/{measure_id}"
         f"/$evaluate-measure"
         f"?periodStart={period_start}"
         f"&periodEnd={period_end}"
@@ -986,7 +998,10 @@ async def list_groups(
                     if next_url and _same_origin(cdr_url, next_url):
                         url = next_url
                     elif next_url:
-                        logger.warning("SSRF: pagination next link rejected (origin mismatch)", extra={"url": next_url})
+                        logger.warning(
+                            "SSRF: pagination next link rejected (origin mismatch)",
+                            extra={"url": sanitize_url(next_url)},
+                        )
                     break
     return groups
 
@@ -1045,6 +1060,125 @@ async def list_measures() -> dict[str, Any]:
         resp = await client.get(url)
         resp.raise_for_status()
         return resp.json()
+
+
+async def probe_mcs_data_requirements(
+    mcs_url: str,
+    auth_type: str = "none",
+    auth_credentials: Optional[dict] = None,
+) -> dict[str, Any]:
+    """Deep-probe an MCS by exercising `$data-requirements` on one of its measures.
+
+    Confirms the MCS can resolve a Measure's Library + ValueSets — a stricter
+    test than `verify_fhir_connection` (which only fetches /metadata). Picks
+    the first available measure on the MCS via `Measure?_count=1`, then calls
+    `$data-requirements` against it.
+
+    Returns a summary dict on success. Raises `FhirOperationError` on any
+    failure path so callers can convert to the standard error envelope.
+    """
+    _validate_ssrf_url(mcs_url, label="mcs_url")
+    headers = await _build_auth_headers(auth_type, auth_credentials)
+
+    # Step 1: find one measure on the MCS.
+    list_url = f"{mcs_url}/Measure?_count=1"
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(list_url, headers=headers)
+            list_latency_ms = round((time.monotonic() - t0) * 1000)
+            if not resp.is_success:
+                outcome = FhirOperationOutcome.from_response(resp)
+                raise FhirOperationError(
+                    operation="probe-data-requirements",
+                    url=list_url,
+                    status_code=resp.status_code,
+                    outcome=outcome,
+                    latency_ms=list_latency_ms,
+                )
+            bundle = resp.json()
+            entries = bundle.get("entry") or []
+            if not entries:
+                # Empty MCS — synthesize an OperationOutcome so the UI can render it.
+                empty_diagnostics = (
+                    "MCS is reachable but has no Measure resources. "
+                    "Load measures via the seed workflow or upload one via "
+                    "the Measures page."
+                )
+                empty_outcome = FhirOperationOutcome(
+                    issues=[FhirIssue(severity="warning", code="not-found", diagnostics=empty_diagnostics)],
+                    raw={
+                        "resourceType": "OperationOutcome",
+                        "issue": [{"severity": "warning", "code": "not-found", "diagnostics": empty_diagnostics}],
+                    },
+                )
+                raise FhirOperationError(
+                    operation="probe-data-requirements",
+                    url=list_url,
+                    status_code=200,
+                    outcome=empty_outcome,
+                    latency_ms=list_latency_ms,
+                )
+            measure = entries[0].get("resource") or {}
+            measure_id = measure.get("id")
+            if not measure_id:
+                raise FhirOperationError(
+                    operation="probe-data-requirements",
+                    url=list_url,
+                    status_code=200,
+                    outcome=None,
+                    latency_ms=list_latency_ms,
+                )
+    except FhirOperationError:
+        raise
+    except Exception as exc:
+        raise FhirOperationError(
+            operation="probe-data-requirements",
+            url=list_url,
+            status_code=None,
+            outcome=None,
+            latency_ms=round((time.monotonic() - t0) * 1000),
+            cause=exc,
+        )
+
+    # Step 2: call $data-requirements on that measure.
+    dr_url = f"{mcs_url}/Measure/{measure_id}/$data-requirements?periodStart=2024-01-01&periodEnd=2024-12-31"
+    t1 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(dr_url, headers=headers)
+            dr_latency_ms = round((time.monotonic() - t1) * 1000)
+            if not resp.is_success:
+                outcome = FhirOperationOutcome.from_response(resp)
+                raise FhirOperationError(
+                    operation="probe-data-requirements",
+                    url=dr_url,
+                    status_code=resp.status_code,
+                    outcome=outcome,
+                    latency_ms=dr_latency_ms,
+                )
+            library = resp.json()
+            requirements = library.get("dataRequirement") or []
+            return {
+                "status": "ok",
+                "measure_id": measure_id,
+                "measure_name": measure.get("name") or measure.get("title") or measure_id,
+                "data_requirement_count": len(requirements),
+                "list_latency_ms": list_latency_ms,
+                "data_requirements_latency_ms": dr_latency_ms,
+                "url": sanitize_url(dr_url),
+            }
+    except FhirOperationError:
+        raise
+    except Exception as exc:
+        raise FhirOperationError(
+            operation="probe-data-requirements",
+            url=dr_url,
+            status_code=None,
+            outcome=None,
+            latency_ms=round((time.monotonic() - t1) * 1000),
+            cause=exc,
+        )
 
 
 async def verify_fhir_connection(

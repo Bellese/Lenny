@@ -24,8 +24,14 @@
   flex-shrink: 0;
 }
 
-.dotOk  { background: var(--ok); }
-.dotErr { background: var(--text-dim); }
+.dotOk      { background: var(--ok); }
+.dotErr     { background: var(--err, #d04848); }
+.dotPending { background: var(--text-dim); }
+.dotNone    { background: var(--text-dim); }
+
+.chipClickable {
+  cursor: pointer;
+}
 
 .popover {
   position: absolute;

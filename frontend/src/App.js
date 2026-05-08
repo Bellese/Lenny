@@ -11,7 +11,7 @@ import {
   MeasuresIcon, JobsIcon, ResultsIcon, ValidateIcon,
   SettingsIcon, SearchIcon, XIcon, SunIcon, MoonIcon,
 } from './components/Icons';
-import HealthIndicator from './components/HealthIndicator';
+import HealthChipGroup from './components/HealthChipGroup';
 import SearchContext from './contexts/SearchContext';
 
 const ALL_NAV_ITEMS = [
@@ -37,6 +37,14 @@ const SEARCH_PLACEHOLDER = {
   '/settings': 'Search…',
 };
 
+const HEALTH_KINDS = [
+  { kind: 'cdr', healthKey: 'cdr', settingsHash: '#cdr-connections' },
+  { kind: 'mcs', healthKey: 'measure_engine', settingsHash: '#mcs-connections' },
+];
+
+// Debounce: only flip to 'unreachable' after this many consecutive failed probes.
+const FAILURE_DEBOUNCE = 2;
+
 function MenuIcon() {
   return (
     <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
@@ -49,11 +57,13 @@ export default function App() {
   const location = useLocation();
   const navigate = useNavigate();
   const [navOpen, setNavOpen] = useState(false);
-  const [cdrStatus, setCdrStatus] = useState('unknown');
-  const [cdrName, setCdrName] = useState('');
-  const [cdrErrorDetails, setCdrErrorDetails] = useState(null);
+  // Per-kind chip state: { cdr: {...}, mcs: {...} }. Each entry: { state, name, errorDetails }.
+  const [chips, setChips] = useState({
+    cdr: { state: 'pending', name: '', errorDetails: null },
+    mcs: { state: 'pending', name: '', errorDetails: null },
+  });
+  const failureCounts = useRef({ cdr: 0, mcs: 0 });
   const [theme, setTheme] = useState(() => {
-    // One-time migration from the legacy mct2-theme key (renamed 2026-05).
     const current = localStorage.getItem('lenny-theme');
     if (current) return current;
     const legacy = localStorage.getItem('mct2-theme');
@@ -68,39 +78,77 @@ export default function App() {
   const [features, setFeatures] = useState({ validation: false });
   const searchRef = useRef(null);
 
-  // Apply dark class to html element
   useEffect(() => {
     document.documentElement.classList.toggle('dark', theme === 'dark');
     localStorage.setItem('lenny-theme', theme);
   }, [theme]);
 
-  // Clear search on navigation
   useEffect(() => {
     setQuery('');
     setNavOpen(false);
   }, [location.pathname]);
 
-  // CDR health check
+  // Multi-kind health probe
   const checkHealth = useCallback(async () => {
+    let health;
     try {
-      const health = await getHealth();
-      setCdrStatus(health?.cdr?.status ?? 'unknown');
-      setCdrName(health?.cdr?.name ?? '');
-      setCdrErrorDetails(health?.cdr?.error_details ?? null);
+      health = await getHealth();
     } catch {
-      setCdrStatus('unknown');
-      setCdrName('');
-      setCdrErrorDetails(null);
+      // Network error — bump failure counts for both kinds.
+      const next = {};
+      for (const { kind } of HEALTH_KINDS) {
+        failureCounts.current[kind] = failureCounts.current[kind] + 1;
+        const nextState = failureCounts.current[kind] >= FAILURE_DEBOUNCE ? 'unreachable' : 'pending';
+        next[kind] = { state: nextState, name: '', errorDetails: null };
+      }
+      setChips(prev => ({ ...prev, ...next }));
+      return;
     }
+
+    const next = {};
+    for (const { kind, healthKey } of HEALTH_KINDS) {
+      const section = health?.[healthKey] || {};
+      const ok = section.status === 'connected' || section.status === 'healthy';
+      if (ok) {
+        failureCounts.current[kind] = 0;
+        next[kind] = { state: 'healthy', name: section.name || '', errorDetails: null };
+      } else {
+        failureCounts.current[kind] = failureCounts.current[kind] + 1;
+        const debounced = failureCounts.current[kind] >= FAILURE_DEBOUNCE;
+        next[kind] = {
+          state: debounced ? 'unreachable' : 'pending',
+          name: section.name || '',
+          errorDetails: section.error_details || null,
+        };
+      }
+    }
+    setChips(prev => ({ ...prev, ...next }));
   }, []);
 
   useEffect(() => {
-    checkHealth();
-    const interval = setInterval(checkHealth, 30000);
-    return () => clearInterval(interval);
+    let interval = null;
+    const start = () => {
+      if (interval !== null) return;
+      checkHealth();
+      interval = setInterval(checkHealth, 30000);
+    };
+    const stop = () => {
+      if (interval === null) return;
+      clearInterval(interval);
+      interval = null;
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === 'visible') start();
+      else stop();
+    };
+    if (document.visibilityState === 'visible') start();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
   }, [checkHealth]);
 
-  // Load feature flags from admin settings
   useEffect(() => {
     getAdminSettings()
       .then(s => setFeatures({ validation: s.validation_enabled ?? false }))
@@ -110,7 +158,6 @@ export default function App() {
     return () => window.removeEventListener('admin-settings-changed', h);
   }, []);
 
-  // Keyboard shortcuts
   useEffect(() => {
     const h = (e) => {
       const active = document.activeElement;
@@ -145,7 +192,8 @@ export default function App() {
   const basePath = '/' + location.pathname.split('/')[1];
   const pageTitle = PAGE_TITLE[basePath] || 'Lenny';
   const searchPlaceholder = SEARCH_PLACEHOLDER[basePath] || 'Search…';
-  const cdrOk = cdrStatus === 'connected' || cdrStatus === 'healthy';
+  const cdrChip = chips.cdr;
+  const cdrOk = cdrChip.state === 'healthy';
 
   return (
     <SearchContext.Provider value={{ query, setQuery }}>
@@ -176,7 +224,11 @@ export default function App() {
           <span className={styles.crumb}>{pageTitle}</span>
           <div className={styles.spacer} />
           <div className={styles.topbarRight}>
-            <HealthIndicator status={cdrStatus} name={cdrName} errorDetails={cdrErrorDetails} />
+            <HealthChipGroup
+              chips={chips}
+              kinds={HEALTH_KINDS}
+              onChipClick={(hash) => navigate(`/settings${hash}`)}
+            />
             <div className={styles.searchWrap}>
               <SearchIcon className={styles.searchIcon} />
               <input
@@ -232,7 +284,7 @@ export default function App() {
             <span className={styles.navIcon}>
               <span className={`${styles.smallDot} ${cdrOk ? styles.smallDotOk : styles.smallDotErr}`} />
             </span>
-            <span className={styles.navLabel}>{cdrName || 'Local CDR'}</span>
+            <span className={styles.navLabel}>{cdrChip.name || 'Local CDR'}</span>
           </div>
 
           <NavLink
@@ -246,7 +298,7 @@ export default function App() {
           <div className={styles.statusFooter}>
             <div
               className={styles.statusRow}
-              title={!cdrOk && cdrErrorDetails?.hint ? cdrErrorDetails.hint : undefined}
+              title={!cdrOk && cdrChip.errorDetails?.hint ? cdrChip.errorDetails.hint : undefined}
             >
               <span className={`${styles.statusDot} ${cdrOk ? styles.statusDotOk : ''}`} />
               {cdrOk ? 'All services healthy' : 'CDR unavailable'}

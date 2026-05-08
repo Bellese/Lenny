@@ -72,6 +72,51 @@ async def test_create_connection_ssrf_imds_blocked(client):
     assert "SSRF protection" in diag
 
 
+async def test_create_connection_rejects_oversized_request_timeout(client):
+    """request_timeout_seconds is capped at 1800s (design-doc threat surface #3)."""
+    payload = {
+        "name": "DoS Timeout",
+        "cdr_url": "https://example.com/fhir",
+        "auth_type": "none",
+        "request_timeout_seconds": 86400,
+    }
+    resp = await client.post("/settings/connections", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_create_connection_rejects_zero_request_timeout(client):
+    """request_timeout_seconds must be >= 1."""
+    payload = {
+        "name": "Zero Timeout",
+        "cdr_url": "https://example.com/fhir",
+        "auth_type": "none",
+        "request_timeout_seconds": 0,
+    }
+    resp = await client.post("/settings/connections", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_create_connection_accepts_within_cap_request_timeout(client):
+    """Within-cap values round-trip in the response."""
+    payload = {
+        "name": "Long-but-legal",
+        "cdr_url": "https://example.com/fhir",
+        "auth_type": "none",
+        "request_timeout_seconds": 1200,
+    }
+    resp = await client.post("/settings/connections", json=payload)
+    assert resp.status_code == 201
+    assert resp.json()["request_timeout_seconds"] == 1200
+
+
+async def test_create_connection_defaults_request_timeout_to_30(client):
+    """Default request_timeout_seconds is 30 — preserves prior behavior."""
+    payload = {"name": "Default Timeout", "cdr_url": "https://example.com/fhir", "auth_type": "none"}
+    resp = await client.post("/settings/connections", json=payload)
+    assert resp.status_code == 201
+    assert resp.json()["request_timeout_seconds"] == 30
+
+
 async def test_create_connection_invalid_auth_type(client):
     """POST with an unsupported auth_type returns 400."""
     payload = {"name": "Bad Auth", "cdr_url": "https://example.com/fhir", "auth_type": "oauth2"}
@@ -370,7 +415,7 @@ async def test_test_connection_success(client):
         return_value=mock_result,
     ):
         resp = await client.post(
-            "/settings/test-connection",
+            "/settings/connections/test-connection",
             json={"cdr_url": "http://example.com/fhir"},
         )
 
@@ -388,7 +433,7 @@ async def test_test_connection_failure(client):
         side_effect=ConnectionError("Connection refused"),
     ):
         resp = await client.post(
-            "/settings/test-connection",
+            "/settings/connections/test-connection",
             json={"cdr_url": "http://bad-server.example.com/fhir"},
         )
 
@@ -415,7 +460,7 @@ async def test_test_connection_401_surfaces_auth_hint(client):
         side_effect=exc,
     ):
         resp = await client.post(
-            "/settings/test-connection",
+            "/settings/connections/test-connection",
             json={"cdr_url": "http://example.com/fhir"},
         )
 
@@ -448,7 +493,7 @@ async def test_test_connection_connect_error_surfaces_network_hint(client):
         side_effect=exc,
     ):
         resp = await client.post(
-            "/settings/test-connection",
+            "/settings/connections/test-connection",
             json={"cdr_url": "http://bad-server.example.com/fhir"},
         )
 
@@ -476,7 +521,7 @@ async def test_test_connection_success_includes_response_time(client):
         return_value=mock_result,
     ):
         resp = await client.post(
-            "/settings/test-connection",
+            "/settings/connections/test-connection",
             json={"cdr_url": "http://example.com/fhir"},
         )
 
@@ -493,7 +538,7 @@ async def test_test_connection_smart_missing_credentials(client):
         new_callable=AsyncMock,
     ) as mock_verify:
         resp = await client.post(
-            "/settings/test-connection",
+            "/settings/connections/test-connection",
             json={
                 "cdr_url": "http://example.com/fhir",
                 "auth_type": "smart",
@@ -510,7 +555,7 @@ async def test_test_connection_smart_missing_credentials(client):
 async def test_test_connection_invalid_auth_type(client):
     """POST /settings/test-connection with an invalid auth_type returns 400."""
     resp = await client.post(
-        "/settings/test-connection",
+        "/settings/connections/test-connection",
         json={"cdr_url": "http://example.com/fhir", "auth_type": "oauth2"},
     )
     assert resp.status_code == 400
@@ -532,7 +577,7 @@ async def test_test_connection_failure_does_not_leak_hostname(client):
         side_effect=ConnectionError("Cannot connect to http://hapi-fhir-cdr:8080/fhir"),
     ):
         resp = await client.post(
-            "/settings/test-connection",
+            "/settings/connections/test-connection",
             json={"cdr_url": "http://hapi-fhir-cdr:8080/fhir"},
         )
 
