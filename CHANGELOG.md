@@ -4,6 +4,9 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **"Test connection" on the seeded Local CDR and "Verify with sample evaluate" on the seeded Local MCS now succeed in local Docker.** Both flows previously returned `SSRF protection: must use https for non-localhost hosts` because `_validate_ssrf_url`'s http allowlist was just `{localhost, 127.0.0.1, ::1}` — the seeded connections use Docker service hostnames (`hapi-fhir-cdr`, `hapi-fhir-measure`) baked into `DEFAULT_CDR_URL` / `MEASURE_ENGINE_URL`. The allowlist now extends with hosts parsed from those settings at import time. Arbitrary http hosts and private/loopback IP literals remain blocked. (#302)
+
 ## [0.0.17.9] - 2026-05-08
 
 ### Added

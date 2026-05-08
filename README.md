@@ -43,7 +43,7 @@ Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (HAPI im
 2. **Jobs** — Create a calculation job: select a measure, set the measurement period, optionally filter by FHIR Group, click Calculate
 3. **Results** — Inspect aggregate population summaries and drill into individual patient results
 4. **Validation** — Upload a FHIR test bundle with expected population results; Lenny runs the measure and compares actual vs. expected populations, reporting pass/fail per patient *(hidden by default; enable via Settings → Admin → Features → Validation toggle)*
-5. **Settings** — Configure your organization's clinical data repository (CDR) connection
+5. **Settings** — Manage clinical data repository (CDR) and measure calculation server (MCS) connections. Add multiple of each, switch the active one, test connectivity per connection (with a deeper "Verify with sample evaluate" probe on the active MCS). The active CDR provides patient/clinical data; the active MCS runs `$evaluate-measure`. Useful at connectathons for swapping between your own server and a reference server.
 
 ## Validation Pipeline
 
