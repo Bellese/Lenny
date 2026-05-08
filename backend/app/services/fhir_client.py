@@ -68,7 +68,20 @@ class BundleUploadResult:
 
 
 # Hosts explicitly allowed for local dev even though they're loopback/private.
-_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}
+# Includes Docker service hostnames parsed from the configured default CDR and
+# MCS URLs so the seeded "Local CDR" / "Local Measure Engine" connections pass
+# the http+non-localhost guard. Set is built once at import time — settings are
+# immutable for the process lifetime.
+def _seeded_internal_hosts() -> set[str]:
+    hosts: set[str] = set()
+    for url in (settings.DEFAULT_CDR_URL, settings.MEASURE_ENGINE_URL):
+        host = urlparse(url or "").hostname
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+_LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"} | _seeded_internal_hosts()
 
 
 def _is_blocked_ip(host: str) -> bool:
@@ -88,7 +101,10 @@ def _validate_ssrf_url(url: str, label: str = "URL") -> None:
     """Reject URLs that could be used for SSRF attacks.
 
     Rules:
-    - Only https is allowed unless the host is localhost/127.0.0.1/::1 (local dev).
+    - Only https is allowed unless the host is in `_LOCAL_HOSTS` — that's
+      localhost/127.0.0.1/::1 plus the Docker service hostnames parsed from
+      `settings.DEFAULT_CDR_URL` and `settings.MEASURE_ENGINE_URL` (so the
+      seeded local CDR/MCS connections work without TLS).
     - Raw IP literals that are private, loopback, or link-local are rejected unless
       the host is in the local dev allowlist.  This covers RFC-1918, 169.254.0.0/16
       (AWS IMDS), IPv6 loopback, link-local, and ULA ranges.
