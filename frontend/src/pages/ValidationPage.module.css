@@ -26,15 +26,18 @@
 }
 
 .sub {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-muted);
   margin-top: 4px;
+  max-width: 640px;
 }
 
 .headerActions {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-shrink: 0;
+  margin-left: 24px;
 }
 
 .btnPrimary {
@@ -102,6 +105,13 @@
 }
 
 .kpiValAccent { color: var(--accent); }
+
+.kpiCaption {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-top: 6px;
+  line-height: 1.35;
+}
 
 /* Card */
 .card {

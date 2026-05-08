@@ -174,7 +174,7 @@ export default function ValidationPage() {
         <div>
           <div className={styles.eyebrow}>Testing</div>
           <h1 className={styles.title}>Validation</h1>
-          <div className={styles.sub}>Run measures against known test bundles and compare to expected population membership.</div>
+          <div className={styles.sub}>Verify a measure calculates the right populations. Lenny loads a FHIR test bundle (test patients plus expected initial-population, denominator, and numerator counts), re-runs $evaluate-measure against each patient, and flags any patient whose calculated populations don't match the expected values.</div>
         </div>
         <div className={styles.headerActions}>
           <label className={styles.btnGhost}>
@@ -220,13 +220,14 @@ export default function ValidationPage() {
       {/* KPI cards */}
       <div className={styles.kpiRow}>
         {[
-          ['Bundles loaded', String(bundlesLoaded || expected?.total_measures || 0), 'text'],
-          ['Test patients', totalPatients ? String(totalPatients) : '--', 'text'],
-          ['Pass rate', passRate, 'accent'],
-        ].map(([label, val, tone]) => (
+          ['Bundles loaded', String(bundlesLoaded || expected?.total_measures || 0), 'text', 'Test bundles available to validate against'],
+          ['Test patients', totalPatients ? String(totalPatients) : '--', 'text', 'Patients tested across all runs'],
+          ['Pass rate', passRate, 'accent', 'Test patients whose populations matched expected, across all runs'],
+        ].map(([label, val, tone, caption]) => (
           <div key={label} className={styles.kpiCard}>
             <div className={styles.kpiLabel}>{label}</div>
             <div className={`${styles.kpiVal} ${tone === 'accent' ? styles.kpiValAccent : ''}`}>{val}</div>
+            <div className={styles.kpiCaption}>{caption}</div>
           </div>
         ))}
       </div>
