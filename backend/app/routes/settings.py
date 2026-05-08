@@ -131,7 +131,7 @@ router.include_router(
 # ---------------------------------------------------------------------------
 
 _ADMIN_DEFAULTS: dict[str, str] = {
-    "validation_enabled": "true",
+    "validation_enabled": "false",
 }
 
 

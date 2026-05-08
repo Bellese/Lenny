@@ -61,7 +61,7 @@ export default function SettingsPage() {
       const data = await getAdminSettings();
       setAdminSettings(data);
     } catch {
-      setAdminSettings({ validation_enabled: true });
+      setAdminSettings({ validation_enabled: false });
     }
   }, []);
 
@@ -298,7 +298,7 @@ export default function SettingsPage() {
                     </div>
                   </div>
                   <Toggle
-                    checked={adminSettings?.validation_enabled ?? true}
+                    checked={adminSettings?.validation_enabled ?? false}
                     onChange={handleToggleValidation}
                     disabled={adminSaving}
                   />
