@@ -225,7 +225,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
         url: Optional[str] = f"{cdr_url}/Patient?_count=100"
         async with httpx.AsyncClient(timeout=60.0) as client:
             while url:
-                logger.info("Fetching patients", extra={"url": url})
+                logger.info("Fetching patients", extra={"url": sanitize_url(url)})
                 resp = await client.get(url, headers=auth_headers)
                 resp.raise_for_status()
                 bundle = resp.json()
@@ -245,7 +245,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
                         elif next_url:
                             logger.warning(
                                 "SSRF: pagination next link rejected (origin mismatch)",
-                                extra={"url": next_url},
+                                extra={"url": sanitize_url(next_url)},
                             )
                         break
         logger.info("Gathered patients", extra={"count": len(patients)})
@@ -264,7 +264,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
             while url:
                 logger.info(
                     "Fetching patient data",
-                    extra={"patient_id": patient_id, "url": url},
+                    extra={"patient_id": patient_id, "url": sanitize_url(url)},
                 )
                 resp = await client.get(url, headers=auth_headers)
                 resp.raise_for_status()
@@ -286,7 +286,7 @@ class BatchQueryStrategy(DataAcquisitionStrategy):
                         elif next_url:
                             logger.warning(
                                 "SSRF: pagination next link rejected (origin mismatch)",
-                                extra={"url": next_url},
+                                extra={"url": sanitize_url(next_url)},
                             )
                         break
         logger.info(
@@ -423,7 +423,7 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                                     elif next_url:
                                         logger.warning(
                                             "SSRF: pagination next link rejected (origin mismatch)",
-                                            extra={"url": next_url},
+                                            extra={"url": sanitize_url(next_url)},
                                         )
                                     break
                 except Exception as exc:
@@ -488,17 +488,19 @@ def wait_for_valueset_expansion(base_url: str, valueset_urls: list[str], timeout
                 lookup.raise_for_status()
                 entries = lookup.json().get("entry", [])
                 if not entries:
-                    logger.warning("ValueSet not found for expansion wait", extra={"valueset_url": valueset_url})
+                    logger.warning(
+                        "ValueSet not found for expansion wait", extra={"valueset_url": sanitize_url(valueset_url)}
+                    )
                     continue
                 valueset_id = entries[0].get("resource", {}).get("id")
                 if not valueset_id:
-                    logger.warning("ValueSet lookup returned no id", extra={"valueset_url": valueset_url})
+                    logger.warning("ValueSet lookup returned no id", extra={"valueset_url": sanitize_url(valueset_url)})
                     continue
                 pending[valueset_url] = valueset_id
             except Exception as exc:
                 logger.warning(
                     "ValueSet lookup failed before expansion wait",
-                    extra={"valueset_url": valueset_url, "error": str(exc)},
+                    extra={"valueset_url": sanitize_url(valueset_url), "error": str(exc)},
                 )
 
         deadline = time.monotonic() + timeout_s
@@ -525,7 +527,7 @@ def wait_for_valueset_expansion(base_url: str, valueset_urls: list[str], timeout
         for valueset_url, valueset_id in pending.items():
             logger.warning(
                 "ValueSet expansion timed out",
-                extra={"valueset_url": valueset_url, "valueset_id": valueset_id, "polls": polls},
+                extra={"valueset_url": sanitize_url(valueset_url), "valueset_id": valueset_id, "polls": polls},
             )
 
     return expanded
@@ -996,7 +998,10 @@ async def list_groups(
                     if next_url and _same_origin(cdr_url, next_url):
                         url = next_url
                     elif next_url:
-                        logger.warning("SSRF: pagination next link rejected (origin mismatch)", extra={"url": next_url})
+                        logger.warning(
+                            "SSRF: pagination next link rejected (origin mismatch)",
+                            extra={"url": sanitize_url(next_url)},
+                        )
                     break
     return groups
 

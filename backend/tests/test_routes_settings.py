@@ -72,6 +72,51 @@ async def test_create_connection_ssrf_imds_blocked(client):
     assert "SSRF protection" in diag
 
 
+async def test_create_connection_rejects_oversized_request_timeout(client):
+    """request_timeout_seconds is capped at 1800s (design-doc threat surface #3)."""
+    payload = {
+        "name": "DoS Timeout",
+        "cdr_url": "https://example.com/fhir",
+        "auth_type": "none",
+        "request_timeout_seconds": 86400,
+    }
+    resp = await client.post("/settings/connections", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_create_connection_rejects_zero_request_timeout(client):
+    """request_timeout_seconds must be >= 1."""
+    payload = {
+        "name": "Zero Timeout",
+        "cdr_url": "https://example.com/fhir",
+        "auth_type": "none",
+        "request_timeout_seconds": 0,
+    }
+    resp = await client.post("/settings/connections", json=payload)
+    assert resp.status_code == 422
+
+
+async def test_create_connection_accepts_within_cap_request_timeout(client):
+    """Within-cap values round-trip in the response."""
+    payload = {
+        "name": "Long-but-legal",
+        "cdr_url": "https://example.com/fhir",
+        "auth_type": "none",
+        "request_timeout_seconds": 1200,
+    }
+    resp = await client.post("/settings/connections", json=payload)
+    assert resp.status_code == 201
+    assert resp.json()["request_timeout_seconds"] == 1200
+
+
+async def test_create_connection_defaults_request_timeout_to_30(client):
+    """Default request_timeout_seconds is 30 — preserves prior behavior."""
+    payload = {"name": "Default Timeout", "cdr_url": "https://example.com/fhir", "auth_type": "none"}
+    resp = await client.post("/settings/connections", json=payload)
+    assert resp.status_code == 201
+    assert resp.json()["request_timeout_seconds"] == 30
+
+
 async def test_create_connection_invalid_auth_type(client):
     """POST with an unsupported auth_type returns 400."""
     payload = {"name": "Bad Auth", "cdr_url": "https://example.com/fhir", "auth_type": "oauth2"}
