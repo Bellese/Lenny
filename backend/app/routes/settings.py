@@ -219,7 +219,7 @@ async def probe_mcs_connection(
 # ---------------------------------------------------------------------------
 
 _ADMIN_DEFAULTS: dict[str, str] = {
-    "validation_enabled": "true",
+    "validation_enabled": "false",
 }
 
 
