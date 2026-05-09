@@ -1,6 +1,6 @@
 {
   "name": "lenny-frontend",
-  "version": "0.0.17.11",
+  "version": "0.0.17.12",
   "private": true,
   "license": "Apache-2.0",
   "dependencies": {

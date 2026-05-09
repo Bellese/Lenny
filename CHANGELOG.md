@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.12] - 2026-05-08
+
+### Added
+- **Favicon.** Lenny now shows a branded favicon across all browsers and devices — a heart + bar chart icon in Lenny blue. Includes `favicon.ico` (16/32/48px), `favicon-32x32.png`, `favicon-16x16.png`, `apple-touch-icon.png` (180×180 for iOS home screen), and a `lenny-icon-512.png` for future use.
+
 ## [0.0.17.11] - 2026-05-08
 
 ### Added
