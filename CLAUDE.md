@@ -101,7 +101,7 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
 **Always export `AWS_PROFILE=leonard` before any AWS CLI call.** Using any other profile/account is a bug — Claude has gotten this wrong before. Verify with `aws sts get-caller-identity` if unsure.
 
 - Region: `us-east-1`
-- Prod runs on a single t3.medium EC2 instance (look up by tag with `aws ec2 describe-instances --filters "Name=tag:Name,Values=lenny-prod"`).
+- Prod runs on a single t3.large EC2 instance (tagged `leonard`; look up with `aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId,InstanceType,State.Name]' --output text`).
 - Live: `https://lenny.bellese.dev` (UI), `https://api.lenny.bellese.dev` (API)
 
 ## Do NOT
