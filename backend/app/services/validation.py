@@ -64,6 +64,13 @@ def sanitize_error(exc: Exception) -> str:
     http://hostname:port), then _HOSTPORT_RE catches bare hostname:port without
     a scheme (common in httpx ConnectError messages).
     """
+    # Connectivity errors: return clean messages instead of raw socket/OS errors.
+    if isinstance(exc, httpx.ConnectError):
+        return "Service is unreachable. Check that it is running and the URL is correct."
+    if isinstance(exc, httpx.TimeoutException):
+        return "Request timed out. The service may be overloaded or unreachable."
+    if isinstance(exc, httpx.NetworkError):
+        return "Network error communicating with service."
     try:
         msg = str(exc)[:2000]
     except Exception:

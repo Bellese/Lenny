@@ -64,7 +64,9 @@ async def health_check(
                 "url": None,
                 "status_code": None,
                 "latency_ms": None,
-                "hint": None,
+                "hint": (
+                    "Cannot connect to the database. Check that it is running and the connection settings are correct."
+                ),
             },
         }
         status["status"] = "degraded"

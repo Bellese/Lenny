@@ -49,6 +49,9 @@ export function CheckIcon(p) {
 export function XIcon(p) {
   return <svg {...base(p, { strokeWidth: '1.4' })}><path d="M4 4l6 6M10 4l-6 6" /></svg>;
 }
+export function WarnIcon(p) {
+  return <svg {...base(p)}><path d="M7 1.5L12.5 12H1.5L7 1.5z" strokeWidth="1.3" /><path d="M7 5.5V8.5" /><circle cx="7" cy="10.2" r="0.5" fill="currentColor" stroke="none" /></svg>;
+}
 export function FilterIcon(p) {
   return <svg {...base(p)}><path d="M2.5 3h9l-3.4 4.5V11l-2.2 1.2V7.5L2.5 3z" /></svg>;
 }

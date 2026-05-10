@@ -14,6 +14,42 @@ from app.services.validation import sanitize_error
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/results", tags=["results"])
 
+_POP_DESC_URL = "http://hl7.org/fhir/5.0/StructureDefinition/extension-MeasureReport.population.description"
+
+
+def _extract_pop_info(
+    measure_report: dict | None,
+) -> tuple[dict[str, str] | None, list[str] | None]:
+    """Extract population descriptions and defined codes from a MeasureReport.
+
+    Returns (descriptions_dict, defined_codes_list).
+    descriptions_dict maps FHIR population code → description string (only codes that
+    have a description extension).
+    defined_codes_list lists all population codes that appear in the MeasureReport,
+    whether or not they have a description (used to hide irrelevant rows in the UI).
+    Both values are None when the MeasureReport is absent.
+    """
+    if not measure_report:
+        return None, None
+    descriptions: dict[str, str] = {}
+    defined: list[str] = []
+    for group in measure_report.get("group", []):
+        for pop in group.get("population", []):
+            code: str | None = None
+            for coding in pop.get("code", {}).get("coding", []):
+                code = coding.get("code")
+                break
+            if not code:
+                continue
+            defined.append(code)
+            for ext in pop.get("extension", []):
+                if ext.get("url") == _POP_DESC_URL:
+                    desc = (ext.get("valueString") or "").strip()
+                    if desc:
+                        descriptions[code] = desc
+                    break
+    return (descriptions or None), (defined or None)
+
 
 @router.get("")
 async def get_results(
@@ -53,11 +89,15 @@ async def get_results(
     }
     patients_list = []
     failed_patients = 0
+    population_descriptions: dict[str, str] | None = None
+    defined_populations: list[str] | None = None
 
     for mr in results:
         populations = mr.populations or {}
         is_error = bool(populations.get("error"))
         is_partial = mr.error_phase == "gather_partial"
+        if population_descriptions is None and mr.measure_report:
+            population_descriptions, defined_populations = _extract_pop_info(mr.measure_report)
         if is_error:
             failed_patients += 1
         else:
@@ -89,6 +129,8 @@ async def get_results(
         "failed_patients": failed_patients,
         "populations": pops,
         "performance_rate": performance_rate,
+        "population_descriptions": population_descriptions,
+        "defined_populations": defined_populations,
         "patients": patients_list,
     }
 

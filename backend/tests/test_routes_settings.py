@@ -744,3 +744,44 @@ async def test_put_admin_settings_empty_body_is_noop(client):
     assert resp.status_code == 200
     # Default state is validation disabled
     assert resp.json()["validation_enabled"] is False
+
+
+async def test_get_admin_settings_defaults_comparison_disabled(client):
+    """GET /settings/admin with no AppSetting rows returns comparison_enabled=False."""
+    resp = await client.get("/settings/admin")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["comparison_enabled"] is False
+
+
+async def test_put_admin_settings_enables_comparison(client):
+    """PUT /settings/admin can enable comparison and GET reflects the change."""
+    put_resp = await client.put("/settings/admin", json={"comparison_enabled": True})
+    assert put_resp.status_code == 200
+    assert put_resp.json()["comparison_enabled"] is True
+
+    get_resp = await client.get("/settings/admin")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["comparison_enabled"] is True
+
+
+async def test_put_admin_settings_disables_comparison(client):
+    """PUT /settings/admin can disable comparison after it was enabled."""
+    await client.put("/settings/admin", json={"comparison_enabled": True})
+    put_resp = await client.put("/settings/admin", json={"comparison_enabled": False})
+    assert put_resp.status_code == 200
+    assert put_resp.json()["comparison_enabled"] is False
+
+    get_resp = await client.get("/settings/admin")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["comparison_enabled"] is False
+
+
+async def test_put_admin_settings_comparison_independent_of_validation(client):
+    """comparison_enabled and validation_enabled are stored independently."""
+    await client.put("/settings/admin", json={"validation_enabled": True})
+    resp = await client.put("/settings/admin", json={"comparison_enabled": True})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["validation_enabled"] is True
+    assert data["comparison_enabled"] is True

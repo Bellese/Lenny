@@ -51,6 +51,17 @@
   line-height: 1.4;
 }
 
+.diagToggle {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: inherit;
+  font-family: inherit;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 .details {
   display: flex;
   flex-direction: column;

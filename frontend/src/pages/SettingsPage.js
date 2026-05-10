@@ -84,6 +84,20 @@ export default function SettingsPage() {
     }
   };
 
+  const handleToggleComparison = async (enabled) => {
+    setAdminSaving(true);
+    try {
+      const updated = await updateAdminSettings({ comparison_enabled: enabled });
+      setAdminSettings(updated);
+      window.dispatchEvent(new CustomEvent('admin-settings-changed', { detail: updated }));
+      toast.success(enabled ? 'Comparison enabled' : 'Comparison disabled');
+    } catch (err) {
+      toast.error(err.message || 'Failed to update setting');
+    } finally {
+      setAdminSaving(false);
+    }
+  };
+
   const TABS = [
     { id: 'connections', label: 'Connections' },
     { id: 'status', label: 'System Status' },
@@ -213,6 +227,20 @@ export default function SettingsPage() {
                   <Toggle
                     checked={adminSettings?.validation_enabled ?? false}
                     onChange={handleToggleValidation}
+                    disabled={adminSaving}
+                  />
+                </div>
+                <div className={styles.adminRow}>
+                  <div className={styles.adminRowInfo}>
+                    <div className={styles.adminRowLabel}>Comparison</div>
+                    <div className={styles.adminRowDesc}>
+                      Show expected vs. actual match/mismatch status per patient on the Results page.
+                      Useful for development; hide for end users.
+                    </div>
+                  </div>
+                  <Toggle
+                    checked={adminSettings?.comparison_enabled ?? false}
+                    onChange={handleToggleComparison}
                     disabled={adminSaving}
                   />
                 </div>
