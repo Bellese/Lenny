@@ -220,6 +220,7 @@ async def probe_mcs_connection(
 
 _ADMIN_DEFAULTS: dict[str, str] = {
     "validation_enabled": "false",
+    "comparison_enabled": "false",
 }
 
 
@@ -233,11 +234,13 @@ async def get_admin_settings(session: AsyncSession = Depends(get_session)) -> di
     """Return current admin settings."""
     return {
         "validation_enabled": (await _get_setting(session, "validation_enabled")) == "true",
+        "comparison_enabled": (await _get_setting(session, "comparison_enabled")) == "true",
     }
 
 
 class AdminSettingsUpdate(BaseModel):
     validation_enabled: bool | None = None
+    comparison_enabled: bool | None = None
 
 
 @router.put("/admin")
@@ -249,6 +252,8 @@ async def update_admin_settings(
     updates: dict[str, str] = {}
     if body.validation_enabled is not None:
         updates["validation_enabled"] = "true" if body.validation_enabled else "false"
+    if body.comparison_enabled is not None:
+        updates["comparison_enabled"] = "true" if body.comparison_enabled else "false"
 
     for key, value in updates.items():
         row = await session.get(AppSetting, key)
@@ -260,6 +265,7 @@ async def update_admin_settings(
 
     return {
         "validation_enabled": (await _get_setting(session, "validation_enabled")) == "true",
+        "comparison_enabled": (await _get_setting(session, "comparison_enabled")) == "true",
     }
 
 
