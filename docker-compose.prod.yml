@@ -30,9 +30,15 @@ services:
 
   hapi-fhir-cdr:
     restart: unless-stopped
+    mem_limit: 3g
+    environment:
+      - JAVA_TOOL_OPTIONS=-Xmx2g -Xms256m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/hapi/heapdump.hprof
 
   hapi-fhir-measure:
     restart: unless-stopped
+    mem_limit: 4g
+    environment:
+      - JAVA_TOOL_OPTIONS=-Xmx2g -Xms256m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/hapi/heapdump.hprof
 
   caddy:
     restart: unless-stopped

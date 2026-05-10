@@ -167,6 +167,21 @@ Critical settings and why they are set:
 
 Storage: both instances use H2 file-based storage under `/data/hapi` (mounted as Docker volumes). This is appropriate for local/demo use. Production deployments should use external Postgres.
 
+### Memory Sizing
+
+Both HAPI services are memory-capped to prevent the JVM from consuming host RAM uncontrolled. JVM RSS routinely runs 400–600 MB above the heap cap (`-Xmx`) due to metaspace, NIO/Lucene off-heap buffers, thread stacks, and CQL classloader overhead.
+
+| Environment | Service | `mem_limit` | `-Xmx` | Compose file |
+|---|---|---|---|---|
+| Dev + CI (prebaked) | CDR | 2 GB | 1 GB | `docker-compose.yml` |
+| Dev + CI (prebaked) | Measure Engine | 4 GB | 2 GB | `docker-compose.prebaked.yml` |
+| Prod | CDR | 3 GB | 2 GB | `docker-compose.prod.yml` |
+| Prod | Measure Engine | 4 GB | 2 GB | `docker-compose.prod.yml` |
+
+Prod runs on a **t3.large** EC2 instance (8 GiB RAM) to fit both containers plus DB, backend, and Caddy.
+
+Both services are configured with `-XX:+ExitOnOutOfMemoryError` so an OOM causes immediate process exit (rather than leaving a degraded JVM alive), and `restart: unless-stopped` so Docker auto-recovers the container without manual intervention. `-XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/hapi/heapdump.hprof` captures a heap dump in the named volume for post-mortem analysis (`docker cp` to retrieve it).
+
 ## Environment Variables
 
 Defined in `backend/app/config.py`. All overridable via environment variables.

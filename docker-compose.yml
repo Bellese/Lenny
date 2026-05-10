@@ -51,6 +51,7 @@ services:
   hapi-fhir-cdr:
     image: ${HAPI_CDR_IMAGE:-hapiproject/hapi:v8.8.0-1}
     user: root
+    restart: unless-stopped
     ports: ["8081:8080"]
     volumes: ["cdrdata:/data/hapi"]
     mem_limit: 2g
@@ -72,11 +73,12 @@ services:
       - spring.datasource.url=jdbc:h2:file:/data/hapi/h2;DB_CLOSE_ON_EXIT=FALSE
       - spring.datasource.driverClassName=org.h2.Driver
       - spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync
-      - JAVA_TOOL_OPTIONS=-Xmx1g -Xms256m
+      - JAVA_TOOL_OPTIONS=-Xmx1g -Xms256m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/hapi/heapdump.hprof
 
   hapi-fhir-measure:
     image: ${HAPI_MEASURE_IMAGE:-hapiproject/hapi:v8.8.0-1}
     user: root
+    restart: unless-stopped
     ports: ["8080:8080"]
     volumes: ["measuredata:/data/hapi"]
     mem_limit: 3g
@@ -106,7 +108,7 @@ services:
       - spring.jpa.properties.hibernate.search.backend.lucene_version=LUCENE_CURRENT
       - spring.jpa.properties.hibernate.search.backend.io.refresh_interval=100 # Reduce HAPI search-index lag after uploads.
       - spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync
-      - JAVA_TOOL_OPTIONS=-Xmx1500m -Xms256m
+      - JAVA_TOOL_OPTIONS=-Xmx1500m -Xms256m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/hapi/heapdump.hprof
 
   seed:
     build: ./seed
