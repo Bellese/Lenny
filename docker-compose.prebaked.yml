@@ -10,6 +10,6 @@ services:
 
   hapi-fhir-measure:
     volumes: []
-    mem_limit: 4g
+    mem_limit: 6g
     environment:
-      - JAVA_TOOL_OPTIONS=-Xmx2g -Xms256m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/hapi/heapdump.hprof
+      - JAVA_TOOL_OPTIONS=-Xmx4g -Xms256m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/hapi/heapdump.hprof

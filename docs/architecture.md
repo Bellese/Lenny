@@ -174,7 +174,7 @@ Both HAPI services are memory-capped to prevent the JVM from consuming host RAM 
 | Environment | Service | `mem_limit` | `-Xmx` | Compose file |
 |---|---|---|---|---|
 | Dev + CI (prebaked) | CDR | 2 GB | 1 GB | `docker-compose.yml` |
-| Dev + CI (prebaked) | Measure Engine | 4 GB | 2 GB | `docker-compose.prebaked.yml` |
+| Dev + CI (prebaked) | Measure Engine | 6 GB | 4 GB | `docker-compose.prebaked.yml` |
 | Prod | CDR | 3 GB | 2 GB | `docker-compose.prod.yml` |
 | Prod | Measure Engine | 4 GB | 2 GB | `docker-compose.prod.yml` |
 
