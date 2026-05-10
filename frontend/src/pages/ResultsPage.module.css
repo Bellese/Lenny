@@ -284,6 +284,13 @@
   opacity: 0.85;
 }
 
+.chipDetail {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  opacity: 0.6;
+  margin-left: 2px;
+}
+
 /* Status pills */
 .pill {
   display: inline-flex;
@@ -318,7 +325,61 @@
   color: var(--text-dim);
 }
 
-/* Legend strip */
+/* Error pill + inline excerpt */
+.errorPillGroup {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.errorExcerpt {
+  font-size: 11px;
+  color: var(--text-muted);
+  max-width: 240px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Clear filters button */
+.clearFiltersBtn {
+  display: inline-block;
+  margin-top: 8px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--text-muted);
+  background: transparent;
+}
+
+.clearFiltersBtn:hover {
+  background: var(--bg-sunken);
+  color: var(--text);
+}
+
+/* Legend strip (collapsed inside <details>) */
+.legendDetails {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.legendSummary {
+  padding: 6px 16px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.legendSummary::-webkit-details-marker { display: none; }
+
+.legendSummary:hover {
+  color: var(--text-muted);
+}
+
 .legendStrip {
   display: flex;
   align-items: center;
@@ -426,6 +487,11 @@
 
 .patientRow:hover td {
   background: var(--bg-sunken);
+}
+
+.patientRow:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .patientName {
@@ -591,6 +657,20 @@
   -webkit-line-clamp: unset;
   -webkit-box-orient: unset;
   cursor: pointer;
+}
+
+.popDescWrap {
+  display: flex;
+  align-items: baseline;
+  gap: 3px;
+}
+
+.popDescMore {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
+  opacity: 0.7;
 }
 
 /* Patient context kv rows */
@@ -926,8 +1006,15 @@
   color: var(--text-muted);
   padding: 8px 12px;
   overflow-x: auto;
-  white-space: pre;
+  white-space: pre-wrap;
+  word-break: break-word;
   background: var(--bg-sunken);
   border-top: 1px solid var(--line-soft);
   margin: 0;
+}
+
+@media (max-width: 1024px) {
+  .expandedInner {
+    grid-template-columns: 1fr;
+  }
 }

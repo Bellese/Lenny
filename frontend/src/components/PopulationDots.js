@@ -24,13 +24,27 @@ const countsShape = PropTypes.shape({
   numExc: membershipShape,
 });
 
+const POP_ARIA_LABELS = {
+  ip:     'initial population',
+  den:    'denominator',
+  denExc: 'denominator exclusion',
+  num:    'numerator',
+  numExc: 'numerator exclusion',
+};
+
 /**
  * Compact 5-chip population summary. Pass `exp` to enable mismatch highlighting.
+ * Filled chip = in population; hollow chip = not in population.
  * @param {{ act: PopulationCounts, exp?: PopulationCounts }} props
  */
 export default function PopulationDots({ act, exp }) {
+  const ariaLabel = POP_KEYS.map(({ key }) => {
+    const a = act[key] ?? 0;
+    return `${a ? 'In' : 'Not in'} ${POP_ARIA_LABELS[key]}`;
+  }).join(', ');
+
   return (
-    <div className={styles.row}>
+    <div className={styles.row} aria-label={ariaLabel}>
       {POP_KEYS.map(({ key, label }) => {
         const a = act[key] ?? 0;
         const e = exp != null ? (exp[key] ?? 0) : null;
@@ -49,7 +63,6 @@ export default function PopulationDots({ act, exp }) {
         return (
           <span key={key} className={`${styles.chip} ${chipCls}`}>
             {label}
-            <span className={styles.val}>{a}</span>
             {miss && <span className={styles.exp}>/{e}</span>}
           </span>
         );

@@ -166,7 +166,7 @@ function StatusPill({ kind, children, title }) {
   );
 }
 
-function FilterChip({ chipId, label, count, active, danger, onClick }) {
+function FilterChip({ chipId, label, count, detail, active, danger, onClick }) {
   const cls = [
     styles.chip,
     active && danger ? styles.chipDangerActive : active ? styles.chipActive : '',
@@ -175,6 +175,7 @@ function FilterChip({ chipId, label, count, active, danger, onClick }) {
     <button className={cls} onClick={() => onClick(chipId)} aria-pressed={active}>
       {label}
       {count != null && <span className={styles.chipCount}>{count}</span>}
+      {detail && <span className={styles.chipDetail}>{detail}</span>}
     </button>
   );
 }
@@ -183,14 +184,19 @@ function PopDesc({ text }) {
   const [expanded, setExpanded] = useState(false);
   if (!text) return null;
   return (
-    <button
-      className={`${styles.popDesc} ${expanded ? styles.popDescExpanded : ''}`}
-      onClick={e => { e.stopPropagation(); setExpanded(v => !v); }}
-      type="button"
-      title={expanded ? undefined : text}
-    >
-      {text}
-    </button>
+    <span className={styles.popDescWrap}>
+      <button
+        className={`${styles.popDesc} ${expanded ? styles.popDescExpanded : ''}`}
+        onClick={e => { e.stopPropagation(); setExpanded(v => !v); }}
+        type="button"
+        title={expanded ? undefined : text}
+      >
+        {text}
+      </button>
+      {!expanded && (
+        <span className={styles.popDescMore} aria-hidden="true">more ▾</span>
+      )}
+    </span>
   );
 }
 
@@ -210,13 +216,6 @@ function ExpandedPanel({ row, expectedLoaded, colSpan, popDescriptions, definedP
       .catch(err => setResError(err.message || 'Failed to load'))
       .finally(() => setResLoading(false));
   }, [row.resultId]);
-
-  const missDiff = !row.error && expectedLoaded && row.match === false && row.exp
-    ? POP_BREAKDOWN
-        .filter(({ key }) => (row.act[key] ?? 0) !== (row.exp[key] ?? 0))
-        .map(({ key, label }) => `${label}: ${row.exp[key]}→${row.act[key]}`)
-        .join(' · ')
-    : null;
 
   const verdictPill = row.error
     ? <StatusPill kind="error">{row.error}</StatusPill>
@@ -291,7 +290,7 @@ function ExpandedPanel({ row, expectedLoaded, colSpan, popDescriptions, definedP
                 <b>{row.name || '—'}</b>
               </div>
               <div className={styles.kvRow}>
-                <span className={styles.kvKey}>FHIR ID</span>
+                <span className={styles.kvKey}>Patient ID</span>
                 <span className={styles.kvIdRow}>
                   <span className={styles.mono} style={{ fontSize: 12 }}>{row.patientId || '—'}</span>
                   {row.patientId && <CopyIdButton id={row.patientId} />}
@@ -301,12 +300,6 @@ function ExpandedPanel({ row, expectedLoaded, colSpan, popDescriptions, definedP
                 <div className={styles.kvRow}>
                   <span className={styles.kvKey}>Error</span>
                   <span className={styles.errorText}>{row.errorMessage || row.error}</span>
-                </div>
-              )}
-              {missDiff && (
-                <div className={`${styles.kvRow} ${styles.kvRowDiff}`}>
-                  <span className={`${styles.kvKey} ${styles.kvKeyErr}`}>Diff</span>
-                  <span className={styles.diffText}>{missDiff}</span>
                 </div>
               )}
             </div>
@@ -387,7 +380,7 @@ export default function ResultsPage() {
   const { jobId: routeJobId } = useParams();
   const navigate = useNavigate();
   const toast = useToast();
-  const { query } = useSearch();
+  const { query, setQuery } = useSearch();
 
   const [jobs, setJobs] = useState([]);
   const [selectedJobId, setSelectedJobId] = useState(routeJobId || '');
@@ -445,18 +438,19 @@ export default function ResultsPage() {
     setError(null);
     setExpandedId(null);
     try {
-      const [resultsData, cmpData] = await Promise.all([
-        getResults(selectedJobId),
-        getJobComparison(selectedJobId).catch(() => null),
-      ]);
+      const promises = [getResults(selectedJobId)];
+      if (adminSettings.comparison_enabled) {
+        promises.push(getJobComparison(selectedJobId).catch(() => null));
+      }
+      const [resultsData, cmpData = null] = await Promise.all(promises);
       setResults(resultsData);
-      setComparisonData(cmpData);
+      setComparisonData(adminSettings.comparison_enabled ? cmpData : null);
     } catch (err) {
       setError(err.message || 'Error loading results');
     } finally {
       setLoading(false);
     }
-  }, [selectedJobId]);
+  }, [selectedJobId, adminSettings.comparison_enabled]);
 
   useEffect(() => { loadResults(); }, [loadResults]);
 
@@ -537,9 +531,9 @@ export default function ResultsPage() {
     const ref = `Patient/${r.patient_id}`;
     const cmp = compareByRef.get(ref);
     const errorPhase = r.error_phase;
-    const phaseLabel = errorPhase === 'gather'         ? 'gather failed'
-      : errorPhase === 'gather_partial' ? 'partial data'
-      : errorPhase === 'evaluate'       ? 'eval failed'
+    const phaseLabel = errorPhase === 'gather'         ? "Couldn't fetch patient data"
+      : errorPhase === 'gather_partial' ? 'Some data missing'
+      : errorPhase === 'evaluate'       ? 'Calculation failed'
       : (r.populations?.error === true || r.status === 'error') ? 'error'
       : null;
     return {
@@ -563,7 +557,9 @@ export default function ResultsPage() {
     : allRows;
 
   // Chip counts
-  const failures   = allRows.filter(isFailure).length;
+  const failures    = allRows.filter(isFailure).length;
+  const errorCount  = allRows.filter(r => r.error !== null).length;
+  const missCount   = allRows.filter(r => r.error === null && r.match === false).length;
 
   useEffect(() => {
     if (loading) return;
@@ -618,9 +614,15 @@ export default function ResultsPage() {
   // Column count for colSpan in expanded rows
   const colCount = showStatusCol ? 5 : 4;
 
+  const CHIP_LABEL = {
+    failures: 'Failures', all: 'All patients', num: 'In numerator',
+    denom: 'Denom only', excl: 'Excluded', notden: 'Not in denom',
+  };
+
   const CHIP_DEFS = expectedLoaded
     ? [
-        { id: 'failures', label: 'Failures',    count: chipCounts.failures, danger: true },
+        { id: 'failures', label: 'Failures', count: chipCounts.failures, danger: true,
+          detail: errorCount > 0 && missCount > 0 ? `${errorCount} err · ${missCount} miss` : null },
         { id: 'all',      label: 'All patients', count: chipCounts.all },
         { id: 'num',      label: 'In numerator', count: chipCounts.num },
         { id: 'denom',    label: 'Denom only',   count: chipCounts.denom },
@@ -800,18 +802,21 @@ export default function ResultsPage() {
 
             {/* Legend strip */}
             {expectedLoaded && (
-              <div className={styles.legendStrip}>
-                <span className={styles.legendLabel}>Comparing actual results to expected fixture · per-patient verdict:</span>
-                <span className={styles.legendItem}>
-                  <StatusPill kind="match">match</StatusPill>
-                  <span className={styles.legendDesc}>all 5 populations agree</span>
-                </span>
-                <span className={styles.legendItem}>
-                  <StatusPill kind="miss">mismatch · Denom</StatusPill>
-                  <span className={styles.legendDesc}>disagrees on listed population(s)</span>
-                </span>
-                <span className={styles.legendHint}>IP · Denom · Denom Exclusion · Numer · Numer Exclusion</span>
-              </div>
+              <details className={styles.legendDetails}>
+                <summary className={styles.legendSummary}>How to read results ▸</summary>
+                <div className={styles.legendStrip}>
+                  <span className={styles.legendLabel}>Per-patient verdict comparing actual vs. expected fixture:</span>
+                  <span className={styles.legendItem}>
+                    <StatusPill kind="match">✓ match</StatusPill>
+                    <span className={styles.legendDesc}>all 5 populations agree</span>
+                  </span>
+                  <span className={styles.legendItem}>
+                    <StatusPill kind="miss">! N mismatched</StatusPill>
+                    <span className={styles.legendDesc}>N populations differ — click row for breakdown</span>
+                  </span>
+                  <span className={styles.legendHint}>IP · Denom · DnEx · Numer · NmEx</span>
+                </div>
+              </details>
             )}
 
             {/* Table */}
@@ -829,9 +834,18 @@ export default function ResultsPage() {
                 {visibleRows.length === 0 ? (
                   <tr>
                     <td colSpan={colCount} className={styles.emptyRow}>
-                      {q
-                        ? `No patients match "${q}".`
-                        : 'No patients match this filter.'}
+                      <div>
+                        {q
+                          ? `No patients match "${q}".`
+                          : `No patients in '${CHIP_LABEL[activeFilter] || activeFilter}'.`}
+                      </div>
+                      <button
+                        className={styles.clearFiltersBtn}
+                        onClick={() => { setFilter('all'); setQuery(''); }}
+                        type="button"
+                      >
+                        Clear filters
+                      </button>
                     </td>
                   </tr>
                 ) : (
@@ -843,8 +857,15 @@ export default function ResultsPage() {
                     // Status pill content
                     let pill = null;
                     if (isError) {
-                      const errTitle = row.errorMessage ? row.errorMessage.slice(0, 200) : row.error;
-                      pill = <StatusPill kind="error" title={errTitle}>⚠ {row.error}</StatusPill>;
+                      const excerpt = row.errorMessage
+                        ? row.errorMessage.slice(0, 60) + (row.errorMessage.length > 60 ? '…' : '')
+                        : null;
+                      pill = (
+                        <span className={styles.errorPillGroup}>
+                          <StatusPill kind="error">⚠ {row.error}</StatusPill>
+                          {excerpt && <span className={styles.errorExcerpt}>{excerpt}</span>}
+                        </span>
+                      );
                     } else if (expectedLoaded) {
                       if (row.match === true) {
                         pill = (
@@ -853,25 +874,23 @@ export default function ResultsPage() {
                           </StatusPill>
                         );
                       } else if (row.match === false) {
-                        const diffCodes = row.mismatches && row.mismatches.length > 0
-                          ? row.mismatches.map(m => {
-                              if (m === 'initial-population')     return 'IP';
-                              if (m === 'denominator')            return 'Denom';
-                              if (m === 'denominator-exclusion')  return 'DnEx';
-                              if (m === 'numerator')              return 'Numer';
-                              if (m === 'numerator-exclusion')    return 'NmEx';
-                              return m;
-                            }).join(', ')
-                          : POP_BREAKDOWN
-                              .filter(({ key }) => (row.act[key] ?? 0) !== (row.exp?.[key] ?? 0))
-                              .map(({ key }) => key === 'ip' ? 'IP' : key === 'den' ? 'Denom' : key === 'denExc' ? 'DnEx' : key === 'num' ? 'Numer' : 'NmEx')
-                              .join(', ');
+                        const mismatchCount = row.mismatches?.length > 0
+                          ? row.mismatches.length
+                          : POP_BREAKDOWN.filter(({ key }) => (row.act[key] ?? 0) !== (row.exp?.[key] ?? 0)).length;
+                        const diffCodes = row.mismatches?.map(m => {
+                          if (m === 'initial-population')     return 'IP';
+                          if (m === 'denominator')            return 'Denom';
+                          if (m === 'denominator-exclusion')  return 'DnEx';
+                          if (m === 'numerator')              return 'Numer';
+                          if (m === 'numerator-exclusion')    return 'NmEx';
+                          return m;
+                        }).join(', ') || null;
                         pill = (
                           <StatusPill
                             kind="miss"
-                            title={`Calculated result disagrees with fixture on: ${diffCodes}. Click row to see actual vs expected per population.`}
+                            title={diffCodes ? `Disagrees on: ${diffCodes}. Click row to see breakdown.` : 'Click row to see breakdown.'}
                           >
-                            ! mismatch{diffCodes ? ` · ${diffCodes}` : ''}
+                            ! {mismatchCount} mismatched
                           </StatusPill>
                         );
                       }
@@ -888,6 +907,15 @@ export default function ResultsPage() {
                         <tr
                           className={rowCls}
                           onClick={() => setExpandedId(isExpanded ? null : row.resultId)}
+                          tabIndex={0}
+                          role="button"
+                          aria-expanded={isExpanded}
+                          onKeyDown={(e) => {
+                            if (e.key === ' ' || e.key === 'Enter') {
+                              e.preventDefault();
+                              setExpandedId(isExpanded ? null : row.resultId);
+                            }
+                          }}
                         >
                           <td>
                             <span className={styles.expandToggle}>
