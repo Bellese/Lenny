@@ -35,6 +35,8 @@ const POP_ARIA_LABELS = {
 /**
  * Compact 5-chip population summary. Pass `exp` to enable mismatch highlighting.
  * Filled chip = in population; hollow chip = not in population.
+ * Rendered as `role="img"` so screen readers announce the whole cluster as a
+ * single labeled image rather than navigating into each chip individually.
  * @param {{ act: PopulationCounts, exp?: PopulationCounts }} props
  */
 export default function PopulationDots({ act, exp }) {
@@ -44,7 +46,7 @@ export default function PopulationDots({ act, exp }) {
   }).join(', ');
 
   return (
-    <div className={styles.row} aria-label={ariaLabel}>
+    <span role="img" className={styles.row} aria-label={ariaLabel}>
       {POP_KEYS.map(({ key, label }) => {
         const a = act[key] ?? 0;
         const e = exp != null ? (exp[key] ?? 0) : null;
@@ -67,7 +69,7 @@ export default function PopulationDots({ act, exp }) {
           </span>
         );
       })}
-    </div>
+    </span>
   );
 }
 

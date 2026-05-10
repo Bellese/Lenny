@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import styles from './ResultsPage.module.css';
 import {
@@ -182,18 +182,29 @@ function FilterChip({ chipId, label, count, detail, active, danger, onClick }) {
 
 function PopDesc({ text }) {
   const [expanded, setExpanded] = useState(false);
+  const [isClamped, setIsClamped] = useState(false);
+  const ref = useRef(null);
+
+  useLayoutEffect(() => {
+    if (ref.current) {
+      setIsClamped(ref.current.scrollHeight > ref.current.clientHeight);
+    }
+  }, [text]);
+
   if (!text) return null;
   return (
     <span className={styles.popDescWrap}>
       <button
+        ref={ref}
         className={`${styles.popDesc} ${expanded ? styles.popDescExpanded : ''}`}
-        onClick={e => { e.stopPropagation(); setExpanded(v => !v); }}
+        onClick={isClamped || expanded ? e => { e.stopPropagation(); setExpanded(v => !v); } : undefined}
         type="button"
         title={expanded ? undefined : text}
+        style={isClamped || expanded ? undefined : { cursor: 'default', pointerEvents: 'none' }}
       >
         {text}
       </button>
-      {!expanded && (
+      {!expanded && isClamped && (
         <span className={styles.popDescMore} aria-hidden="true">more ▾</span>
       )}
     </span>
@@ -534,7 +545,7 @@ export default function ResultsPage() {
     const phaseLabel = errorPhase === 'gather'         ? "Couldn't fetch patient data"
       : errorPhase === 'gather_partial' ? 'Some data missing'
       : errorPhase === 'evaluate'       ? 'Calculation failed'
-      : (r.populations?.error === true || r.status === 'error') ? 'error'
+      : (r.populations?.error === true || r.status === 'error') ? 'Unknown error'
       : null;
     return {
       resultId:    r.id,

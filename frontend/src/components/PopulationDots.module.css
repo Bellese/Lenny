@@ -26,7 +26,6 @@
   background: transparent;
   border-color: var(--line-soft);
   color: var(--text-dim);
-  opacity: 0.65;
 }
 
 /* In population: IP or Denom — clearly filled */

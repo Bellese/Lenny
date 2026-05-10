@@ -697,26 +697,9 @@
   flex-shrink: 0;
 }
 
-.kvKeyErr {
-  color: var(--err);
-}
-
-.kvRowDiff {
-  margin-top: 4px;
-  padding: 8px 10px;
-  background: var(--err-wash);
-  border-radius: 6px;
-  border: 1px solid color-mix(in srgb, var(--err) 22%, transparent);
-}
-
 .errorText {
   color: var(--err);
   font-size: 11px;
-}
-
-.diffText {
-  color: var(--err);
-  font-size: 12px;
 }
 
 .emptyRow {
