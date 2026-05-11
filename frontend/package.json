@@ -1,6 +1,6 @@
 {
   "name": "lenny-frontend",
-  "version": "0.0.17.14",
+  "version": "0.0.17.15",
   "private": true,
   "license": "Apache-2.0",
   "dependencies": {
@@ -42,6 +42,9 @@
     "@babel/plugin-transform-modules-systemjs": "^7.29.4",
     "fast-uri": "^3.1.2",
     "postcss": "^8.4.31",
-    "typescript": "4.9.5"
+    "typescript": "4.9.5",
+    "serialize-javascript": "^7.0.5",
+    "underscore": "^1.13.8",
+    "http-proxy-agent": "^7.0.0"
   }
 }

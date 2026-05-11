@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.15] - 2026-05-11
+
+### Security
+- **Resolved 3 additional Dependabot alerts via npm overrides.** `serialize-javascript` 6.0.2→7.0.5 (closes alerts #9 high-severity RCE and #22 medium-severity CPU-exhaustion DoS); `underscore` 1.13.6→1.13.8 (closes alert #10 high-severity unlimited-recursion DoS); `http-proxy-agent` 4.0.1→7.0.2 (drops `@tootallnate/once` dep entirely, closing alert #11 low-severity incorrect control flow). All overrides are build/test-time only; no runtime impact on the deployed app.
+- **Dismissed webpack-dev-server alerts #7 and #8** as "vulnerable code not in production." No 4.x patch exists; 5.x would silently break `npm start` while CI passes. Production image serves static build output via `serve@14` — webpack-dev-server never runs in deployment. Decision documented in `docs/decisions.md` (ADR-008).
+
 ## [0.0.17.14] - 2026-05-11
 
 ### Security
