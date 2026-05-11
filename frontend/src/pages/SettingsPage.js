@@ -212,16 +212,19 @@ export default function SettingsPage() {
                 </div>
               </div>
 
-              {/* Features */}
+              {/* Developer Tools */}
               <div className={styles.card}>
                 <div className={styles.cardHeader}>
-                  <span className={styles.cardTitle}>Features</span>
+                  <span className={styles.cardTitle}>Developer Tools</span>
                 </div>
                 <div className={styles.adminRow}>
                   <div className={styles.adminRowInfo}>
                     <div className={styles.adminRowLabel}>Validation</div>
                     <div className={styles.adminRowDesc}>
-                      Enable or disable the bundle validation workflow.
+                      Shows a Validation tab in the sidebar where you can upload FHIR test bundles,
+                      trigger measure runs against them, and review per-patient pass/fail results.
+                      Enable when testing measure logic against known patient fixtures; hide from
+                      end users when the workflow isn&apos;t needed.
                     </div>
                   </div>
                   <Toggle
@@ -234,8 +237,11 @@ export default function SettingsPage() {
                   <div className={styles.adminRowInfo}>
                     <div className={styles.adminRowLabel}>Comparison</div>
                     <div className={styles.adminRowDesc}>
-                      Show expected vs. actual match/mismatch status per patient on the Results page.
-                      Useful for development; hide for end users.
+                      Adds a match/mismatch status column to the Results page, comparing the measure
+                      engine&apos;s calculated populations against expected results from an uploaded
+                      test bundle. Patients with mismatches are flagged and sorted to the top. Only
+                      meaningful when bundles with expected population data have been uploaded via
+                      Validation.
                     </div>
                   </div>
                   <Toggle
