@@ -65,3 +65,15 @@ This log records significant technical and process choices with their rationale.
 **Why:** The two toolkits are complementary rather than overlapping. Picking one per phase removes ambiguity for both humans and agents. The current approach uses both as-is; the plan is to modify them to fit our needs over time, eventually evolving toward a Bellese-specific skill stack.
 
 **Reference:** `docs/workflow.md`
+
+---
+
+## ADR-008: webpack-dev-server Dependabot alerts #7 and #8 — dismissed as not-used (2026-05-11)
+
+**Decision:** Dismiss Dependabot alerts #7 (`GHSA-4v9v-hfq4-rm2v`) and #8 (`GHSA-9jgg-88mc-972h`) for `webpack-dev-server` with reason "vulnerable code is not actually used in production" rather than upgrading to 5.x.
+
+**Why:** The only patched version is `webpack-dev-server@5.2.1`. No 4.x backport exists; the latest 4.x release is `4.15.2`, which is within the vulnerable range. Upgrading to 5.x via an npm `overrides` block would silently break `npm start` (local dev server): `react-scripts@5.0.1` hard-codes 4.x-only APIs (`onBeforeSetupMiddleware`, `onAfterSetupMiddleware`, `static.directory`) that were removed in webpack-dev-server 5. CI's `frontend-build` job runs only `npm run build` — it would pass green while `npm start` breaks, giving a false sense of safety.
+
+`webpack-dev-server` is not included in the production artifact. The `frontend/Dockerfile` runtime stage copies the static `build/` directory and serves it via `serve@14` — webpack-dev-server is never installed or invoked in the deployed image. Neither CVE is reachable by end users.
+
+**Alternatives considered:** Upgrading or replacing `react-scripts` (CRA successor migration) — deferred as a multi-week refactor unrelated to these alerts. Accepting 5.x with a broken dev server — rejected because it masks a real developer experience regression behind a green CI build.
