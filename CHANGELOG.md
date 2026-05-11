@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.13] - 2026-05-11
+
+### Changed
+- **Favicon redesigned.** Replaces the PNG/ICO favicon stack with a single SVG — a white "L" mark centered on the app's accent blue (`#3760c9`). Scales cleanly at all sizes. Old `.ico`, `.png`, and manifest links removed from `index.html`.
+
 ## [0.0.17.12] - 2026-05-08
 
 ### Added
