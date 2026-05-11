@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.17.14] - 2026-05-11
+
+### Security
+- **Resolved 5 Dependabot alerts in frontend dependencies.** Upgraded transitive npm packages via `overrides` in `frontend/package.json`: `fast-uri` 3.1.0→3.1.2 (two CVEs: host confusion, path traversal), `@babel/plugin-transform-modules-systemjs` 7.29.0→7.29.4 (arbitrary code generation), `nth-check` 1.0.2→2.1.1 (ReDoS via SVG processing), `postcss` 7.0.39→8.5.14 (line return parsing error in nested copy). All build-time deps; no runtime impact. `npm run build` and all 69 frontend tests continue to pass.
+
 ## [0.0.17.13] - 2026-05-11
 
 ### Changed
