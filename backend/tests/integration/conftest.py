@@ -43,6 +43,8 @@ SKIP_MESSAGE = (
 # all three return results before allowing tests to proceed.
 _REINDEX_POLL_INTERVAL = 1  # seconds between probe checks
 _REINDEX_TIMEOUT = 300  # seconds before giving up
+# CDR has no persistent Lucene; full reindex takes ~4 min on typical hardware.
+_CDR_REINDEX_TIMEOUT = 600  # seconds before giving up on CDR full reindex
 
 # HAPI's in-memory ValueSet expansion is capped at 1000 codes (HAPI-0831).  ValueSets
 # with >1000 codes must be pre-expanded by HAPI's background scheduler before the CQL
@@ -98,6 +100,56 @@ def _wait_for_valueset_expansion(base_url: str, large_valueset_ids: list[str]) -
             f"{_VALUESET_EXPANSION_TIMEOUT}s for {len(pending)} ValueSet(s): {sorted(pending)[:5]}. "
             f"Tests may fail with IP=0 if large ValueSets are still unexpanded."
         )
+
+
+def _trigger_cdr_full_reindex_and_wait(cdr_url: str) -> None:
+    """Trigger a full $reindex on CDR and wait for the job to complete.
+
+    CDR uses an in-memory Lucene backend (no persistent directory) so patient-reference
+    searches — required by $everything — return 0 on startup until the index is rebuilt.
+    Unlike the measure engine, CDR has no CR/DEQM jobs, so reindexing all types at once
+    (including Procedure, MedicationRequest, MedicationAdministration) is safe.
+
+    Completion is detected by the $hapi.fhir.reindex-status endpoint returning a Bundle
+    (job report) instead of an OperationOutcome (in-progress).
+    """
+    import re as _re
+    import warnings as _warnings
+
+    import httpx as _httpx
+
+    headers = {"Content-Type": "application/fhir+json"}
+
+    r = _httpx.post(f"{cdr_url}/$reindex", json={"resourceType": "Parameters"}, headers=headers, timeout=30)
+    if r.status_code >= 400:
+        _warnings.warn(f"Full $reindex at {cdr_url} returned {r.status_code}: {r.text[:200]}")
+        return
+
+    try:
+        diag = r.json().get("issue", [{}])[0].get("diagnostics", "")
+        m = _re.search(r"_jobId=([a-f0-9-]+)", diag)
+        if not m:
+            _warnings.warn(f"No job ID in $reindex response at {cdr_url}; CDR reference-param index may be incomplete")
+            return
+        job_id = m.group(1)
+    except Exception as exc:
+        _warnings.warn(f"Could not parse $reindex response at {cdr_url}: {exc}")
+        return
+
+    deadline = time.monotonic() + _CDR_REINDEX_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            status = _httpx.get(f"{cdr_url}/$hapi.fhir.reindex-status?_jobId={job_id}", timeout=10)
+            if status.status_code == 200 and status.json().get("resourceType") == "Bundle":
+                return
+        except Exception:
+            pass
+        time.sleep(5)
+
+    _warnings.warn(
+        f"CDR full $reindex at {cdr_url} did not complete within {_CDR_REINDEX_TIMEOUT}s. "
+        "Tests may fail with incorrect populations if the CDR reference-param index is incomplete."
+    )
 
 
 def _trigger_reindex_and_wait(base_url: str, probe_patient_id: str, probe_encounter_id: str) -> None:
@@ -294,9 +346,14 @@ def _load_seed_data(_require_infrastructure):
         except Exception:
             pass
 
+        # CDR: full reindex with job-completion gating — covers all types including
+        # Procedure, MedReq, MedAdmin which $everything needs. CDR has no cr.enabled
+        # so reindexing all types at once is safe here.
+        _trigger_cdr_full_reindex_and_wait(TEST_CDR_URL)
+        # MEASURE: Enc/Obs/Cond only — explicit reindex of Proc/MedReq/MedAdmin causes
+        # HAPI to restart async jobs, producing 500 errors on in-flight CQL evaluations.
         if probe_patient_id and probe_encounter_id:
-            for target in (TEST_CDR_URL, TEST_MEASURE_URL):
-                _trigger_reindex_and_wait(target, probe_patient_id, probe_encounter_id)
+            _trigger_reindex_and_wait(TEST_MEASURE_URL, probe_patient_id, probe_encounter_id)
         return
 
     measure_bundle_path = SEED_DIR / "measure-bundle.json"
