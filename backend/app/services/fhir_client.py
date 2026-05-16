@@ -724,6 +724,16 @@ async def push_resources(
                             outcome=outcome,
                         )
                     )
+                logger.warning(
+                    "Chunked push: chunk returned OperationOutcome",
+                    extra={
+                        "chunk_index": chunk_idx,
+                        "total_chunks": len(chunks),
+                        "chunk_size": len(chunk),
+                        "status_code": resp.status_code,
+                        "target": base,
+                    },
+                )
                 continue
 
             chunk_result = _parse_bundle_upload_result(body, chunk)
