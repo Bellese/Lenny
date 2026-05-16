@@ -466,3 +466,118 @@ class TestSanitizeFilename:
         result = validation_module._sanitize_filename("../../etc/passwd.json")
         assert "/" not in result
         assert result == "passwd.json"
+
+
+# ---------------------------------------------------------------------------
+# max_bundle_entries forwarding test
+# ---------------------------------------------------------------------------
+
+
+class TestBundleUploadPassesMaxBundleEntries:
+    """Verify that process_bundle_upload forwards max_bundle_entries from the
+    active CDR config to push_resources() for CDR-targeted pushes."""
+
+    @pytest.mark.asyncio
+    async def test_bundle_upload_passes_max_bundle_entries_to_push(
+        self, test_session, test_engine, monkeypatch, tmp_path
+    ):
+        """When the active CDR has max_bundle_entries=200, the validation worker
+        must forward that value to push_resources() for the CDR push."""
+        import json as json_mod
+
+        from app.models.config import AuthType, CDRConfig
+        from app.models.validation import BundleUpload, ValidationStatus
+
+        # 1. Create an active CDR with max_bundle_entries=200.
+        cfg = CDRConfig(
+            name="Test CDR",
+            cdr_url="http://test-cdr.example.com/fhir",
+            auth_type=AuthType.none,
+            is_active=True,
+            is_default=False,
+            is_read_only=False,
+            max_bundle_entries=200,
+        )
+        test_session.add(cfg)
+        await test_session.commit()
+
+        # 2. Write a minimal bundle with a Patient (clinical resource) to disk.
+        bundle = {
+            "resourceType": "Bundle",
+            "type": "transaction",
+            "entry": [
+                {
+                    "resource": {
+                        "resourceType": "Patient",
+                        "id": "pat-1",
+                        "name": [{"given": ["Test"], "family": "Patient"}],
+                    },
+                    "request": {"method": "PUT", "url": "Patient/pat-1"},
+                }
+            ],
+        }
+        bundle_path = tmp_path / "test-max-entries.json"
+        bundle_path.write_text(json_mod.dumps(bundle))
+
+        # 3. Seed a BundleUpload row pointing to that file.
+        upload = BundleUpload(
+            filename="test-max-entries.json",
+            file_path=str(bundle_path),
+            status=ValidationStatus.queued,
+        )
+        test_session.add(upload)
+        await test_session.commit()
+        upload_id = upload.id
+
+        # 4. Monkeypatch push_resources in the validation module so the CDR
+        #    HTTP call is intercepted and we can inspect kwargs.
+        captured: dict = {}
+
+        async def fake_push_resources(
+            resources, target_url=None, auth_headers=None, max_bundle_entries=None
+        ):
+            # Only capture the CDR-targeted call (has target_url).
+            if target_url is not None:
+                captured["max_bundle_entries"] = max_bundle_entries
+                captured["target_url"] = target_url
+                captured["count"] = len(resources)
+            from app.services.fhir_client import BundleUploadResult
+
+            return BundleUploadResult()
+
+        monkeypatch.setattr("app.services.validation.push_resources", fake_push_resources)
+
+        # 5. Run the worker function.  It opens its own async_session internally,
+        #    but both it and test_session point at the same in-memory SQLite DB
+        #    because we override the engine via the session factory in conftest.
+        #    We need the session factory override to be active for the worker's
+        #    internal async_session() calls.  Patch async_session to use the
+        #    test engine.
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+        from app.services import validation as val_module
+
+        test_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+
+        import contextlib
+
+        @contextlib.asynccontextmanager
+        async def patched_async_session():
+            async with test_factory() as s:
+                yield s
+
+        monkeypatch.setattr(val_module, "async_session", patched_async_session)
+
+        from app.services.validation import process_bundle_upload
+
+        await process_bundle_upload(upload_id)
+
+        # 6. Assert the kwarg was forwarded correctly.
+        assert "max_bundle_entries" in captured, (
+            "fake_push_resources was never called with a target_url — "
+            "the CDR push path may not have been reached"
+        )
+        assert captured["max_bundle_entries"] == 200, (
+            f"Expected max_bundle_entries=200, got {captured.get('max_bundle_entries')!r}"
+        )
+        assert "test-cdr.example.com" in captured["target_url"]
