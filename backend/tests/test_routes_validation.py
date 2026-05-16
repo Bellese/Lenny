@@ -533,9 +533,7 @@ class TestBundleUploadPassesMaxBundleEntries:
         #    HTTP call is intercepted and we can inspect kwargs.
         captured: dict = {}
 
-        async def fake_push_resources(
-            resources, target_url=None, auth_headers=None, max_bundle_entries=None
-        ):
+        async def fake_push_resources(resources, target_url=None, auth_headers=None, max_bundle_entries=None):
             # Only capture the CDR-targeted call (has target_url).
             if target_url is not None:
                 captured["max_bundle_entries"] = max_bundle_entries
@@ -574,8 +572,7 @@ class TestBundleUploadPassesMaxBundleEntries:
 
         # 6. Assert the kwarg was forwarded correctly.
         assert "max_bundle_entries" in captured, (
-            "fake_push_resources was never called with a target_url — "
-            "the CDR push path may not have been reached"
+            "fake_push_resources was never called with a target_url — the CDR push path may not have been reached"
         )
         assert captured["max_bundle_entries"] == 200, (
             f"Expected max_bundle_entries=200, got {captured.get('max_bundle_entries')!r}"

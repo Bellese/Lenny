@@ -46,6 +46,7 @@ def _make_response(status_code, body):
         def raise_for_status(self):
             if self.status_code >= 400:
                 import httpx
+
                 raise httpx.HTTPStatusError("error", request=None, response=self)
 
     return _Resp(status_code, body)
@@ -62,11 +63,13 @@ async def test_chunked_push_succeeds_against_capped_sandbox():
         if n > 200:
             body = {
                 "resourceType": "OperationOutcome",
-                "issue": [{
-                    "severity": "error",
-                    "code": "exception",
-                    "details": {"text": "Too many entries in bundle. Max supported number of entries is 200"},
-                }],
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "details": {"text": "Too many entries in bundle. Max supported number of entries is 200"},
+                    }
+                ],
             }
             return _make_response(400, body)
         body = {
@@ -100,11 +103,13 @@ async def test_unchunked_push_against_capped_sandbox_raises():
 
     body = {
         "resourceType": "OperationOutcome",
-        "issue": [{
-            "severity": "error",
-            "code": "exception",
-            "details": {"text": "Too many entries in bundle. Max supported number of entries is 200"},
-        }],
+        "issue": [
+            {
+                "severity": "error",
+                "code": "exception",
+                "details": {"text": "Too many entries in bundle. Max supported number of entries is 200"},
+            }
+        ],
     }
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:

@@ -10,6 +10,7 @@ from app.services.fhir_client import (
     DataRequirementsStrategy,
     _acquire_smart_token,
     _build_auth_headers,
+    _chunk_request_entries,
     evaluate_measure,
     list_measures,
     push_resources,
@@ -566,9 +567,7 @@ async def test_push_resources_chunks_when_max_bundle_entries_set():
     """5 resources with max_bundle_entries=2 should POST 3 bundles
     (sizes 2, 2, 1) and aggregate per-entry results across them.
     """
-    resources = [
-        {"resourceType": "Patient", "id": f"p{i}"} for i in range(5)
-    ]
+    resources = [{"resourceType": "Patient", "id": f"p{i}"} for i in range(5)]
 
     def make_resp_for(req_bundle_json):
         n = len(req_bundle_json["entry"])
@@ -614,11 +613,13 @@ async def test_push_resources_partial_chunk_failure_does_not_raise():
         if call_idx["n"] == 2:
             body = {
                 "resourceType": "OperationOutcome",
-                "issue": [{
-                    "severity": "error",
-                    "code": "exception",
-                    "details": {"text": "Too many entries in bundle. Max supported number of entries is 1"},
-                }],
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "details": {"text": "Too many entries in bundle. Max supported number of entries is 1"},
+                    }
+                ],
             }
             return _make_response(400, body)
         n = len(json["entry"])
@@ -654,8 +655,13 @@ async def test_push_resources_all_chunks_failed_raises():
     resources = [{"resourceType": "Patient", "id": f"p{i}"} for i in range(3)]
     body = {
         "resourceType": "OperationOutcome",
-        "issue": [{"severity": "error", "code": "exception",
-                   "details": {"text": "Too many entries in bundle. Max supported number of entries is 1"}}],
+        "issue": [
+            {
+                "severity": "error",
+                "code": "exception",
+                "details": {"text": "Too many entries in bundle. Max supported number of entries is 1"},
+            }
+        ],
     }
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
@@ -673,8 +679,6 @@ async def test_push_resources_all_chunks_failed_raises():
 # ---------------------------------------------------------------------------
 # _chunk_request_entries — partition helper
 # ---------------------------------------------------------------------------
-
-from app.services.fhir_client import _chunk_request_entries
 
 
 def _entry(resource_type, resource_id):
