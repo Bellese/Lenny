@@ -18,14 +18,20 @@ from app.services.fhir_client import BundleUploadResult, push_resources
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(autouse=True)
 def _require_infrastructure():  # noqa: PT004  (overrides conftest autouse fixture)
-    """No-op override: these tests use httpx mocks and need no running HAPI."""
+    """No-op override (function scope): these tests use httpx mocks and need
+    no running HAPI. Function scope keeps this override local to this module
+    so the conftest's session-scoped fixture isn't shadowed for other files
+    when the full integration suite runs in one pytest invocation.
+    """
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _load_seed_data(_require_infrastructure):  # noqa: PT004  (overrides conftest autouse fixture)
-    """No-op override: these tests use httpx mocks and need no seed data."""
+@pytest.fixture(autouse=True)
+def _load_seed_data():  # noqa: PT004  (overrides conftest autouse fixture)
+    """No-op override (function scope): these tests use httpx mocks and need
+    no seed data. See _require_infrastructure for scope rationale.
+    """
 
 
 def _make_response(status_code, body):
