@@ -813,7 +813,7 @@ class TestTriageTestBundle:
         rolls back the transaction.  This test mimics that rollback explicitly.
         """
 
-        async def fail_on_clinical(resources, *, target_url=None, auth_headers=None):
+        async def fail_on_clinical(resources, *, target_url=None, auth_headers=None, **kwargs):
             if target_url is not None:
                 raise ValueError("CDR unreachable — simulated failure")
 
