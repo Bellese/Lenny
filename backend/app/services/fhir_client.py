@@ -560,6 +560,25 @@ def _normalize_measure_def(r: dict[str, Any]) -> dict[str, Any]:
     return r
 
 
+def _chunk_request_entries(
+    entries: list[dict[str, Any]],
+    max_size: int | None,
+) -> list[list[dict[str, Any]]]:
+    """Partition the Patients-first ordered request entries into chunks of
+    at most `max_size`. Returns a single chunk when `max_size` is None or ≤ 0.
+
+    Callers MUST sort the entry list Patients-first BEFORE invoking this
+    helper. Partitioning preserves the input order, which preserves the
+    invariant: every Patient referenced by a non-Patient entry has already
+    been POSTed (in an earlier chunk or earlier in the same chunk) before
+    HAPI tries to index the reference. See issue #177 + test_push_resources_
+    sorts_patients_first.
+    """
+    if not max_size or max_size <= 0:
+        return [entries]
+    return [entries[i : i + max_size] for i in range(0, len(entries), max_size)]
+
+
 def _parse_bundle_upload_result(
     response_bundle: dict[str, Any],
     request_entries: list[dict[str, Any]],
