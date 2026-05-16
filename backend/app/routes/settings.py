@@ -51,6 +51,7 @@ class CDRConnectionResponse(BaseModel):
     is_default: bool
     is_read_only: bool
     request_timeout_seconds: int
+    max_bundle_entries: int | None = None
 
     model_config = {"from_attributes": True}
 
@@ -62,6 +63,7 @@ class CDRConnectionCreate(BaseModel):
     auth_credentials: dict | None = None
     is_read_only: bool = False
     request_timeout_seconds: int = Field(default=30, ge=1, le=_MAX_REQUEST_TIMEOUT_SECONDS)
+    max_bundle_entries: int | None = Field(default=None, ge=1)
 
 
 class TestConnectionRequest(BaseModel):
