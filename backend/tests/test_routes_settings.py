@@ -785,3 +785,27 @@ async def test_put_admin_settings_comparison_independent_of_validation(client):
     data = resp.json()
     assert data["validation_enabled"] is True
     assert data["comparison_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# max_bundle_entries (issue #321)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_connection_persists_max_bundle_entries(client):
+    """POSTing a CDR connection with max_bundle_entries=200 round-trips through GET."""
+    resp = await client.post(
+        "/settings/connections",
+        json={
+            "name": "Firely Sandbox Test",
+            "cdr_url": "https://example.com/fhir",
+            "auth_type": "none",
+            "max_bundle_entries": 200,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    created_id = resp.json()["id"]
+
+    got = await client.get(f"/settings/connections/{created_id}")
+    assert got.status_code == 200
+    assert got.json()["max_bundle_entries"] == 200

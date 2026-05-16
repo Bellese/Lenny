@@ -111,6 +111,7 @@ async def _run_schema_migrations(conn) -> None:
             "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS is_default BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS is_read_only BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS request_timeout_seconds INTEGER NOT NULL DEFAULT 30",
+            "ALTER TABLE cdr_configs ADD COLUMN IF NOT EXISTS max_bundle_entries INTEGER",
         ]:
             await conn.execute(text(stmt))
 
