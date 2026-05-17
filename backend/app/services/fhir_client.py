@@ -1138,10 +1138,20 @@ async def evaluate_group_and_resolve_members(
     evaluated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        resp = await client.post(
-            f"{cdr_url}/Group/{group_id}/$evaluate",
-            headers=auth_headers,
-        )
+        try:
+            resp = await client.post(
+                f"{cdr_url}/Group/{group_id}/$evaluate",
+                headers=auth_headers,
+            )
+        except httpx.RequestError as exc:
+            # Let TimeoutException propagate so the router maps it to 504.
+            if isinstance(exc, httpx.TimeoutException):
+                raise
+            raise GroupEvaluateError(
+                f"Group/$evaluate unreachable: {type(exc).__name__}",
+                status_code=502,
+                operation_outcome=None,
+            ) from exc
         if not resp.is_success:
             try:
                 outcome = resp.json()
@@ -1172,6 +1182,14 @@ async def evaluate_group_and_resolve_members(
                         headers=auth_headers,
                     )
                 except Exception as exc:
+                    logger.warning(
+                        "Could not fetch group member",
+                        extra={
+                            "group_id": group_id,
+                            "patient_ref": ref,
+                            "error": str(exc) or type(exc).__name__,
+                        },
+                    )
                     return {
                         "id": patient_id,
                         "name": None,
@@ -1180,6 +1198,14 @@ async def evaluate_group_and_resolve_members(
                         "lookup_error": f"{type(exc).__name__}: {exc}",
                     }
                 if pr.status_code != 200:
+                    logger.warning(
+                        "Could not fetch group member",
+                        extra={
+                            "group_id": group_id,
+                            "patient_ref": ref,
+                            "error": f"HTTP {pr.status_code}",
+                        },
+                    )
                     return {
                         "id": patient_id,
                         "name": None,

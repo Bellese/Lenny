@@ -276,6 +276,43 @@ async def test_evaluate_raises_on_operation_outcome():
     assert exc_info.value.operation_outcome == outcome
 
 
+async def test_evaluate_records_lookup_error_on_httpx_failure():
+    """If the per-patient GET raises httpx.ConnectError, the member should be
+    returned with a populated lookup_error and null demographic fields."""
+    eval_resp = {
+        "resourceType": "Group",
+        "id": "g1",
+        "member": [{"entity": {"reference": "Patient/p1"}}],
+    }
+
+    patcher = patch("app.services.fhir_client.httpx.AsyncClient")
+    mock_httpx = patcher.start()
+    mock_ctx = AsyncMock()
+
+    async def _post(url, *args, **kwargs):
+        return _make_response(200, eval_resp)
+
+    async def _get(url, *args, **kwargs):
+        raise httpx.ConnectError("connection refused", request=_DUMMY_REQUEST)
+
+    mock_ctx.post = AsyncMock(side_effect=_post)
+    mock_ctx.get = AsyncMock(side_effect=_get)
+    mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+    mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+    try:
+        result = await evaluate_group_and_resolve_members("http://cdr.example", "g1", {})
+    finally:
+        patcher.stop()
+
+    assert result["member_count"] == 1
+    m = result["members"][0]
+    assert m["id"] == "p1"
+    assert m["name"] is None
+    assert m["gender"] is None
+    assert m["birth_date"] is None
+    assert "ConnectError" in m["lookup_error"]
+
+
 async def test_evaluate_zero_members_returns_empty_list():
     eval_resp = {"resourceType": "Group", "id": "g1", "member": []}
     patcher = _patch_async_client_routed(
