@@ -1022,6 +1022,77 @@ async def list_groups(
     return groups
 
 
+_CQL_CHARACTERISTIC_EXTENSION_URL = "http://hl7.org/fhir/StructureDefinition/characteristicExpression"
+_EXPRESSION_PREVIEW_MAX = 120
+
+
+def _extract_cql_expression(resource: dict[str, Any]) -> Optional[dict[str, str]]:
+    """Return {'language', 'expression'} if resource carries a CQL valueExpression,
+    else None. Filters by extension URL and `text/cql*` language prefix."""
+    for ext in resource.get("extension", []) or []:
+        if ext.get("url") != _CQL_CHARACTERISTIC_EXTENSION_URL:
+            continue
+        ve = ext.get("valueExpression") or {}
+        language = ve.get("language") or ""
+        expression = ve.get("expression") or ""
+        if language.startswith("text/cql") and expression:
+            return {"language": language, "expression": expression}
+    return None
+
+
+async def list_groups_with_expression(
+    cdr_url: str,
+    auth_headers: dict[str, str],
+) -> list[dict[str, Any]]:
+    """List CDR Group resources filtered to those carrying a CQL valueExpression.
+
+    Used by the experimental /api/groups endpoint (issue #322). Distinct from
+    `list_groups` which serves the measure-job flow and is intentionally not
+    modified."""
+    groups: list[dict[str, Any]] = []
+    url: Optional[str] = f"{cdr_url}/Group?_count=100"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        while url:
+            resp = await client.get(url, headers=auth_headers)
+            resp.raise_for_status()
+            bundle = resp.json()
+            for entry in bundle.get("entry", []):
+                resource = entry.get("resource", {})
+                if resource.get("resourceType") != "Group":
+                    continue
+                cql = _extract_cql_expression(resource)
+                if cql is None:
+                    continue
+                expression = cql["expression"]
+                preview = (
+                    expression
+                    if len(expression) <= _EXPRESSION_PREVIEW_MAX
+                    else expression[:_EXPRESSION_PREVIEW_MAX] + "..."
+                )
+                groups.append(
+                    {
+                        "id": resource.get("id"),
+                        "name": resource.get("name"),
+                        "type": resource.get("type"),
+                        "expression_language": cql["language"],
+                        "expression_preview": preview,
+                    }
+                )
+            url = None
+            for link in bundle.get("link", []):
+                if link.get("relation") == "next":
+                    next_url = link.get("url")
+                    if next_url and _same_origin(cdr_url, next_url):
+                        url = next_url
+                    elif next_url:
+                        logger.warning(
+                            "SSRF: pagination next link rejected (origin mismatch)",
+                            extra={"url": sanitize_url(next_url)},
+                        )
+                    break
+    return groups
+
+
 async def get_group_members(
     cdr_url: str,
     group_id: str,
