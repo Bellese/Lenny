@@ -39,6 +39,7 @@ PUT/POST 200 means the resource is durable. Search consistency is async, governe
 - Reindex Condition / Observation / Procedure / MedicationRequest / MedicationAdministration — measures don't query Encounter alone.
 - `/validation/upload-bundle` returns 200 before CDR indexing completes; subsequent `/jobs` runs race the index. There is no CDR-side wait.
 - `$everything` is a victim of this bug, not a cause. Don't propose replacing it.
+- Testing CQL operations (`$evaluate-measure`, `$cql-group-evaluate`, etc.) against any HAPI server that doesn't have `synchronization.strategy=sync` (e.g., external sandboxes like `cloud.alphora.com`): `Type?_summary=count` warming up is **not** sufficient. The CQL engine's internal `[Resource]` retrieves hit a different index path that can lag — you'll get `quantity: 0` with no error and conclude the operation is broken when it's actually a stale snapshot. Direct reads (`subject=Patient/123`) bypass the index and will work; population evaluation (no `subject`) won't. Before asserting, poll with a CQL-engine-equivalent search (e.g., `Patient?_count=1000`) until total matches what you just wrote.
 
 ### Structural fix (applied in PR #206; compensator removed in PR #214)
 
