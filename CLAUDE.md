@@ -104,6 +104,44 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
 - Prod runs on a single t3.large EC2 instance (tagged `leonard`; look up with `aws ec2 describe-instances --query 'Reservations[].Instances[].[InstanceId,InstanceType,State.Name]' --output text`).
 - Live: `https://lenny.bellese.dev` (UI), `https://api.lenny.bellese.dev` (API)
 
+## Deploy Configuration (configured by /setup-deploy)
+
+- **Platform:** AWS EC2 (single t3.large, instance `i-0f00585639d2f3ef1`, tagged `leonard`, us-east-1) — deploys via GitHub Actions OIDC role assumption + SSM Run Command (`leonard-deploy` document). No platform-specific deploy CLI (Fly/Render/Vercel/Netlify) involved.
+- **Project type:** Web app (frontend on `lenny.bellese.dev`) + backend API (on `api.lenny.bellese.dev`)
+- **Production URLs:**
+  - UI: `https://lenny.bellese.dev`
+  - API: `https://api.lenny.bellese.dev`
+  - Post-deploy health check: `https://api.lenny.bellese.dev/health` (returns JSON with `database`, `measure_engine`, `cdr` connection state)
+- **Deploy workflow:** `.github/workflows/deploy.yml`
+- **Trigger:** `push` to `main` (auto-deploy on every merge) + manual `workflow_dispatch`. Concurrency group `deploy-production`, `cancel-in-progress: false` — deploys are serialized.
+- **Deploy mechanism:** GitHub Actions → AWS OIDC role `arn:aws:iam::439475769170:role/leonard-github-deploy` → `aws ssm send-command --document-name leonard-deploy --instance-ids i-0f00585639d2f3ef1`. Poll loop with 64 × 15s (~16 min budget) checking `aws ssm get-command-invocation` status.
+- **Built-in workflow health check:** workflow polls `https://api.lenny.bellese.dev/health` 24 × 5s (~2 min budget) immediately after the SSM command succeeds. Deploy fails if the URL doesn't respond within that window.
+- **Merge method:** squash (per repo settings + observed single-line PR-suffixed commits on `main`).
+- **Pre-merge hooks:** the `pr-checks.yml` workflow (Lint, Unit Tests + Coverage, Integration Tests, Frontend Build, Script Security Lint) gates merges via branch protection. The Deploy workflow does NOT re-run tests (deliberate — see in-line comment in `deploy.yml:23-27`); CI parity comes from branch protection requiring the PR's merge commit to be byte-identical to a tested commit.
+
+### Deploy status command (for `/land-and-deploy`)
+
+The Deploy workflow IS the deploy mechanism, so poll the workflow run via `gh`:
+
+```bash
+# Get the latest deploy.yml run on main (by head_sha after the merge commit lands)
+env -u GH_TOKEN gh run list --repo Bellese/Lenny --workflow deploy.yml --branch main --limit 1 \
+  --json status,conclusion,headSha,databaseId,url,createdAt
+# Poll until status == "completed" and conclusion == "success"
+```
+
+### Post-deploy verification (for `/land-and-deploy` canary)
+
+```bash
+curl -fsS https://api.lenny.bellese.dev/health | jq '.status, .database.status, .measure_engine.status, .cdr.status'
+# Expect all == "healthy" / "connected"
+curl -fsS -o /dev/null -w "%{http_code}" https://lenny.bellese.dev    # expect 200
+```
+
+### Staging
+
+No staging environment configured. All merges to `main` deploy straight to production. CI parity (pr-checks.yml passes before merge) is the safety gate.
+
 ## Do NOT
 
 - Hardcode URLs or credentials — use environment variables

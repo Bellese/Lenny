@@ -99,6 +99,11 @@
   cursor: pointer;
 }
 
+.helperText {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-secondary);
+}
+
 .checkbox {
   width: 18px;
   height: 18px;

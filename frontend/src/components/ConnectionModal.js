@@ -19,6 +19,7 @@ const KIND_SPECS = {
     urlLabel: 'CDR URL',
     urlPlaceholder: 'http://localhost:8080/fhir',
     showReadOnly: true,
+    showBundleChunking: true,
     api: { create: createConnection, update: updateConnection, test: testConnection },
   },
   mcs: {
@@ -28,6 +29,7 @@ const KIND_SPECS = {
     urlLabel: 'Measure Engine URL',
     urlPlaceholder: 'http://localhost:8081/fhir',
     showReadOnly: false,
+    showBundleChunking: false,
     api: { create: createMcsConnection, update: updateMcsConnection, test: testMcsConnection },
   },
 };
@@ -46,6 +48,7 @@ export default function ConnectionModal({ kind = 'cdr', connection, onClose, onS
     client_secret: '',
     token_endpoint: '',
     is_read_only: false,
+    max_bundle_entries: '',
   });
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -60,6 +63,8 @@ export default function ConnectionModal({ kind = 'cdr', connection, onClose, onS
         [spec.urlField]: connection[spec.urlField] || '',
         auth_type: connection.auth_type || 'none',
         is_read_only: connection.is_read_only || false,
+        max_bundle_entries:
+          connection.max_bundle_entries == null ? '' : String(connection.max_bundle_entries),
       }));
     }
   }, [connection, spec.urlField]);
@@ -124,6 +129,10 @@ export default function ConnectionModal({ kind = 'cdr', connection, onClose, onS
     };
     if (spec.showReadOnly) {
       payload.is_read_only = form.is_read_only;
+    }
+    if (spec.showBundleChunking) {
+      const trimmed = String(form.max_bundle_entries).trim();
+      payload.max_bundle_entries = trimmed === '' ? null : Number.parseInt(trimmed, 10);
     }
     try {
       if (isEdit) {
@@ -216,6 +225,29 @@ export default function ConnectionModal({ kind = 'cdr', connection, onClose, onS
                 <input type="checkbox" checked={form.is_read_only} onChange={handleChange('is_read_only')} className={styles.checkbox} />
                 Read-only (never write to this {spec.label})
               </label>
+            </div>
+          )}
+
+          {spec.showBundleChunking && (
+            <div className={styles.formGroup}>
+              <label htmlFor="conn-max-bundle" className={styles.label}>
+                Max resources per bundle
+              </label>
+              <input
+                id="conn-max-bundle"
+                type="number"
+                min="1"
+                step="1"
+                value={form.max_bundle_entries}
+                onChange={handleChange('max_bundle_entries')}
+                className={styles.input}
+                placeholder="Leave blank to push as one bundle"
+              />
+              <div className={styles.helperText}>
+                Set this if your CDR rejects bundles above a fixed entry count
+                (e.g., 200 for Firely Sandbox). Leave blank for HAPI and other
+                servers that handle full bundles.
+              </div>
             </div>
           )}
 

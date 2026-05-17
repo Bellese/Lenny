@@ -2,7 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.0.17.16] - 2026-05-17
+
+### Added
+- Per-CDR `max_bundle_entries` setting that lets `push_resources()` partition clinical-data pushes into chunks of ≤N entries. Supports CDRs that enforce a per-bundle entry cap (e.g., Firely Sandbox = 200). Default `null` = single-shot push (existing behavior). (#321)
 
 ## [0.0.17.15] - 2026-05-11
 

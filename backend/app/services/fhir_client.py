@@ -560,6 +560,25 @@ def _normalize_measure_def(r: dict[str, Any]) -> dict[str, Any]:
     return r
 
 
+def _chunk_request_entries(
+    entries: list[dict[str, Any]],
+    max_size: int | None,
+) -> list[list[dict[str, Any]]]:
+    """Partition the Patients-first ordered request entries into chunks of
+    at most `max_size`. Returns a single chunk when `max_size` is None or ≤ 0.
+
+    Callers MUST sort the entry list Patients-first BEFORE invoking this
+    helper. Partitioning preserves the input order, which preserves the
+    invariant: every Patient referenced by a non-Patient entry has already
+    been POSTed (in an earlier chunk or earlier in the same chunk) before
+    HAPI tries to index the reference. See issue #177 + test_push_resources_
+    sorts_patients_first.
+    """
+    if not max_size or max_size <= 0:
+        return [entries]
+    return [entries[i : i + max_size] for i in range(0, len(entries), max_size)]
+
+
 def _parse_bundle_upload_result(
     response_bundle: dict[str, Any],
     request_entries: list[dict[str, Any]],
@@ -593,21 +612,24 @@ async def push_resources(
     resources: list[dict[str, Any]],
     target_url: str | None = None,
     auth_headers: dict[str, str] | None = None,
+    max_bundle_entries: int | None = None,
 ) -> BundleUploadResult:
-    """POST a batch Bundle of resources to the target FHIR server.
+    """POST resources to the target FHIR server, optionally chunked.
 
     Uses batch (not transaction) so HAPI does not validate cross-references
     between entries — avoids HAPI-2001 when clinical subjects are absent from
     the measure engine.
 
-    Patient resources are placed first in the batch. HAPI's bundle import
-    skips writing reference index entries for forward-references (e.g. an
-    Encounter whose `subject` points at a Patient that hasn't been written
-    yet in the same bundle). The Encounter is durably persisted but
-    `Encounter?patient=Patient/{id}` returns 0 forever afterwards. Sorting
-    Patients-first makes every Patient reference resolvable at index time.
-    Verified empirically 2026-04-25: same bundle, original order = 20/33
-    indexed; Patients-first = 33/33 at t=0. See issue #177.
+    Patient resources are placed first across the entire push. When
+    `max_bundle_entries` is set, the entry list is partitioned into chunks
+    of at most that size and each chunk is POSTed sequentially. Patients-
+    first ordering is preserved across chunk boundaries (issue #177).
+
+    Per-chunk outcomes are aggregated into a single BundleUploadResult.
+    Partial failure (some chunks 200, some 400) does NOT raise — failed-chunk
+    entries are recorded in `result.failed`. Total wipeout (every chunk
+    rejected) raises FhirOperationError with the first failure's outcome,
+    preserving the existing single-shot semantics for callers.
     """
     base = target_url or settings.MEASURE_ENGINE_URL
     valid = [r for r in resources if "resourceType" in r and "id" in r]
@@ -624,54 +646,118 @@ async def push_resources(
         }
         for r in ordered
     ]
-    bundle = {"resourceType": "Bundle", "type": "batch", "entry": request_entries}
-    if not bundle["entry"]:
+    if not request_entries:
         logger.warning("No valid resources to push")
         return BundleUploadResult()
+
+    chunks = _chunk_request_entries(request_entries, max_bundle_entries)
     headers = {"Content-Type": "application/fhir+json", **(auth_headers or {})}
-    start_ms = int(time.monotonic() * 1000)
+
+    aggregated = BundleUploadResult()
+    first_error: FhirOperationError | None = None
+    total_succeeded = 0
+
     async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(base, json=bundle, headers=headers)
-        latency_ms = int(time.monotonic() * 1000) - start_ms
-        try:
-            resp.raise_for_status()
-        except httpx.HTTPStatusError as exc:
-            outcome = FhirOperationOutcome.from_response(resp)
-            raise FhirOperationError(
-                operation="push-resources",
-                url=base,
-                status_code=resp.status_code,
-                outcome=outcome,
-                latency_ms=latency_ms,
-                cause=exc,
-            ) from exc
+        for chunk_idx, chunk in enumerate(chunks):
+            bundle = {"resourceType": "Bundle", "type": "batch", "entry": chunk}
+            start_ms = int(time.monotonic() * 1000)
+            resp = await client.post(base, json=bundle, headers=headers)
+            latency_ms = int(time.monotonic() * 1000) - start_ms
 
-        # 200 OK but the body is an OperationOutcome — entire-batch rejection
-        try:
-            body = resp.json()
-        except Exception:
-            body = {}
-        if isinstance(body, dict) and body.get("resourceType") == "OperationOutcome":
-            outcome = FhirOperationOutcome.from_dict(body)
-            raise FhirOperationError(
-                operation="push-resources",
-                url=base,
-                status_code=resp.status_code,
-                outcome=outcome,
-                latency_ms=latency_ms,
-            )
+            # HTTP error → record all entries in this chunk as failed; keep
+            # going so prior successes are not lost.
+            if resp.status_code >= 400:
+                outcome = FhirOperationOutcome.from_response(resp)
+                exc = FhirOperationError(
+                    operation="push-resources",
+                    url=base,
+                    status_code=resp.status_code,
+                    outcome=outcome,
+                    latency_ms=latency_ms,
+                )
+                if first_error is None:
+                    first_error = exc
+                for entry in chunk:
+                    aggregated.failed.append(
+                        BundleEntryResult(
+                            resource_type=entry["resource"].get("resourceType", "Unknown"),
+                            resource_id=entry["resource"].get("id"),
+                            status=f"{resp.status_code}",
+                            outcome=outcome,
+                        )
+                    )
+                logger.warning(
+                    "Chunked push: chunk failed",
+                    extra={
+                        "chunk_index": chunk_idx,
+                        "total_chunks": len(chunks),
+                        "chunk_size": len(chunk),
+                        "status_code": resp.status_code,
+                        "target": base,
+                    },
+                )
+                continue
 
-    result = _parse_bundle_upload_result(body, request_entries)
+            # 200 OK but body is an OperationOutcome — entire-chunk rejection
+            # on the success path.
+            try:
+                body = resp.json()
+            except Exception:
+                body = {}
+            if isinstance(body, dict) and body.get("resourceType") == "OperationOutcome":
+                outcome = FhirOperationOutcome.from_dict(body)
+                exc = FhirOperationError(
+                    operation="push-resources",
+                    url=base,
+                    status_code=resp.status_code,
+                    outcome=outcome,
+                    latency_ms=latency_ms,
+                )
+                if first_error is None:
+                    first_error = exc
+                for entry in chunk:
+                    aggregated.failed.append(
+                        BundleEntryResult(
+                            resource_type=entry["resource"].get("resourceType", "Unknown"),
+                            resource_id=entry["resource"].get("id"),
+                            status="OperationOutcome",
+                            outcome=outcome,
+                        )
+                    )
+                logger.warning(
+                    "Chunked push: chunk returned OperationOutcome",
+                    extra={
+                        "chunk_index": chunk_idx,
+                        "total_chunks": len(chunks),
+                        "chunk_size": len(chunk),
+                        "status_code": resp.status_code,
+                        "target": base,
+                    },
+                )
+                continue
+
+            chunk_result = _parse_bundle_upload_result(body, chunk)
+            aggregated.succeeded.extend(chunk_result.succeeded)
+            aggregated.failed.extend(chunk_result.failed)
+            total_succeeded += len(chunk_result.succeeded)
+
+    # Total wipeout — no chunk produced a single success. Raise so the caller
+    # (validation worker) marks the upload as `failed`, preserving the
+    # pre-chunking contract.
+    if total_succeeded == 0 and first_error is not None:
+        raise first_error
+
     logger.info(
         "Pushed resources",
         extra={
             "count": len(request_entries),
-            "succeeded": len(result.succeeded),
-            "failed": len(result.failed),
+            "chunks": len(chunks),
+            "succeeded": len(aggregated.succeeded),
+            "failed": len(aggregated.failed),
             "target": base,
         },
     )
-    return result
+    return aggregated
 
 
 async def evaluate_measure(

@@ -77,3 +77,15 @@ This log records significant technical and process choices with their rationale.
 `webpack-dev-server` is not included in the production artifact. The `frontend/Dockerfile` runtime stage copies the static `build/` directory and serves it via `serve@14` — webpack-dev-server is never installed or invoked in the deployed image. Neither CVE is reachable by end users.
 
 **Alternatives considered:** Upgrading or replacing `react-scripts` (CRA successor migration) — deferred as a multi-week refactor unrelated to these alerts. Accepting 5.x with a broken dev server — rejected because it masks a real developer experience regression behind a green CI build.
+
+---
+
+## ADR-009: Bundle chunking is per-CDR-connection, not global (2026-05-16)
+
+**Decision:** Configure `max_bundle_entries` as a column on each `CDRConfig` row, not as a global app setting.
+
+**Why:** Different CDRs enforce different per-bundle entry caps (Firely Sandbox = 200; AWS HealthLake ≈ 500; the local HAPI bundled in `docker-compose.yml` has no practical cap). A global setting would either over-chunk (extra round-trips against HAPI) or under-chunk (Firely rejects). Per-connection lets each row carry its own constraint.
+
+**Alternatives considered:** Auto-detect via `CapabilityStatement` — no FHIR-standard element advertises bundle-entry caps. Binary-search probing the cap on first push was considered but the latency cost and the brittleness of "what counts as 'too large'" made manual config the better trade for now.
+
+**Status:** Shipped in #321.
