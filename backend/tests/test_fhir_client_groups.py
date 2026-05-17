@@ -5,7 +5,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
-from app.services.fhir_client import list_groups_with_expression
+from app.services.fhir_client import (
+    GroupEvaluateError,
+    evaluate_group_and_resolve_members,
+    list_groups_with_expression,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -134,3 +138,155 @@ async def test_list_accepts_text_cql_identifier_language():
 
     assert len(out) == 1
     assert out[0]["expression_language"] == "text/cql-identifier"
+
+
+def _patch_async_client_routed(
+    post_response: httpx.Response,
+    get_routes: dict[str, httpx.Response],
+):
+    """Patch httpx.AsyncClient so POST returns post_response and GETs route by URL suffix.
+
+    `get_routes` maps URL substrings (e.g. "Patient/p1") to httpx.Response objects.
+    Unmatched GETs return 404.
+    """
+    patcher = patch("app.services.fhir_client.httpx.AsyncClient")
+    mock_httpx = patcher.start()
+    mock_ctx = AsyncMock()
+
+    async def _post(url, *args, **kwargs):
+        return post_response
+
+    async def _get(url, *args, **kwargs):
+        for key, resp in get_routes.items():
+            if key in url:
+                return resp
+        return _make_response(404, {"resourceType": "OperationOutcome"})
+
+    mock_ctx.post = AsyncMock(side_effect=_post)
+    mock_ctx.get = AsyncMock(side_effect=_get)
+    mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+    mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+    return patcher
+
+
+async def test_evaluate_returns_enriched_members():
+    eval_resp = {
+        "resourceType": "Group",
+        "id": "g1",
+        "member": [
+            {"entity": {"reference": "Patient/p1"}},
+            {"entity": {"reference": "Patient/p2"}},
+        ],
+    }
+    p1 = {
+        "resourceType": "Patient",
+        "id": "p1",
+        "name": [{"family": "Smith", "given": ["John"]}],
+        "gender": "male",
+        "birthDate": "1980-04-12",
+    }
+    p2 = {
+        "resourceType": "Patient",
+        "id": "p2",
+        "name": [{"family": "Doe", "given": ["Jane"]}],
+        "gender": "female",
+        "birthDate": "1992-08-30",
+    }
+
+    patcher = _patch_async_client_routed(
+        post_response=_make_response(200, eval_resp),
+        get_routes={
+            "Patient/p1": _make_response(200, p1),
+            "Patient/p2": _make_response(200, p2),
+        },
+    )
+    try:
+        result = await evaluate_group_and_resolve_members("http://cdr.example", "g1", {})
+    finally:
+        patcher.stop()
+
+    assert result["group_id"] == "g1"
+    assert result["member_count"] == 2
+    assert "evaluated_at" in result and result["evaluated_at"].endswith("Z")
+
+    by_id = {m["id"]: m for m in result["members"]}
+    assert by_id["p1"]["name"] == "Smith, John"
+    assert by_id["p1"]["gender"] == "male"
+    assert by_id["p1"]["birth_date"] == "1980-04-12"
+    assert "lookup_error" not in by_id["p1"]
+    assert by_id["p2"]["name"] == "Doe, Jane"
+    assert by_id["p2"]["gender"] == "female"
+    assert by_id["p2"]["birth_date"] == "1992-08-30"
+
+
+async def test_evaluate_partial_failure_records_lookup_error():
+    eval_resp = {
+        "resourceType": "Group",
+        "id": "g1",
+        "member": [
+            {"entity": {"reference": "Patient/p1"}},
+            {"entity": {"reference": "Patient/missing"}},
+        ],
+    }
+    p1 = {
+        "resourceType": "Patient",
+        "id": "p1",
+        "name": [{"family": "Smith", "given": ["John"]}],
+        "gender": "male",
+        "birthDate": "1980-04-12",
+    }
+
+    patcher = _patch_async_client_routed(
+        post_response=_make_response(200, eval_resp),
+        get_routes={
+            "Patient/p1": _make_response(200, p1),
+            "Patient/missing": _make_response(404, {"resourceType": "OperationOutcome"}),
+        },
+    )
+    try:
+        result = await evaluate_group_and_resolve_members("http://cdr.example", "g1", {})
+    finally:
+        patcher.stop()
+
+    by_id = {m["id"]: m for m in result["members"]}
+    assert by_id["p1"]["name"] == "Smith, John"
+    assert "lookup_error" not in by_id["p1"]
+    assert by_id["missing"]["name"] is None
+    assert by_id["missing"]["gender"] is None
+    assert by_id["missing"]["birth_date"] is None
+    assert "404" in by_id["missing"]["lookup_error"]
+
+
+async def test_evaluate_raises_on_operation_outcome():
+    outcome = {
+        "resourceType": "OperationOutcome",
+        "issue": [{"severity": "error", "code": "invalid", "diagnostics": "bad expression"}],
+    }
+    patcher = _patch_async_client_routed(
+        post_response=_make_response(400, outcome),
+        get_routes={},
+    )
+    try:
+        with pytest.raises(GroupEvaluateError) as exc_info:
+            await evaluate_group_and_resolve_members("http://cdr.example", "g1", {})
+    finally:
+        patcher.stop()
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.operation_outcome == outcome
+
+
+async def test_evaluate_zero_members_returns_empty_list():
+    eval_resp = {"resourceType": "Group", "id": "g1", "member": []}
+    patcher = _patch_async_client_routed(
+        post_response=_make_response(200, eval_resp),
+        get_routes={},
+    )
+    try:
+        result = await evaluate_group_and_resolve_members("http://cdr.example", "g1", {})
+    finally:
+        patcher.stop()
+
+    assert result["group_id"] == "g1"
+    assert result["member_count"] == 0
+    assert result["members"] == []

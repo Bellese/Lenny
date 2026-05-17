@@ -12,6 +12,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -1091,6 +1092,117 @@ async def list_groups_with_expression(
                         )
                     break
     return groups
+
+
+class GroupEvaluateError(Exception):
+    """Raised when Group/<id>/$evaluate returns a non-success response.
+
+    Carries the upstream HTTP status code and (if parseable) the FHIR
+    OperationOutcome body so callers can pass it through to clients."""
+
+    def __init__(
+        self,
+        message: str,
+        status_code: int,
+        operation_outcome: Optional[dict] = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.operation_outcome = operation_outcome
+
+
+def _format_patient_name(patient: dict[str, Any]) -> Optional[str]:
+    """Render the patient's first HumanName as 'family, given1 given2', or None."""
+    names = patient.get("name") or []
+    if not names:
+        return None
+    n = names[0]
+    family = n.get("family")
+    given = " ".join(n.get("given") or [])
+    if family and given:
+        return f"{family}, {given}"
+    return family or given or None
+
+
+async def evaluate_group_and_resolve_members(
+    cdr_url: str,
+    group_id: str,
+    auth_headers: dict[str, str],
+) -> dict[str, Any]:
+    """Invoke Group/<id>/$evaluate on the CDR and resolve members to patient summaries.
+
+    Returns: {"group_id", "evaluated_at" (ISO Z), "member_count", "members":
+    [{"id", "name", "gender", "birth_date", "lookup_error"?}, ...]}.
+
+    Raises GroupEvaluateError if $evaluate returns non-success."""
+    evaluated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        resp = await client.post(
+            f"{cdr_url}/Group/{group_id}/$evaluate",
+            headers=auth_headers,
+        )
+        if not resp.is_success:
+            try:
+                outcome = resp.json()
+            except Exception:
+                outcome = None
+            if not isinstance(outcome, dict) or outcome.get("resourceType") != "OperationOutcome":
+                outcome = None
+            raise GroupEvaluateError(
+                f"Group/$evaluate failed with status {resp.status_code}",
+                status_code=resp.status_code,
+                operation_outcome=outcome,
+            )
+
+        evaluated_group = resp.json()
+        refs: list[tuple[str, str]] = []
+        for m in evaluated_group.get("member", []):
+            ref = m.get("entity", {}).get("reference", "")
+            if ref.startswith("Patient/"):
+                refs.append((ref.split("/", 1)[1], ref))
+
+        semaphore = asyncio.Semaphore(10)
+
+        async def fetch(patient_id: str, ref: str) -> dict[str, Any]:
+            async with semaphore:
+                try:
+                    pr = await client.get(
+                        f"{cdr_url}/Patient/{patient_id}",
+                        headers=auth_headers,
+                    )
+                except Exception as exc:
+                    return {
+                        "id": patient_id,
+                        "name": None,
+                        "gender": None,
+                        "birth_date": None,
+                        "lookup_error": f"{type(exc).__name__}: {exc}",
+                    }
+                if pr.status_code != 200:
+                    return {
+                        "id": patient_id,
+                        "name": None,
+                        "gender": None,
+                        "birth_date": None,
+                        "lookup_error": f"HTTP {pr.status_code}",
+                    }
+                p = pr.json()
+                return {
+                    "id": patient_id,
+                    "name": _format_patient_name(p),
+                    "gender": p.get("gender"),
+                    "birth_date": p.get("birthDate"),
+                }
+
+        members = await asyncio.gather(*[fetch(pid, ref) for pid, ref in refs])
+
+    return {
+        "group_id": group_id,
+        "evaluated_at": evaluated_at,
+        "member_count": len(members),
+        "members": members,
+    }
 
 
 async def get_group_members(
