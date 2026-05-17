@@ -3,6 +3,7 @@ import { Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'reac
 import styles from './App.module.css';
 import MeasuresPage from './pages/MeasuresPage';
 import JobsPage from './pages/JobsPage';
+import GroupsPage from './pages/GroupsPage';
 import ResultsPage from './pages/ResultsPage';
 import SettingsPage from './pages/SettingsPage';
 import ValidationPage from './pages/ValidationPage';
@@ -18,6 +19,7 @@ import pkg from '../package.json';
 const ALL_NAV_ITEMS = [
   { path: '/measures',   label: 'Measures',   Icon: MeasuresIcon,  kbd: 'M', feature: null },
   { path: '/jobs',       label: 'Jobs',        Icon: JobsIcon,      kbd: 'J', feature: null },
+  { path: '/groups',     label: 'Groups',      Icon: JobsIcon,      kbd: 'G', feature: 'groups' },
   { path: '/results',    label: 'Results',     Icon: ResultsIcon,   kbd: 'E', feature: null },
   { path: '/validation', label: 'Validation',  Icon: ValidateIcon,  kbd: 'V', feature: 'validation' },
 ];
@@ -331,6 +333,7 @@ export default function App() {
             <Route path="/" element={<Navigate to="/measures" replace />} />
             <Route path="/measures" element={<MeasuresPage />} />
             <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/groups" element={<GroupsPage />} />
             <Route path="/results" element={<ResultsPage />} />
             <Route path="/results/:jobId" element={<ResultsPage />} />
             <Route path="/validation" element={<ValidationPage />} />
