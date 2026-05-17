@@ -49,7 +49,7 @@ class TSConfig(Base, ConnectionConfigMixin):  # example: terminology server
     )
 
     ts_url: Mapped[str] = mapped_column(String, nullable=False)
-    # Add kind-specific columns here. CDR has `is_read_only`; MCS has none.
+    # Add kind-specific columns here. CDR has `is_read_only` and `max_bundle_entries`; MCS has none.
     # Resist adding fields that "feel useful" — every column is a forward-compat
     # liability. Add only what the kind genuinely needs.
 ```
