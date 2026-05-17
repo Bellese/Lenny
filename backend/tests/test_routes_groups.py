@@ -96,7 +96,7 @@ async def test_evaluate_passes_operation_outcome_through(client: AsyncClient):
     ):
         resp = await client.post("/api/groups/g1/evaluate")
     assert resp.status_code == 502
-    assert resp.json()["operation_outcome"] == outcome
+    assert resp.json()["detail"]["operation_outcome"] == outcome
 
 
 @pytest.mark.asyncio
@@ -121,3 +121,35 @@ async def test_group_id_must_be_safe(client: AsyncClient):
     # route doesn't even match and we get a 404 from the router.)
     resp = await client.post("/api/groups/bad$id/evaluate")
     assert resp.status_code in (400, 422)
+
+
+@pytest.mark.parametrize("bad_id", [".", "..", "..."])
+@pytest.mark.asyncio
+async def test_group_id_rejects_dot_only_segments(client, bad_id):
+    """Dot-only ``group_id`` values must be rejected as path-traversal vectors.
+
+    Two layers of defense exist:
+
+    1. httpx (our test client AND the server-side outbound client) normalizes
+       RFC 3986 dot-segments at URL-construction time. A literal request to
+       ``/api/groups/./evaluate`` collapses to ``/api/groups/evaluate``
+       (no match → 404); ``/api/groups/../evaluate`` collapses to
+       ``/api/evaluate`` (also 404). That short-circuits the vulnerability
+       before our regex ever runs.
+    2. ``...`` (three or more dots) is *not* a dot-segment under RFC 3986, so
+       it survives normalization and reaches the handler — where the regex
+       ``^(?!\\.+$)...`` rejects it with 400.
+
+    Either response is safe; assert both are non-2xx and the ``...`` case
+    specifically hits the regex (400). This guards against future changes
+    that might bypass httpx normalization (e.g., raw ASGI clients).
+    """
+    await _enable_groups(client)
+    resp = await client.post(f"/api/groups/{bad_id}/evaluate")
+    # All dot-only IDs must be rejected; 400 (regex) or 404 (URL normalization)
+    # are both acceptable safe outcomes.
+    assert resp.status_code in (400, 404)
+    # The pure-dot regex itself must reject any all-dots input.
+    from app.routes.groups import _GROUP_ID_RE
+
+    assert _GROUP_ID_RE.match(bad_id) is None

@@ -13,7 +13,6 @@ import re
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import get_session
@@ -29,7 +28,7 @@ from app.services.fhir_client import (
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/groups", tags=["groups"])
 
-_GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,256}$")
+_GROUP_ID_RE = re.compile(r"^(?!\.+$)[A-Za-z0-9_\-\.]{1,256}$")
 
 
 async def _require_feature_enabled(session: AsyncSession) -> None:
@@ -63,7 +62,7 @@ async def evaluate_group_endpoint(
     group_id: str,
     session: AsyncSession = Depends(get_session),
     cdr: ConnectionContext = Depends(get_active_cdr),
-) -> JSONResponse:
+) -> dict:
     await _require_feature_enabled(session)
 
     if not _GROUP_ID_RE.match(group_id):
@@ -76,15 +75,15 @@ async def evaluate_group_endpoint(
     try:
         result = await evaluate_group_and_resolve_members(cdr.cdr_url, group_id, auth_headers)
     except GroupEvaluateError as exc:
-        body = {"error": str(exc), "status": exc.status_code}
+        detail = {"error": str(exc), "status": exc.status_code}
         if exc.operation_outcome is not None:
-            body["operation_outcome"] = exc.operation_outcome
-        return JSONResponse(status_code=502, content=body)
+            detail["operation_outcome"] = exc.operation_outcome
+        raise HTTPException(status_code=502, detail=detail)
     except httpx.TimeoutException as exc:
         logger.warning("Group $evaluate timed out", extra={"group_id": group_id})
-        return JSONResponse(status_code=504, content={"error": str(exc)})
+        raise HTTPException(status_code=504, detail={"error": str(exc)})
     except Exception:
         logger.exception("Group $evaluate unexpected failure", extra={"group_id": group_id})
-        return JSONResponse(status_code=502, content={"error": "Group $evaluate failed"})
+        raise HTTPException(status_code=502, detail={"error": "Group $evaluate failed"})
 
-    return JSONResponse(status_code=200, content=result)
+    return result
