@@ -785,3 +785,50 @@ async def test_put_admin_settings_comparison_independent_of_validation(client):
     data = resp.json()
     assert data["validation_enabled"] is True
     assert data["comparison_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# groups_enabled — experimental Groups $evaluate page (#322)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_admin_settings_defaults_groups_disabled(client):
+    """GET /settings/admin with no AppSetting rows returns groups_enabled=False."""
+    resp = await client.get("/settings/admin")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["groups_enabled"] is False
+
+
+async def test_put_admin_settings_enables_groups(client):
+    """PUT /settings/admin can enable groups and GET reflects the change."""
+    put_resp = await client.put("/settings/admin", json={"groups_enabled": True})
+    assert put_resp.status_code == 200
+    assert put_resp.json()["groups_enabled"] is True
+
+    get_resp = await client.get("/settings/admin")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["groups_enabled"] is True
+
+
+async def test_put_admin_settings_disables_groups(client):
+    """PUT /settings/admin can disable groups after it was enabled."""
+    await client.put("/settings/admin", json={"groups_enabled": True})
+    put_resp = await client.put("/settings/admin", json={"groups_enabled": False})
+    assert put_resp.status_code == 200
+    assert put_resp.json()["groups_enabled"] is False
+
+    get_resp = await client.get("/settings/admin")
+    assert get_resp.status_code == 200
+    assert get_resp.json()["groups_enabled"] is False
+
+
+async def test_put_admin_settings_groups_independent_of_others(client):
+    """groups_enabled is stored independently of validation/comparison."""
+    await client.put("/settings/admin", json={"validation_enabled": True, "comparison_enabled": True})
+    resp = await client.put("/settings/admin", json={"groups_enabled": True})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["validation_enabled"] is True
+    assert data["comparison_enabled"] is True
+    assert data["groups_enabled"] is True
