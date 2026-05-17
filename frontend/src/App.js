@@ -3,6 +3,7 @@ import { Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'reac
 import styles from './App.module.css';
 import MeasuresPage from './pages/MeasuresPage';
 import JobsPage from './pages/JobsPage';
+import GroupsPage from './pages/GroupsPage';
 import ResultsPage from './pages/ResultsPage';
 import SettingsPage from './pages/SettingsPage';
 import ValidationPage from './pages/ValidationPage';
@@ -18,6 +19,7 @@ import pkg from '../package.json';
 const ALL_NAV_ITEMS = [
   { path: '/measures',   label: 'Measures',   Icon: MeasuresIcon,  kbd: 'M', feature: null },
   { path: '/jobs',       label: 'Jobs',        Icon: JobsIcon,      kbd: 'J', feature: null },
+  { path: '/groups',     label: 'Groups',      Icon: JobsIcon,      kbd: 'G', feature: 'groups' },
   { path: '/results',    label: 'Results',     Icon: ResultsIcon,   kbd: 'E', feature: null },
   { path: '/validation', label: 'Validation',  Icon: ValidateIcon,  kbd: 'V', feature: 'validation' },
 ];
@@ -25,6 +27,7 @@ const ALL_NAV_ITEMS = [
 const PAGE_TITLE = {
   '/measures': 'Measures',
   '/jobs': 'Jobs',
+  '/groups': 'Groups',
   '/results': 'Results',
   '/validation': 'Validation',
   '/settings': 'Settings',
@@ -33,6 +36,7 @@ const PAGE_TITLE = {
 const SEARCH_PLACEHOLDER = {
   '/measures': 'Search measures…',
   '/jobs': 'Search jobs…',
+  '/groups': 'Search groups…',
   '/results': 'Search patients…',
   '/validation': 'Search validation runs…',
   '/settings': 'Search…',
@@ -76,7 +80,7 @@ export default function App() {
     return 'light';
   });
   const [query, setQuery] = useState('');
-  const [features, setFeatures] = useState({ validation: false });
+  const [features, setFeatures] = useState({ validation: false, groups: false });
   const searchRef = useRef(null);
 
   useEffect(() => {
@@ -152,9 +156,15 @@ export default function App() {
 
   useEffect(() => {
     getAdminSettings()
-      .then(s => setFeatures({ validation: s.validation_enabled ?? false }))
+      .then(s => setFeatures({
+        validation: s.validation_enabled ?? false,
+        groups: s.groups_enabled ?? false,
+      }))
       .catch(() => {});
-    const h = (e) => setFeatures({ validation: e.detail.validation_enabled ?? false });
+    const h = (e) => setFeatures({
+      validation: e.detail.validation_enabled ?? false,
+      groups: e.detail.groups_enabled ?? false,
+    });
     window.addEventListener('admin-settings-changed', h);
     return () => window.removeEventListener('admin-settings-changed', h);
   }, []);
@@ -183,6 +193,7 @@ export default function App() {
         else if (e.key === 'j' || e.key === 'J') navigate('/jobs');
         else if (e.key === 'e' || e.key === 'E') navigate('/results');
         else if ((e.key === 'v' || e.key === 'V') && features.validation) navigate('/validation');
+        else if ((e.key === 'g' || e.key === 'G') && features.groups) navigate('/groups');
       }
     };
     window.addEventListener('keydown', h);
@@ -324,6 +335,7 @@ export default function App() {
             <Route path="/" element={<Navigate to="/measures" replace />} />
             <Route path="/measures" element={<MeasuresPage />} />
             <Route path="/jobs" element={<JobsPage />} />
+            <Route path="/groups" element={<GroupsPage />} />
             <Route path="/results" element={<ResultsPage />} />
             <Route path="/results/:jobId" element={<ResultsPage />} />
             <Route path="/validation" element={<ValidationPage />} />

@@ -15,7 +15,7 @@ from app.config import settings as app_settings
 from app.db import engine
 from app.limiter import limiter
 from app.models import Base
-from app.routes import health, jobs, measures, results, settings, validation
+from app.routes import groups, health, jobs, measures, results, settings, validation
 from app.services.bundle_loader import load_connectathon_bundles
 from app.services.worker import request_shutdown, worker_loop
 
@@ -542,6 +542,7 @@ app.add_middleware(
 )
 
 # Register routers
+app.include_router(groups.router)
 app.include_router(health.router)
 app.include_router(jobs.router)
 app.include_router(measures.router)
