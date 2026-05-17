@@ -2,7 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.0.17.17] - 2026-05-17
+
+### Added
+- **Experimental Groups page.** Admin-gated UI at `/groups` lists CQL-evaluatable `Group` resources on the active CDR (filtered to those carrying a `characteristicExpression` extension with `text/cql*` language) and invokes the CQL IG `Group/<id>/$evaluate` operation per row. Results — name, id, gender, birth date for each resolved member — render in an inline accordion. Default `groups_enabled=false`; toggle in Settings → Developer Tools. Architecturally independent from the Measure pipeline (asserted by `tests/test_groups_independence.py`). Requires a CDR that implements the operation; the bundled HAPI image does not. (#322)
+
+## [0.0.17.16] - 2026-05-17
+
+### Added
+- Per-CDR `max_bundle_entries` setting that lets `push_resources()` partition clinical-data pushes into chunks of ≤N entries. Supports CDRs that enforce a per-bundle entry cap (e.g., Firely Sandbox = 200). Default `null` = single-shot push (existing behavior). (#321)
 
 ## [0.0.17.15] - 2026-05-11
 

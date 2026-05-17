@@ -13,6 +13,10 @@
 
 The CDR and Measure Engine are intentionally separate. Both are user-configurable in Settings: multiple CDR and MCS (Measure Calculation Server) connections can be saved, with one of each active at a time. The bundled `hapi-fhir-measure` service is the default MCS — the only one with `hapi.fhir.cr.enabled=true` — but attendees can point at their own MCS via Settings → MCS Connections (issue #12).
 
+### Per-CDR connection settings
+
+**Per-CDR settings.** Each CDR connection carries `request_timeout_seconds` (HTTP timeout) and `max_bundle_entries` (optional cap on entries per push). When `max_bundle_entries` is set, `push_resources()` partitions the entry list into chunks of ≤N and POSTs each chunk sequentially; Patients-first ordering is preserved across chunk boundaries. Use this for CDRs that enforce a per-bundle entry cap (e.g., Firely Sandbox = 200, AWS HealthLake's bundle size limits). Default `null` = single-shot push (current behavior).
+
 ### Compose modes: vanilla vs. prebaked
 
 Two compose layouts share these services:
@@ -46,6 +50,11 @@ backend/app/
                     GET /jobs/{id}/comparison (actual vs. expected population counts)
     measures.py     GET /measures, POST /measures/upload
     results.py      GET /results, GET /results/{job_id}
+    groups.py       GET /api/groups, POST /api/groups/{id}/evaluate — experimental.
+                    Admin-gated (`groups_enabled`); lists CQL-evaluatable Groups from
+                    the active CDR and invokes the CQL IG `Group/<id>/$evaluate` op.
+                    Architecturally independent from the measure pipeline; enforced
+                    by `tests/test_groups_independence.py`. (#322)
     settings.py     /settings/admin (feature flags), seeds CDR + MCS routers from connection_factory
     connection_factory.py
                     Generic per-kind CRUD + activate + test-connection. Mounted twice:
@@ -88,6 +97,9 @@ frontend/src/
     ResultsPage.js    Aggregate population summaries + patient drill-down
     SettingsPage.js   CDR + MCS connection management (two stacked sections), admin tab
     ValidationPage.js Upload test bundles, view pass/fail results
+    GroupsPage.js     Experimental: list CQL-evaluatable Groups on the active CDR; per-row
+                      `$evaluate` button expands into an accordion of resolved members.
+                      Admin-gated; redirects to `/measures` when disabled. (#322)
   components/
     ComparisonView.js  Per-patient actual vs. expected population comparison panel
     ConnectionModal.js Kind-driven connection modal (KIND_SPECS for cdr/mcs); shared by both connection sections

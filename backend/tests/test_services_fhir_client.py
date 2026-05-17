@@ -10,6 +10,7 @@ from app.services.fhir_client import (
     DataRequirementsStrategy,
     _acquire_smart_token,
     _build_auth_headers,
+    _chunk_request_entries,
     evaluate_measure,
     list_measures,
     push_resources,
@@ -544,6 +545,198 @@ async def test_push_resources_returns_bundle_result_with_failed_entries():
     assert result.succeeded[0].resource_type == "Patient"
     assert result.failed[0].resource_type == "Condition"
     assert result.has_failures is True
+
+
+async def test_push_resources_max_bundle_entries_none_posts_once():
+    """max_bundle_entries=None preserves the existing single-POST behavior."""
+    resources = [{"resourceType": "Patient", "id": f"p{i}"} for i in range(5)]
+    mock_response = _make_response(200, {"resourceType": "Bundle", "entry": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.post = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await push_resources(resources, max_bundle_entries=None)
+
+    assert mock_ctx.post.call_count == 1
+
+
+async def test_push_resources_chunks_when_max_bundle_entries_set():
+    """5 resources with max_bundle_entries=2 should POST 3 bundles
+    (sizes 2, 2, 1) and aggregate per-entry results across them.
+    """
+    resources = [{"resourceType": "Patient", "id": f"p{i}"} for i in range(5)]
+
+    def make_resp_for(req_bundle_json):
+        n = len(req_bundle_json["entry"])
+        body = {
+            "resourceType": "Bundle",
+            "type": "batch-response",
+            "entry": [{"response": {"status": "201 Created"}} for _ in range(n)],
+        }
+        return _make_response(200, body)
+
+    posted_bundles = []
+
+    async def fake_post(url, *, json, headers):
+        posted_bundles.append(json)
+        return make_resp_for(json)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.post = AsyncMock(side_effect=fake_post)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await push_resources(resources, max_bundle_entries=2)
+
+    assert mock_ctx.post.call_count == 3
+    assert [len(b["entry"]) for b in posted_bundles] == [2, 2, 1]
+    assert len(result.succeeded) == 5
+    assert len(result.failed) == 0
+
+
+async def test_push_resources_partial_chunk_failure_does_not_raise():
+    """If some chunks succeed and one chunk's HTTP request errors with 400,
+    push_resources must NOT raise — it returns an aggregated BundleUploadResult
+    with the failed chunk's entries marked as failures and earlier successes
+    intact. Mirrors the existing 200-with-per-entry-failures semantics.
+    """
+    resources = [{"resourceType": "Patient", "id": f"p{i}"} for i in range(4)]
+
+    call_idx = {"n": 0}
+
+    async def fake_post(url, *, json, headers):
+        call_idx["n"] += 1
+        if call_idx["n"] == 2:
+            body = {
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "details": {"text": "Too many entries in bundle. Max supported number of entries is 1"},
+                    }
+                ],
+            }
+            return _make_response(400, body)
+        n = len(json["entry"])
+        body = {
+            "resourceType": "Bundle",
+            "type": "batch-response",
+            "entry": [{"response": {"status": "201 Created"}} for _ in range(n)],
+        }
+        return _make_response(200, body)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.post = AsyncMock(side_effect=fake_post)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await push_resources(resources, max_bundle_entries=2)
+
+    assert mock_ctx.post.call_count == 2
+    assert len(result.succeeded) == 2
+    assert len(result.failed) == 2
+    for fe in result.failed:
+        assert fe.outcome is not None
+
+
+async def test_push_resources_all_chunks_failed_raises():
+    """If every chunk's POST fails atomically, surface the first chunk's
+    outcome via FhirOperationError so validation.py marks the upload as
+    `failed`. Preserves the existing single-shot raise-on-400 contract.
+    """
+    from app.services.fhir_errors import FhirOperationError
+
+    resources = [{"resourceType": "Patient", "id": f"p{i}"} for i in range(3)]
+    body = {
+        "resourceType": "OperationOutcome",
+        "issue": [
+            {
+                "severity": "error",
+                "code": "exception",
+                "details": {"text": "Too many entries in bundle. Max supported number of entries is 1"},
+            }
+        ],
+    }
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.post = AsyncMock(return_value=_make_response(400, body))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(FhirOperationError) as excinfo:
+            await push_resources(resources, max_bundle_entries=2)
+
+    assert excinfo.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# _chunk_request_entries — partition helper
+# ---------------------------------------------------------------------------
+
+
+def _entry(resource_type, resource_id):
+    return {
+        "resource": {"resourceType": resource_type, "id": resource_id},
+        "request": {"method": "PUT", "url": f"{resource_type}/{resource_id}"},
+    }
+
+
+def test_chunk_request_entries_none_returns_single_chunk():
+    entries = [_entry("Patient", "p1"), _entry("Encounter", "e1")]
+    chunks = _chunk_request_entries(entries, max_size=None)
+    assert chunks == [entries]
+
+
+def test_chunk_request_entries_zero_max_returns_single_chunk():
+    # Defensive: treat 0 or negative as "no chunking" (the API layer already
+    # rejects these at request time, but the service layer should be safe).
+    entries = [_entry("Patient", "p1")]
+    assert _chunk_request_entries(entries, max_size=0) == [entries]
+    assert _chunk_request_entries(entries, max_size=-1) == [entries]
+
+
+def test_chunk_request_entries_partitions_evenly():
+    entries = [_entry("Patient", f"p{i}") for i in range(6)]
+    chunks = _chunk_request_entries(entries, max_size=2)
+    assert len(chunks) == 3
+    assert all(len(c) == 2 for c in chunks)
+    # Order within and across chunks must be preserved.
+    assert [e["resource"]["id"] for c in chunks for e in c] == [f"p{i}" for i in range(6)]
+
+
+def test_chunk_request_entries_handles_remainder():
+    entries = [_entry("Patient", f"p{i}") for i in range(5)]
+    chunks = _chunk_request_entries(entries, max_size=2)
+    assert [len(c) for c in chunks] == [2, 2, 1]
+
+
+def test_chunk_request_entries_preserves_patients_first_across_chunks():
+    """Patients must precede non-Patients in the chunk sequence, so HAPI's
+    reference index sees the Patient before any Encounter that references it.
+    This protects the invariant from issue #177 across chunk boundaries.
+    """
+    entries = [
+        _entry("Patient", "p1"),
+        _entry("Patient", "p2"),
+        _entry("Patient", "p3"),
+        _entry("Encounter", "e1"),
+        _entry("Encounter", "e2"),
+        _entry("Condition", "c1"),
+    ]
+    chunks = _chunk_request_entries(entries, max_size=2)
+    flat_types = [e["resource"]["resourceType"] for c in chunks for e in c]
+    # Find first non-Patient and assert no Patient appears after it.
+    first_non_patient = next(i for i, t in enumerate(flat_types) if t != "Patient")
+    assert "Patient" not in flat_types[first_non_patient:], (
+        f"Patient appeared after a non-Patient across chunks: {flat_types}"
+    )
 
 
 async def test_gather_result_partial_failure_surfaced():

@@ -67,8 +67,9 @@ By default, Lenny uses a bundled CDR with test data. To connect to your organiza
 1. Go to Settings
 2. Enter your CDR URL
 3. Select auth type (None, Basic Auth, or Bearer Token)
-4. Click "Test Connection" to verify
-5. Save
+4. *(Optional)* If your CDR rejects bundles above a fixed entry count (Firely Sandbox = 200, AWS HealthLake and others have similar caps), set **Max resources per bundle** to that limit. Leave blank for HAPI and other servers that accept full bundles.
+5. Click "Test Connection" to verify
+6. Save
 
 Auth credentials (passwords, bearer tokens) are encrypted at rest using Fernet (AES-128-CBC + HMAC-SHA256). **Set `CDR_FERNET_KEY` in `.env` before saving a custom CDR — generate one with `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`.** See `.env.example` and `docs/architecture.md` for the production SSM/Docker-secrets pipeline.
 

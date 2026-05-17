@@ -832,3 +832,104 @@ async def test_put_admin_settings_groups_independent_of_others(client):
     assert data["validation_enabled"] is True
     assert data["comparison_enabled"] is True
     assert data["groups_enabled"] is True
+
+
+# ---------------------------------------------------------------------------
+# max_bundle_entries (issue #321)
+# ---------------------------------------------------------------------------
+
+
+async def test_create_connection_persists_max_bundle_entries(client):
+    """POSTing a CDR connection with max_bundle_entries=200 round-trips through GET."""
+    resp = await client.post(
+        "/settings/connections",
+        json={
+            "name": "Firely Sandbox Test",
+            "cdr_url": "https://example.com/fhir",
+            "auth_type": "none",
+            "max_bundle_entries": 200,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    created_id = resp.json()["id"]
+
+    got = await client.get(f"/settings/connections/{created_id}")
+    assert got.status_code == 200
+    assert got.json()["max_bundle_entries"] == 200
+
+
+async def test_create_connection_rejects_zero_max_bundle_entries(client):
+    resp = await client.post(
+        "/settings/connections",
+        json={
+            "name": "Bad Bundle Cap",
+            "cdr_url": "https://example.com/fhir",
+            "auth_type": "none",
+            "max_bundle_entries": 0,
+        },
+    )
+    assert resp.status_code == 422
+
+
+async def test_create_connection_rejects_negative_max_bundle_entries(client):
+    resp = await client.post(
+        "/settings/connections",
+        json={
+            "name": "Negative Bundle Cap",
+            "cdr_url": "https://example.com/fhir",
+            "auth_type": "none",
+            "max_bundle_entries": -10,
+        },
+    )
+    assert resp.status_code == 422
+
+
+async def test_create_connection_accepts_null_max_bundle_entries(client):
+    """null = no chunking, must remain valid (default behavior preserve)."""
+    resp = await client.post(
+        "/settings/connections",
+        json={
+            "name": "No Bundle Cap",
+            "cdr_url": "https://example.com/fhir",
+            "auth_type": "none",
+            "max_bundle_entries": None,
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["max_bundle_entries"] is None
+
+
+async def test_update_connection_round_trips_max_bundle_entries(client):
+    create = await client.post(
+        "/settings/connections",
+        json={
+            "name": "Update Bundle Cap",
+            "cdr_url": "https://example.com/fhir",
+            "auth_type": "none",
+        },
+    )
+    cid = create.json()["id"]
+    assert create.json()["max_bundle_entries"] is None
+
+    upd = await client.put(
+        f"/settings/connections/{cid}",
+        json={
+            "name": "Update Bundle Cap",
+            "cdr_url": "https://example.com/fhir",
+            "auth_type": "none",
+            "max_bundle_entries": 500,
+        },
+    )
+    assert upd.status_code == 200, upd.text
+    assert upd.json()["max_bundle_entries"] == 500
+
+    cleared = await client.put(
+        f"/settings/connections/{cid}",
+        json={
+            "name": "Update Bundle Cap",
+            "cdr_url": "https://example.com/fhir",
+            "auth_type": "none",
+            "max_bundle_entries": None,
+        },
+    )
+    assert cleared.json()["max_bundle_entries"] is None
