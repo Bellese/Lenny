@@ -47,7 +47,7 @@ export default function SettingsPage() {
       const data = await getAdminSettings();
       setAdminSettings(data);
     } catch {
-      setAdminSettings({ validation_enabled: false });
+      setAdminSettings({ validation_enabled: false, comparison_enabled: false, groups_enabled: false });
     }
   }, []);
 
@@ -91,6 +91,20 @@ export default function SettingsPage() {
       setAdminSettings(updated);
       window.dispatchEvent(new CustomEvent('admin-settings-changed', { detail: updated }));
       toast.success(enabled ? 'Comparison enabled' : 'Comparison disabled');
+    } catch (err) {
+      toast.error(err.message || 'Failed to update setting');
+    } finally {
+      setAdminSaving(false);
+    }
+  };
+
+  const handleToggleGroups = async (enabled) => {
+    setAdminSaving(true);
+    try {
+      const updated = await updateAdminSettings({ groups_enabled: enabled });
+      setAdminSettings(updated);
+      window.dispatchEvent(new CustomEvent('admin-settings-changed', { detail: updated }));
+      toast.success(enabled ? 'Groups enabled' : 'Groups disabled');
     } catch (err) {
       toast.error(err.message || 'Failed to update setting');
     } finally {
@@ -247,6 +261,22 @@ export default function SettingsPage() {
                   <Toggle
                     checked={adminSettings?.comparison_enabled ?? false}
                     onChange={handleToggleComparison}
+                    disabled={adminSaving}
+                  />
+                </div>
+                <div className={styles.adminRow}>
+                  <div className={styles.adminRowInfo}>
+                    <div className={styles.adminRowLabel}>Groups</div>
+                    <div className={styles.adminRowDesc}>
+                      Adds a Groups tab where you can list CQL-evaluatable Groups from the current CDR
+                      and invoke <code>Group/&lt;id&gt;/$evaluate</code> to resolve members.
+                      Requires a CDR that supports the operation (the bundled HAPI image does not).
+                      Experimental.
+                    </div>
+                  </div>
+                  <Toggle
+                    checked={adminSettings?.groups_enabled ?? false}
+                    onChange={handleToggleGroups}
                     disabled={adminSaving}
                   />
                 </div>

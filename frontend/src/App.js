@@ -76,7 +76,7 @@ export default function App() {
     return 'light';
   });
   const [query, setQuery] = useState('');
-  const [features, setFeatures] = useState({ validation: false });
+  const [features, setFeatures] = useState({ validation: false, groups: false });
   const searchRef = useRef(null);
 
   useEffect(() => {
@@ -152,9 +152,15 @@ export default function App() {
 
   useEffect(() => {
     getAdminSettings()
-      .then(s => setFeatures({ validation: s.validation_enabled ?? false }))
+      .then(s => setFeatures({
+        validation: s.validation_enabled ?? false,
+        groups: s.groups_enabled ?? false,
+      }))
       .catch(() => {});
-    const h = (e) => setFeatures({ validation: e.detail.validation_enabled ?? false });
+    const h = (e) => setFeatures({
+      validation: e.detail.validation_enabled ?? false,
+      groups: e.detail.groups_enabled ?? false,
+    });
     window.addEventListener('admin-settings-changed', h);
     return () => window.removeEventListener('admin-settings-changed', h);
   }, []);
@@ -183,6 +189,7 @@ export default function App() {
         else if (e.key === 'j' || e.key === 'J') navigate('/jobs');
         else if (e.key === 'e' || e.key === 'E') navigate('/results');
         else if ((e.key === 'v' || e.key === 'V') && features.validation) navigate('/validation');
+        else if ((e.key === 'g' || e.key === 'G') && features.groups) navigate('/groups');
       }
     };
     window.addEventListener('keydown', h);
