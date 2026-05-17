@@ -83,3 +83,71 @@ describe('GroupsPage — list', () => {
     expect(await screen.findByText(/CDR unreachable/i)).toBeInTheDocument();
   });
 });
+
+import userEvent from '@testing-library/user-event';
+
+describe('GroupsPage — $evaluate', () => {
+  const enableAndOneGroup = () => {
+    api.getAdminSettings = jest.fn().mockResolvedValue({ groups_enabled: true });
+    api.getEvaluatableGroups = jest.fn().mockResolvedValue({
+      groups: [{
+        id: 'g1', name: 'g1', type: 'person',
+        expression_language: 'text/cql-expression',
+        expression_preview: 'Patient.active',
+      }],
+    });
+  };
+
+  test('clicking $evaluate expands the row with members', async () => {
+    enableAndOneGroup();
+    api.evaluateGroup = jest.fn().mockResolvedValue({
+      group_id: 'g1',
+      evaluated_at: '2026-05-17T14:32:01Z',
+      member_count: 1,
+      members: [{ id: 'p1', name: 'Smith, John', gender: 'male', birth_date: '1980-04-12' }],
+    });
+    renderAt();
+    const btn = await screen.findByRole('button', { name: /\$evaluate/i });
+    await userEvent.click(btn);
+    expect(await screen.findByText('Smith, John')).toBeInTheDocument();
+    expect(screen.getByText('1980-04-12')).toBeInTheDocument();
+  });
+
+  test('disables button while evaluating', async () => {
+    enableAndOneGroup();
+    let resolve;
+    api.evaluateGroup = jest.fn().mockReturnValue(new Promise(r => { resolve = r; }));
+    renderAt();
+    const btn = await screen.findByRole('button', { name: /\$evaluate/i });
+    await userEvent.click(btn);
+    expect(btn).toBeDisabled();
+    resolve({ group_id: 'g1', evaluated_at: 't', member_count: 0, members: [] });
+  });
+
+  test('renders OperationOutcome on error', async () => {
+    enableAndOneGroup();
+    const err = new Error('boom');
+    err.body = {
+      detail: {
+        operation_outcome: {
+          resourceType: 'OperationOutcome',
+          issue: [{ severity: 'error', code: 'not-supported', diagnostics: 'No $evaluate here' }],
+        },
+      },
+    };
+    api.evaluateGroup = jest.fn().mockRejectedValue(err);
+    renderAt();
+    await userEvent.click(await screen.findByRole('button', { name: /\$evaluate/i }));
+    expect(await screen.findByText(/No \$evaluate here/i)).toBeInTheDocument();
+  });
+
+  test('shows zero-members state when evaluation returns empty member list', async () => {
+    enableAndOneGroup();
+    api.evaluateGroup = jest.fn().mockResolvedValue({
+      group_id: 'g1', evaluated_at: 't', member_count: 0, members: [],
+    });
+    renderAt();
+    await userEvent.click(await screen.findByRole('button', { name: /\$evaluate/i }));
+    expect(await screen.findByText(/0 members/i)).toBeInTheDocument();
+  });
+});
