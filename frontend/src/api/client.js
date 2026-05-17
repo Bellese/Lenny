@@ -304,3 +304,15 @@ export function deleteValidationRun(runId) {
 export function getJobComparison(jobId) {
   return request(`/jobs/${jobId}/comparison`);
 }
+
+// Groups (experimental, issue #322)
+export function getEvaluatableGroups() {
+  return request('/api/groups');
+}
+
+export function evaluateGroup(groupId) {
+  return request(`/api/groups/${encodeURIComponent(groupId)}/evaluate`, {
+    method: 'POST',
+    _timeout: 60000,
+  });
+}
