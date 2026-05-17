@@ -96,10 +96,11 @@ async def client(session_factory) -> AsyncGenerator[AsyncClient, None]:
     from fastapi import FastAPI
 
     from app.db import get_session
-    from app.routes import health, jobs, measures, results, settings, validation
+    from app.routes import groups, health, jobs, measures, results, settings, validation
 
     # Build a minimal app without the lifespan (no worker, no real DB init)
     test_app = FastAPI()
+    test_app.include_router(groups.router)
     test_app.include_router(health.router)
     test_app.include_router(jobs.router)
     test_app.include_router(measures.router)
