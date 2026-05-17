@@ -27,6 +27,7 @@ const ALL_NAV_ITEMS = [
 const PAGE_TITLE = {
   '/measures': 'Measures',
   '/jobs': 'Jobs',
+  '/groups': 'Groups',
   '/results': 'Results',
   '/validation': 'Validation',
   '/settings': 'Settings',
@@ -35,6 +36,7 @@ const PAGE_TITLE = {
 const SEARCH_PLACEHOLDER = {
   '/measures': 'Search measures…',
   '/jobs': 'Search jobs…',
+  '/groups': 'Search groups…',
   '/results': 'Search patients…',
   '/validation': 'Search validation runs…',
   '/settings': 'Search…',
