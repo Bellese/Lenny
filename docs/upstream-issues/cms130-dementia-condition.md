@@ -1,9 +1,9 @@
-# Draft upstream issue — CMS130 dementia Condition code mismatch
+# Upstream issue — CMS130 dementia Condition code mismatch
 
-**Status:** draft, not yet submitted
+**Status:** **filed 2026-05-17** as [cqframework/dqm-content-qicore-2025#49](https://github.com/cqframework/dqm-content-qicore-2025/issues/49)
 **Target repo:** `cqframework/dqm-content-qicore-2025`
-**Suggested title:** `CMS130 test case: Condition.code does not match test-case description ("dementia") — exclusion not reproducible from patient resources`
-**Suggested labels:** `bug`, `content`
+**Title:** `CMS130 test case: Condition.code does not match test-case description ("dementia") — exclusion not reproducible from patient resources`
+**Labels:** `bug`, `content`
 
 ---
 
