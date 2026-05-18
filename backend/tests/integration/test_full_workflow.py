@@ -23,7 +23,7 @@ pytestmark = pytest.mark.integration
 async def _create_job(db_session, **overrides) -> Job:
     """Insert a Job row and return it."""
     defaults = {
-        "measure_id": "CMS122FHIRDiabetesAssessGT9Pct",
+        "measure_id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
         "measure_name": "CMS122 Diabetes HbA1c Poor Control",
         "period_start": "2025-01-01",
         "period_end": "2025-12-31",
@@ -49,7 +49,7 @@ async def test_create_and_run_job(integration_client, db_session, integration_se
     resp = await integration_client.post(
         "/jobs",
         json={
-            "measure_id": "CMS122FHIRDiabetesAssessGT9Pct",
+            "measure_id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
             "measure_name": "CMS122 Diabetes HbA1c Poor Control",
             "period_start": "2025-01-01",
             "period_end": "2025-12-31",
@@ -108,7 +108,7 @@ async def test_results_aggregate_populations(integration_client, db_session, int
     resp = await integration_client.post(
         "/jobs",
         json={
-            "measure_id": "CMS122FHIRDiabetesAssessGT9Pct",
+            "measure_id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
             "period_start": "2025-01-01",
             "period_end": "2025-12-31",
             "cdr_url": TEST_CDR_URL,
@@ -189,7 +189,7 @@ async def test_patient_drill_down(integration_client, db_session):
 
     # Create a job to hang the result on
     job = Job(
-        measure_id="CMS122FHIRDiabetesAssessGT9Pct",
+        measure_id="CMS122FHIRDiabetesAssessGreaterThan9Percent",
         period_start="2025-01-01",
         period_end="2025-12-31",
         cdr_url=TEST_CDR_URL,
@@ -224,7 +224,7 @@ async def test_partial_failure_handling(integration_client, db_session):
     """If a batch is marked as failed, the results endpoint still returns partial data."""
     # Create a completed job with one result
     job = Job(
-        measure_id="CMS122FHIRDiabetesAssessGT9Pct",
+        measure_id="CMS122FHIRDiabetesAssessGreaterThan9Percent",
         period_start="2025-01-01",
         period_end="2025-12-31",
         cdr_url=TEST_CDR_URL,

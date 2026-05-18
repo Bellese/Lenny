@@ -37,7 +37,7 @@ async def test_list_measures(measure_url):
     assert bundle["resourceType"] == "Bundle"
     entries = bundle.get("entry", [])
     measure_ids = [e["resource"]["id"] for e in entries if e.get("resource", {}).get("resourceType") == "Measure"]
-    assert "CMS122FHIRDiabetesAssessGT9Pct" in measure_ids, f"Expected CMS122 measure in {measure_ids}"
+    assert "CMS122FHIRDiabetesAssessGreaterThan9Percent" in measure_ids, f"Expected CMS122 measure in {measure_ids}"
 
 
 # ---------------------------------------------------------------------------
@@ -196,7 +196,7 @@ async def test_evaluate_measure(measure_url, cdr_url):
 
         try:
             report = await evaluate_measure(
-                measure_id="CMS122FHIRDiabetesAssessGT9Pct",
+                measure_id="CMS122FHIRDiabetesAssessGreaterThan9Percent",
                 patient_id="6f0553ac-e12a-4af5-ad27-05339f4b4ec0",
                 period_start="2025-01-01",
                 period_end="2025-12-31",
