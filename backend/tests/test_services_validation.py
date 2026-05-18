@@ -864,6 +864,19 @@ class TestTriageTestBundle:
         assert result["patients_loaded"] == 1
         assert result["expected_results_loaded"] == 1
 
+    async def test_canonical_url_clash_propagates_as_valueerror(self, test_session, mock_test_bundle_with_expected):
+        """ValueError from _assert_no_canonical_url_clash is wrapped and propagated by triage_test_bundle."""
+        with patch(
+            "app.services.validation._assert_no_canonical_url_clash",
+            new_callable=AsyncMock,
+            side_effect=ValueError("Canonical URL clash detected for Measure 'https://example.com/Measure/CMS124'"),
+        ):
+            with patch(
+                "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
+            ):
+                with pytest.raises(ValueError, match="Failed to upload measures to HAPI measure engine"):
+                    await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+
 
 # ---------------------------------------------------------------------------
 # process_bundle_upload (async, mocked async_session + triage)
@@ -2035,3 +2048,57 @@ class TestAssertNoCanonicalUrlClash:
             await _assert_no_canonical_url_clash(libraries)
 
         mock_client.get.assert_not_awaited()
+
+    async def test_measure_missing_url_or_id_skipped(self):
+        """Measure resources with blank url or id are silently skipped — no HTTP probe."""
+        mock_client = AsyncMock()
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {"resourceType": "Measure", "id": "SomeMeasure"},  # missing url
+            {"resourceType": "Measure", "url": "https://madie.cms.gov/Measure/SomeMeasure"},  # missing id
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
+
+        mock_client.get.assert_not_awaited()
+
+    async def test_non_200_response_is_non_fatal(self):
+        """HAPI returning a non-200 status (e.g. 503) is silently ignored — upload not blocked."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 503
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {
+                "resourceType": "Measure",
+                "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
+
+    async def test_entry_with_empty_existing_id_no_raise(self):
+        """HAPI entry with empty id is not treated as a clash — empty string is ignored."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "Measure", "id": ""}}],
+        }
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {
+                "resourceType": "Measure",
+                "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
