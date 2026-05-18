@@ -470,7 +470,10 @@ async def integration_client(integration_session_factory):
 
     The database dependency is overridden to use the test PostgreSQL.
     Environment variables are patched so fhir_client talks to test HAPI instances.
+    Background tasks that call async_session() directly (e.g. _run_factory_reset)
+    are also redirected to the test DB so they don't try to resolve 'db:5432'.
     """
+    from contextlib import asynccontextmanager
     from unittest.mock import patch
 
     from fastapi import FastAPI
@@ -493,10 +496,17 @@ async def integration_client(integration_session_factory):
 
     test_app.dependency_overrides[get_session] = _override_get_session
 
-    # Patch settings so fhir_client uses the test HAPI instances
+    @asynccontextmanager
+    async def _bg_session():
+        async with integration_session_factory() as session:
+            yield session
+
+    # Patch settings so fhir_client uses the test HAPI instances.
+    # Also patch async_session so background tasks (which bypass DI) hit the test DB.
     with (
         patch("app.config.settings.MEASURE_ENGINE_URL", TEST_MEASURE_URL),
         patch("app.config.settings.DEFAULT_CDR_URL", TEST_CDR_URL),
+        patch("app.routes.settings.async_session", _bg_session),
     ):
         transport = ASGITransport(app=test_app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
