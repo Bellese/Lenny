@@ -6,7 +6,7 @@
 
 **Architecture:** A compose overlay (`docker-compose.prod.yml`) adds Caddy SSL termination and a frontend build arg to the existing stack. The frontend API URL is baked in at Docker build time via a `Dockerfile` ARG; locally the default (`localhost:8000`) applies unchanged. GitHub Actions SSHes into EC2 on every push to `master`, running backend unit tests and a frontend build check before deploying.
 
-**Tech Stack:** Docker Compose v2 plugin, Caddy 2 Alpine, GitHub Actions (`appleboy/ssh-action@v1`), nip.io
+**Tech Stack:** Docker Compose v2 plugin, Caddy 2 Alpine, GitHub Actions (`appleboy/ssh-action@v1`), lenny.bellese.dev
 
 ---
 
@@ -53,12 +53,12 @@ Expected: one or more `.js` filenames printed. If empty, the default arg is not 
 - [ ] **Step 3: Build with arg override — verify custom URL is embedded**
 
 ```bash
-docker build --build-arg REACT_APP_API_URL=https://api.test-verify.nip.io \
+docker build --build-arg REACT_APP_API_URL=https://api.lenny.bellese.dev \
   -t leonard-frontend-arg ./frontend
-docker run --rm leonard-frontend-arg grep -rl "test-verify.nip.io" /app/build/static/js/
+docker run --rm leonard-frontend-arg grep -rl "lenny.bellese.dev" /app/build/static/js/
 ```
 
-Expected: one or more `.js` filenames printed containing `test-verify.nip.io`.
+Expected: one or more `.js` filenames printed containing `lenny.bellese.dev`.
 
 - [ ] **Step 4: Clean up test images**
 
@@ -80,7 +80,7 @@ git commit -m "feat: add REACT_APP_API_URL build arg to frontend Dockerfile"
 **Files:**
 - Create: `Caddyfile` (repo root)
 
-Note on syntax: Caddy uses `{$VAR}` to read environment variables (not `${VAR}` — that is Docker Compose syntax). The deploy script sets `CADDY_HOST=<ip>.nip.io` before starting Caddy.
+Note on syntax: Caddy uses `{$VAR}` to read environment variables (not `${VAR}` — that is Docker Compose syntax). The deploy script sets `CADDY_HOST=lenny.bellese.dev` before starting Caddy.
 
 - [ ] **Step 1: Create Caddyfile**
 
@@ -100,7 +100,7 @@ api.{$CADDY_HOST} {
 
 ```bash
 docker run --rm \
-  -e CADDY_HOST=54-12-34-56.nip.io \
+  -e CADDY_HOST=lenny.bellese.dev \
   -v "$(pwd)/Caddyfile:/etc/caddy/Caddyfile:ro" \
   caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile
 ```
@@ -154,12 +154,12 @@ volumes:
 - [ ] **Step 2: Validate merged compose config**
 
 ```bash
-CADDY_HOST=54-12-34-56.nip.io \
+CADDY_HOST=lenny.bellese.dev \
   docker compose -f docker-compose.yml -f docker-compose.prod.yml config
 ```
 
 Expected: merged YAML printed with no errors. Confirm:
-- `frontend.build.args.REACT_APP_API_URL` equals `https://api.54-12-34-56.nip.io`
+- `frontend.build.args.REACT_APP_API_URL` equals `https://api.lenny.bellese.dev`
 - `caddy` service is present with ports 80 and 443
 
 - [ ] **Step 3: Commit**
@@ -228,7 +228,7 @@ jobs:
             cd /opt/leonard
             git pull origin master
             export EC2_PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-            export CADDY_HOST="${EC2_PUBLIC_IP//./-}.nip.io"
+            export CADDY_HOST="lenny.bellese.dev"
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
             sleep 10 && curl -f https://api.${CADDY_HOST}/health || exit 1
             docker compose ps
@@ -263,7 +263,7 @@ The published spec uses `${EC2_PUBLIC_IP//./-}` in the compose file example, whi
 In `docs/superpowers/specs/2026-04-08-deployment-design.md`, find:
 
 ```
-        REACT_APP_API_URL: https://api.${EC2_PUBLIC_IP//./-}.nip.io
+        REACT_APP_API_URL: https://api.lenny.bellese.dev
 ```
 
 Replace with:
@@ -308,7 +308,7 @@ sudo chown -R ec2-user:ec2-user /opt/leonard
 ```bash
 cd /opt/leonard
 export EC2_PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-export CADDY_HOST="${EC2_PUBLIC_IP//./-}.nip.io"
+export CADDY_HOST="lenny.bellese.dev"
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
