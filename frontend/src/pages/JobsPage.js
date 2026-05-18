@@ -389,7 +389,7 @@ export default function JobsPage() {
                       <td data-label="Status"><StatusBadge status={job.status} /></td>
                       <td data-label="Queued" className={styles.dateCell}>{formatDateTime(job.created_at)}</td>
                       <td data-label="Started" className={styles.dateCell}>{job.started_at ? formatDateTime(job.started_at) : '—'}</td>
-                      <td data-label="Duration" className={styles.dateCell}>{formatDuration(job.started_at, job.completed_at)}</td>
+                      <td data-label="Duration" className={styles.dateCell}>{formatDuration(job.started_at || (job.completed_at ? job.created_at : null), job.completed_at)}</td>
                       <td data-label="Actions">
                         <KebabMenu items={[
                           { label: 'View results', icon: <ViewIcon />, disabled: !complete, onClick: () => navigate(`/results/${job.id}`) },
