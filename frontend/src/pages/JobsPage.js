@@ -306,9 +306,11 @@ export default function JobsPage() {
       {/* Jobs table */}
       {loading && (
         <div className={styles.card} role="status" aria-label="Loading jobs">
-          <table><thead><tr><th>Measure</th><th>Period</th><th>Cohort</th><th>Patients</th><th>Status</th><th>Queued</th><th>Started</th><th>Duration</th><th style={{ width: 50 }}></th></tr></thead>
-            <tbody>{[1,2,3].map(i => (<tr key={i}>{[180,100,80,80,40,80,80,60,50].map((w,j) => (<td key={j}><div className="skeleton" style={{ height: 14, width: w }} /></td>))}</tr>))}</tbody>
-          </table>
+          <div className={styles.tableScroll}>
+            <table><thead><tr><th className={styles.measureCell}>Measure</th><th>Period</th><th>Cohort</th><th>Patients</th><th>Status</th><th>Queued</th><th>Started</th><th>Duration</th><th style={{ width: 50 }}></th></tr></thead>
+              <tbody>{[1,2,3].map(i => (<tr key={i}>{[180,100,80,80,40,80,80,60,50].map((w,j) => (<td key={j}><div className="skeleton" style={{ height: 14, width: w }} /></td>))}</tr>))}</tbody>
+            </table>
+          </div>
         </div>
       )}
 
@@ -325,10 +327,11 @@ export default function JobsPage() {
             <span className={styles.cardTitle}>All jobs</span>
             <span className={styles.cardCount}>{filteredJobs.length}</span>
           </div>
+          <div className={styles.tableScroll}>
           <table aria-label="Calculation jobs">
             <thead>
               <tr>
-                <th>Measure</th>
+                <th className={styles.measureCell}>Measure</th>
                 <th>Period</th>
                 <th>Cohort</th>
                 <th>Patients</th>
@@ -356,14 +359,16 @@ export default function JobsPage() {
                       onClick={() => complete && navigate(`/results/${job.id}`)}
                       style={{ cursor: complete ? 'pointer' : 'default' }}
                     >
-                      <td data-label="Measure">
+                      <td data-label="Measure" className={styles.measureCell}>
                         <div className={styles.jobMeta}>
                           <div className={styles.jobName}>{getMeasureName(job)}</div>
                           <div className={`${styles.mono} ${styles.jobId}`}>{job.id}</div>
                         </div>
                       </td>
                       <td data-label="Period" className={`${styles.mono} ${styles.periodCell}`}>
-                        {job.period_start && job.period_end ? `${job.period_start} – ${job.period_end}` : '--'}
+                        {job.period_start && job.period_end
+                          ? <><span style={{whiteSpace:'nowrap'}}>{job.period_start}</span>{' – '}<span style={{whiteSpace:'nowrap'}}>{job.period_end}</span></>
+                          : '--'}
                       </td>
                       <td data-label="Cohort" className={styles.cohortCell}>{getCohortName(job)}</td>
                       <td data-label="Patients" className={styles.patientCountCell}>{getPatientCount(job)}</td>
@@ -392,6 +397,7 @@ export default function JobsPage() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 

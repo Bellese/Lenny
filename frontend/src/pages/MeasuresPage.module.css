@@ -63,6 +63,14 @@
   box-shadow: var(--shadow-card);
 }
 
+.tableScroll {
+  overflow-x: auto;
+}
+
+.measureCell {
+  min-width: 260px;
+}
+
 .row:hover td {
   background: var(--bg-sunken);
 }
@@ -292,5 +300,13 @@
 
   .actionGroup {
     justify-content: flex-start;
+  }
+
+  .tableScroll {
+    overflow-x: visible;
+  }
+
+  .measureCell {
+    min-width: 0;
   }
 }

@@ -139,10 +139,11 @@ export default function MeasuresPage() {
 
       {loading && (
         <div className={styles.card} role="status" aria-label="Loading measures">
+          <div className={styles.tableScroll}>
           <table>
             <thead>
               <tr>
-                <th>ID</th><th>Measure</th><th>Version</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th>
+                <th>ID</th><th className={styles.measureCell}>Measure</th><th>Version</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -155,6 +156,7 @@ export default function MeasuresPage() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -168,11 +170,12 @@ export default function MeasuresPage() {
 
       {!loading && !error && (
         <div className={styles.card}>
+          <div className={styles.tableScroll}>
           <table aria-label="Loaded measures">
             <thead>
               <tr>
                 <th style={{ width: 120 }}>ID</th>
-                <th>Measure</th>
+                <th className={styles.measureCell}>Measure</th>
                 <th style={{ width: 90 }}>Version</th>
                 <th style={{ width: 100 }}>Status</th>
                 <th style={{ width: 100, textAlign: 'right' }}>Actions</th>
@@ -189,7 +192,7 @@ export default function MeasuresPage() {
                 visible.map((measure, i) => (
                   <tr key={measure.id || i} className={styles.row}>
                     <td data-label="ID"><span className={styles.mono}>{extractCmsId(measure.id) || measure.id || '--'}</span></td>
-                    <td data-label="Measure" className={styles.measureName}>{getMeasureDisplayName(measure)}</td>
+                    <td data-label="Measure" className={`${styles.measureName} ${styles.measureCell}`}>{getMeasureDisplayName(measure)}</td>
                     <td data-label="Version" className={styles.mono} style={{ color: 'var(--text-muted)' }}>{getMeasureVersion(measure)}</td>
                     <td data-label="Status"><StatusBadge status={getMeasureStatus(measure)} /></td>
                     <td data-label="Actions">
@@ -212,6 +215,7 @@ export default function MeasuresPage() {
               )}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 

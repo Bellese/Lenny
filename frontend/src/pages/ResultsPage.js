@@ -841,6 +841,7 @@ export default function ResultsPage() {
             )}
 
             {/* Table */}
+            <div className={styles.tableScroll}>
             <table aria-label="Patient results">
               <thead>
                 <tr>
@@ -971,6 +972,7 @@ export default function ResultsPage() {
                 )}
               </tbody>
             </table>
+            </div>
           </div>
         </>
       )}
