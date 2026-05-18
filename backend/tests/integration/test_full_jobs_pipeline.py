@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -190,6 +191,16 @@ async def test_lenny_jobs_produce_correct_results(
     detail = detail_resp.json()
     assert detail["status"] == "complete", (
         f"{measure_id} job did not complete: status={detail['status']}, error={detail.get('error_message')}"
+    )
+
+    # 3b. Assert started_at lifecycle invariants
+    assert detail["started_at"] is not None, (
+        f"{measure_id}: Job.started_at is NULL after job completed (expected non-NULL once running)"
+    )
+    started_at = datetime.fromisoformat(detail["started_at"])
+    completed_at = datetime.fromisoformat(detail["completed_at"])
+    assert started_at <= completed_at, (
+        f"{measure_id}: Job.started_at ({detail['started_at']}) is after Job.completed_at ({detail['completed_at']})"
     )
 
     # 4. Assert patient count matches FHIR Group membership in CDR
