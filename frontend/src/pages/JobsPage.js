@@ -26,6 +26,20 @@ function formatElapsed(startStr) {
   return `${m}m ${String(s).padStart(2, '0')}s`;
 }
 
+export function formatDuration(startStr, endStr, nowFn) {
+  if (!startStr) return '—';
+  const end = endStr ? new Date(endStr) : new Date((nowFn || Date.now)());
+  const diffSec = Math.max(0, Math.floor((end - new Date(startStr)) / 1000));
+  if (diffSec < 3600) {
+    const m = Math.floor(diffSec / 60);
+    const s = diffSec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+  const h = Math.floor(diffSec / 3600);
+  const m = Math.floor((diffSec % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
 function estimateRemaining(startStr, progress) {
   if (!startStr || !progress || progress >= 100) return null;
   const elapsed = Date.now() - new Date(startStr);
@@ -266,8 +280,8 @@ export default function JobsPage() {
                     <span className={styles.mono}>{activeJob.period_start} → {activeJob.period_end}</span>
                   )}
                   <span>Cohort: {getCohortName(activeJob)}</span>
-                  {isActuallyRunning(activeJob.status) && (
-                    <span>Elapsed {formatElapsed(activeJob.started_at || activeJob.created_at)}</span>
+                  {isActuallyRunning(activeJob.status) && activeJob.started_at && (
+                    <span>Elapsed {formatElapsed(activeJob.started_at)}</span>
                   )}
                 </div>
               </div>
@@ -282,8 +296,8 @@ export default function JobsPage() {
                   ? <span className={styles.heroProgressLabel}>{proc.toLocaleString()} of {total.toLocaleString()} patients</span>
                   : <span className={styles.heroProgressLabel}>Preparing…</span>
                 }
-                {estimateRemaining(activeJob.started_at || activeJob.created_at, progress) && (
-                  <span className={styles.heroEta}>{estimateRemaining(activeJob.started_at || activeJob.created_at, progress)}</span>
+                {estimateRemaining(activeJob.started_at, progress) && (
+                  <span className={styles.heroEta}>{estimateRemaining(activeJob.started_at, progress)}</span>
                 )}
               </div>
               <div className={styles.progressTrack}>
@@ -311,8 +325,8 @@ export default function JobsPage() {
       {/* Jobs table */}
       {loading && (
         <div className={styles.card} role="status" aria-label="Loading jobs">
-          <table><thead><tr><th>Measure</th><th>Period</th><th>Status</th><th>Started</th><th style={{ width: 50 }}></th></tr></thead>
-            <tbody>{[1,2,3].map(i => (<tr key={i}>{[180,100,80,80,40].map((w,j) => (<td key={j}><div className="skeleton" style={{ height: 14, width: w }} /></td>))}</tr>))}</tbody>
+          <table><thead><tr><th>Measure</th><th>Period</th><th>Cohort</th><th>Patients</th><th>Status</th><th>Queued</th><th>Started</th><th>Duration</th><th style={{ width: 50 }}></th></tr></thead>
+            <tbody>{[1,2,3].map(i => (<tr key={i}>{[180,100,80,80,40,80,80,60].map((w,j) => (<td key={j}><div className="skeleton" style={{ height: 14, width: w }} /></td>))}</tr>))}</tbody>
           </table>
         </div>
       )}
@@ -338,13 +352,15 @@ export default function JobsPage() {
                 <th>Cohort</th>
                 <th>Patients</th>
                 <th>Status</th>
+                <th>Queued</th>
                 <th>Started</th>
+                <th>Duration</th>
                 <th style={{ width: 40 }}></th>
               </tr>
             </thead>
             <tbody>
               {filteredJobs.length === 0 ? (
-                <tr><td colSpan={7} className={styles.emptyRow}>
+                <tr><td colSpan={9} className={styles.emptyRow}>
                   {q ? `No jobs match "${q}".` : 'No calculations yet. Click "New calculation" to get started.'}
                 </td></tr>
               ) : (
@@ -371,7 +387,9 @@ export default function JobsPage() {
                       <td data-label="Cohort" className={styles.cohortCell}>{getCohortName(job)}</td>
                       <td data-label="Patients" className={styles.patientCountCell}>{getPatientCount(job)}</td>
                       <td data-label="Status"><StatusBadge status={job.status} /></td>
-                      <td data-label="Started" className={styles.dateCell}>{formatDateTime(job.started_at || job.created_at)}</td>
+                      <td data-label="Queued" className={styles.dateCell}>{formatDateTime(job.created_at)}</td>
+                      <td data-label="Started" className={styles.dateCell}>{job.started_at ? formatDateTime(job.started_at) : '—'}</td>
+                      <td data-label="Duration" className={styles.dateCell}>{formatDuration(job.started_at, job.completed_at)}</td>
                       <td data-label="Actions">
                         <KebabMenu items={[
                           { label: 'View results', icon: <ViewIcon />, disabled: !complete, onClick: () => navigate(`/results/${job.id}`) },
