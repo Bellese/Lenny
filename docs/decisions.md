@@ -89,3 +89,17 @@ This log records significant technical and process choices with their rationale.
 **Alternatives considered:** Auto-detect via `CapabilityStatement` — no FHIR-standard element advertises bundle-entry caps. Binary-search probing the cap on first push was considered but the latency cost and the brittleness of "what counts as 'too large'" made manual config the better trade for now.
 
 **Status:** Shipped in #321.
+
+---
+
+## ADR-010: Fix CMS122 canonical-URL drift between seed and connectathon bundles (2026-05-18)
+
+**Decision:** Replace the abbreviated `CMS122FHIRDiabetesAssessGT9Pct` Measure and Library in `seed/measure-bundle.json` with the full MADiE canonical forms (`CMS122FHIRDiabetesAssessGreaterThan9Percent`) from the connectathon bundle. Add `_assert_no_canonical_url_clash()` in `validation.py` to fail loudly if a future bundle upload would introduce the same class of drift.
+
+**Root cause (issue #319):** The bake workflow runs in two phases: Phase 1 seeds `seed/measure-bundle.json` (which contained the abbreviated GT9Pct IDs), then Phase 2 loads all 7 connectathon bundles (which use full GreaterThan9Percent IDs). Both sets of resources were PUT into HAPI by separate IDs, so both coexisted. The comparison endpoint resolved the abbreviated canonical URL from the Job's `measure_id` → found 0 `ExpectedResult` rows (which were written under the full URL) → returned `has_expected: false`.
+
+**Scope of the drift:** Only CMS122 was affected. The other 6 measures (`CMS124`, `CMS125`, `CMS130`, `CMS506`, `CMS529`, `CMS816`) are not present in `seed/measure-bundle.json` at all, so no seed-vs-bundle ID mismatch is possible for them.
+
+**Defense-in-depth:** `_assert_no_canonical_url_clash()` queries `Measure?url={canonical}` before every `push_resources` call during bundle upload. If HAPI already has a Measure at that canonical URL under a different FHIR ID, the upload fails with a clear error message referencing this ADR.
+
+**Alternatives considered:** (a) Canonical-URL normalisation in the comparison endpoint (would mask drift rather than prevent it). (b) Dedup-by-canonical-URL in `push_resources` (silent PUT-overwrite masks the problem and loses the original resource). (c) No seed-file change — runtime normalisation only (would not fix the prebaked images; a rebake would still leave two resources).

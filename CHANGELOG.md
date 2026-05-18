@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.18.0] - 2026-05-18
+
+### Fixed
+- **CMS122 comparison panel always showed `has_expected: false`.** The comparison endpoint resolved the CMS122 measure by its FHIR resource ID, which in the prebaked image was the abbreviated `CMS122FHIRDiabetesAssessGT9Pct` (from `seed/measure-bundle.json`) while `ExpectedResult` rows were keyed to the full MADiE canonical `CMS122FHIRDiabetesAssessGreaterThan9Percent` (from the connectathon bundle). Both IDs coexisted silently in HAPI. Fix: `seed/measure-bundle.json` now uses the full MADiE canonical IDs so Phase 1 and Phase 2 of the bake load the same resource. A defense-in-depth guard (`_assert_no_canonical_url_clash`) raises immediately when any upload would introduce canonical-URL drift, preventing recurrence. (#319)
+
 ## [0.0.17.19] - 2026-05-18
 
 ### Added

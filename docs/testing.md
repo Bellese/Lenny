@@ -53,7 +53,7 @@ These tests use an **in-memory SQLite database** and mock all FHIR service calls
 | `test_services_bundle_loader.py` | Startup connectathon bundle loading |
 | `test_services_fhir_client.py` | FHIR client utilities, DataRequirementsStrategy, BatchQueryStrategy |
 | `test_services_orchestrator.py` | Job orchestration service |
-| `test_services_validation.py` | Bundle triage, population extraction, comparison, measure ID resolution (canonical and relative refs), ValueSet compose patching |
+| `test_services_validation.py` | Bundle triage, population extraction, comparison, measure ID resolution (canonical and relative refs), ValueSet compose patching, canonical-URL clash guard (`_assert_no_canonical_url_clash`) |
 | `test_cors.py` | CORS middleware behavior |
 
 ---

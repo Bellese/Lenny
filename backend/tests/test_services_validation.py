@@ -10,6 +10,7 @@ from sqlalchemy import func, select
 from app.models.validation import ExpectedResult, ValidationResult, ValidationRun, ValidationStatus
 from app.services.fhir_client import BundleUploadResult
 from app.services.validation import (
+    _assert_no_canonical_url_clash,
     _classify_bundle_entries,
     _extract_patient_name,
     _extract_population_counts,
@@ -862,6 +863,19 @@ class TestTriageTestBundle:
         assert result["measures_loaded"] == 1
         assert result["patients_loaded"] == 1
         assert result["expected_results_loaded"] == 1
+
+    async def test_canonical_url_clash_propagates_as_valueerror(self, test_session, mock_test_bundle_with_expected):
+        """ValueError from _assert_no_canonical_url_clash is wrapped and propagated by triage_test_bundle."""
+        with patch(
+            "app.services.validation._assert_no_canonical_url_clash",
+            new_callable=AsyncMock,
+            side_effect=ValueError("Canonical URL clash detected for Measure 'https://example.com/Measure/CMS124'"),
+        ):
+            with patch(
+                "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
+            ):
+                with pytest.raises(ValueError, match="Failed to upload measures to HAPI measure engine"):
+                    await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
 
 
 # ---------------------------------------------------------------------------
@@ -1915,3 +1929,195 @@ class TestMissingValueSetStubs:
         prepared_valueset = next(resource for resource in prepared if resource.get("resourceType") == "ValueSet")
         assert prepared_valueset["id"] == expected_id
         assert valueset["id"] == "bundle-id"
+
+
+# ---------------------------------------------------------------------------
+# _assert_no_canonical_url_clash (issue #319 regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+class TestAssertNoCanonicalUrlClash:
+    """Tests for _assert_no_canonical_url_clash — detects seed-vs-bundle ID drift."""
+
+    def _make_mock_ctx(self, mock_client):
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_ctx = MagicMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+        return mock_ctx
+
+    async def test_no_clash_passes(self):
+        """HAPI returns same ID as incoming resource — no error raised."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent"}}],
+        }
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {
+                "resourceType": "Measure",
+                "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
+
+    async def test_clash_detected_raises(self):
+        """HAPI has the abbreviated ID; incoming bundle has the full ID — ValueError raised."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        # Simulate the prebaked image state: abbreviated ID already in HAPI
+        mock_resp.json.return_value = {
+            "resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122FHIRDiabetesAssessGT9Pct"}}],
+        }
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        # Incoming bundle uses the full MADiE canonical ID
+        measures = [
+            {
+                "resourceType": "Measure",
+                "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            with pytest.raises(ValueError, match="Canonical URL clash"):
+                await _assert_no_canonical_url_clash(measures)
+
+    async def test_empty_hapi_response_passes(self):
+        """No existing Measure in HAPI — no clash possible."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {"resourceType": "Bundle", "entry": []}
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {
+                "resourceType": "Measure",
+                "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
+
+    async def test_hapi_error_is_non_fatal(self):
+        """Network error during probe is swallowed — upload is not blocked."""
+        import httpx
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(side_effect=httpx.ConnectError("unreachable"))
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {
+                "resourceType": "Measure",
+                "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
+
+    async def test_non_measure_resources_are_skipped(self):
+        """Library resources are not checked — only Measure resources."""
+        mock_client = AsyncMock()
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        libraries = [
+            {
+                "resourceType": "Library",
+                "id": "SomeLibrary",
+                "url": "https://madie.cms.gov/Library/SomeLibrary",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(libraries)
+
+        mock_client.get.assert_not_awaited()
+
+    async def test_measure_missing_url_or_id_skipped(self):
+        """Measure resources with blank url or id are silently skipped — no HTTP probe."""
+        mock_client = AsyncMock()
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {"resourceType": "Measure", "id": "SomeMeasure"},  # missing url
+            {"resourceType": "Measure", "url": "https://madie.cms.gov/Measure/SomeMeasure"},  # missing id
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
+
+        mock_client.get.assert_not_awaited()
+
+    async def test_non_200_response_is_non_fatal(self):
+        """HAPI returning a non-200 status (e.g. 503) is silently ignored — upload not blocked."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 503
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {
+                "resourceType": "Measure",
+                "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
+
+    async def test_malformed_json_response_is_non_fatal(self):
+        """HAPI returning HTTP 200 with non-JSON body is silently ignored."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json = MagicMock(side_effect=ValueError("not valid JSON"))
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {
+                "resourceType": "Measure",
+                "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
+
+    async def test_entry_with_empty_existing_id_no_raise(self):
+        """HAPI entry with empty id is not treated as a clash — empty string is ignored."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "Measure", "id": ""}}],
+        }
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {
+                "resourceType": "Measure",
+                "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
