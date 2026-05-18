@@ -11,6 +11,7 @@ import DistBar from '../components/DistBar';
 import { CheckIcon, WarnIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
 import { extractCmsId, cleanMeasureName, measureOptionLabel, measureDisplayLabel } from '../utils/measureFormat';
+import { formatDateTime, formatDuration } from '../utils/dateFormat';
 
 function timeAgo(dateStr) {
   if (!dateStr) return null;
@@ -660,6 +661,15 @@ export default function ResultsPage() {
           {completedAgo && (
             <div className={styles.sub}>
               <span className={styles.completeBadge}>Complete</span>{' '}Calculated {completedAgo}
+            </div>
+          )}
+          {selectedJob && (
+            <div className={styles.sub}>
+              <span>Queued {formatDateTime(selectedJob.created_at)}</span>
+              {' · '}
+              <span>Started {selectedJob.started_at ? formatDateTime(selectedJob.started_at) : '—'}</span>
+              {' · '}
+              <span>Duration {formatDuration(selectedJob.started_at || (selectedJob.completed_at ? selectedJob.created_at : null), selectedJob.completed_at)}</span>
             </div>
           )}
         </div>
