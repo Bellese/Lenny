@@ -120,6 +120,48 @@ fields request.remote_ip
 
 **Log group:** `/leonard/caddy`
 
+## CloudWatch Alarms
+
+`bootstrap-aws.sh` (steps 9–13) creates two alarms in the `Leonard` CloudWatch namespace. Both notify the `leonard-alerts` SNS topic (email to `msutton@bellese.io`). You also receive an OK notification when the alarm clears.
+
+| Alarm | Metric | Threshold | Meaning |
+|---|---|---|---|
+| `leonard-caddy-5xx` | `Leonard/Caddy5xxErrors` | Sum > 5 in 5 min | Prod returning server errors — likely a crashed container or upstream issue |
+| `leonard-backend-errors` | `Leonard/BackendErrors` | Sum > 0 in 5 min | Any `ERROR`-level log in the backend — FHIR failures, unhandled exceptions, DB errors |
+
+Both use `treat-missing-data: notBreaching` — no alert fires during periods with no logs (e.g., overnight quiet hours).
+
+### Metric filters
+
+| Filter name | Log group | Pattern |
+|---|---|---|
+| `caddy-5xx-errors` | `/leonard/caddy` | `{ $.status >= 500 }` |
+| `backend-error-logs` | `/leonard/backend` | `{ $.level = "ERROR" }` |
+
+### Confirming the SNS subscription
+
+On first bootstrap, AWS sends a confirmation email to `msutton@bellese.io`. **Alarms will not deliver until you click the confirmation link.** To check subscription status:
+
+```bash
+export AWS_PROFILE=leonard
+aws sns list-subscriptions-by-topic \
+  --topic-arn $(aws sns list-topics --query "Topics[?ends_with(TopicArn,':leonard-alerts')].TopicArn" --output text) \
+  --query 'Subscriptions[].{Endpoint:Endpoint,Status:SubscriptionArn}' \
+  --output table
+```
+
+A confirmed subscription shows a full ARN; a pending one shows `PendingConfirmation`.
+
+### Viewing alarm state
+
+```bash
+export AWS_PROFILE=leonard
+aws cloudwatch describe-alarms \
+  --alarm-names leonard-caddy-5xx leonard-backend-errors \
+  --query 'MetricAlarms[].{Name:AlarmName,State:StateValue,Reason:StateReason}' \
+  --output table
+```
+
 ## PHI / Access Restriction Note
 
 **Before Lenny processes real patient data**, log group access must be restricted. Real FHIR bundle payloads and query parameters may appear in HAPI logs. Currently the only IAM policy granting log access is `CloudWatchLogsWrite` on the EC2 role — no read access is granted to developers.

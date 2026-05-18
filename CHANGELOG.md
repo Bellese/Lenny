@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.18.1] - 2026-05-18
+
+### Added
+- **CloudWatch Alarms.** Two alarms in the `Leonard` CloudWatch namespace notify `leonard-alerts` SNS → email on: Caddy 5xx errors (>5 in a 5-minute window) and backend ERROR-level log events (any in a 5-minute window). Both use `treat-missing-data: notBreaching` to avoid noise during quiet periods.
+- **CloudWatch Logs metric filters.** `caddy-5xx-errors` on `/leonard/caddy` (pattern `{ $.status >= 500 }`) and `backend-error-logs` on `/leonard/backend` (pattern `{ $.level = "ERROR" }`) feed the `Leonard` custom metric namespace.
+- **`bootstrap-aws.sh` extended.** Steps 9–13 create the SNS topic, email subscription, metric filters, and alarms idempotently.
+- **`iam/leonard-cli-alarms-addendum.json`** documents the additional `leonard-cli` permissions needed to run steps 9–13 (SNS + metric filter + alarm write actions).
+
 ## [0.0.18.0] - 2026-05-18
 
 ### Fixed
