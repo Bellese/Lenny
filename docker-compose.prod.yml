@@ -2,7 +2,9 @@
 # Anchor merges inside each service's options: block so region/create-group/tag
 # are defined once. YAML merge keys (<<:) work at the same mapping level only;
 # nesting the anchor inside options: is required for correct merging.
-# Non-blocking mode: container IO is never blocked by CloudWatch availability.
+# Non-blocking mode: log writes never block container IO after driver init.
+# NOTE: if CloudWatch is unreachable at container start, driver init fails and
+# the container will not start regardless of non-blocking mode.
 # 16MB in-memory buffer (~16K typical log lines) drops oldest on overflow.
 x-log-opts: &log-opts
   awslogs-region: us-east-1
