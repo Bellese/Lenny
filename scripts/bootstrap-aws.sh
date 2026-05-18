@@ -5,6 +5,9 @@
 #   - Creates IAM policy, role, and instance profile for EC2 SSM access
 #   - Applies inline CloudWatch Logs write policy to leonard-ec2-prod role
 #   - Pre-creates CloudWatch log groups with 90-day retention
+#   - Creates SNS topic (leonard-alerts) and email subscription for alerts
+#   - Creates CloudWatch Logs metric filters for Caddy 5xx and backend errors
+#   - Creates CloudWatch Alarms that fire to leonard-alerts SNS topic
 #   - Associates the instance profile with the prod EC2 instance
 #   - Enforces IMDSv2 (http-tokens=required, hop-limit=1)
 #
@@ -324,20 +327,168 @@ aws ec2 modify-instance-metadata-options \
 echo "[✓] IMDSv2 enforced"
 
 # ---------------------------------------------------------------------------
+# 9. SNS topic for alerts
+# ---------------------------------------------------------------------------
+ALERT_EMAIL="msutton@bellese.io"
+SNS_TOPIC_NAME="leonard-alerts"
+
+echo "[+] Checking SNS topic $SNS_TOPIC_NAME ..."
+SNS_TOPIC_ARN=$(aws sns list-topics --region "$REGION" \
+  --query "Topics[?ends_with(TopicArn, ':$SNS_TOPIC_NAME')].TopicArn" \
+  --output text 2>/dev/null)
+if [ -n "$SNS_TOPIC_ARN" ]; then
+  echo "[=] SNS topic already exists: $SNS_TOPIC_ARN"
+else
+  SNS_TOPIC_ARN=$(aws sns create-topic --name "$SNS_TOPIC_NAME" --region "$REGION" \
+    --query TopicArn --output text)
+  echo "[✓] SNS topic created: $SNS_TOPIC_ARN"
+fi
+
+echo "[+] Checking email subscription for $ALERT_EMAIL ..."
+EXISTING_SUB=$(aws sns list-subscriptions-by-topic --topic-arn "$SNS_TOPIC_ARN" \
+  --region "$REGION" \
+  --query "Subscriptions[?Endpoint=='$ALERT_EMAIL'].SubscriptionArn" \
+  --output text 2>/dev/null)
+if [ -n "$EXISTING_SUB" ]; then
+  echo "[=] Email subscription already exists — skipping"
+else
+  aws sns subscribe \
+    --topic-arn "$SNS_TOPIC_ARN" \
+    --protocol email \
+    --notification-endpoint "$ALERT_EMAIL" \
+    --region "$REGION"
+  echo "[✓] Subscription confirmation sent to $ALERT_EMAIL"
+  echo "    *** Check your inbox and confirm the subscription or alerts will not deliver ***"
+fi
+
+# ---------------------------------------------------------------------------
+# 10. CloudWatch Logs metric filter: Caddy 5xx errors
+#     Caddy v2 JSON access logs have 'status' as a top-level integer field.
+# ---------------------------------------------------------------------------
+FILTER_5XX_NAME="caddy-5xx-errors"
+echo "[+] Checking metric filter $FILTER_5XX_NAME ..."
+EXISTING_5XX=$(aws logs describe-metric-filters \
+  --log-group-name /leonard/caddy \
+  --filter-name-prefix "$FILTER_5XX_NAME" \
+  --region "$REGION" \
+  --query "metricFilters[?filterName=='$FILTER_5XX_NAME'].filterName" \
+  --output text 2>/dev/null)
+if [ -n "$EXISTING_5XX" ]; then
+  echo "[=] Metric filter $FILTER_5XX_NAME already exists — skipping"
+else
+  aws logs put-metric-filter \
+    --log-group-name /leonard/caddy \
+    --filter-name "$FILTER_5XX_NAME" \
+    --filter-pattern '{ $.status >= 500 }' \
+    --metric-transformations \
+      "metricName=Caddy5xxErrors,metricNamespace=Leonard,metricValue=1,defaultValue=0" \
+    --region "$REGION"
+  echo "[✓] Metric filter $FILTER_5XX_NAME created"
+fi
+
+# ---------------------------------------------------------------------------
+# 11. CloudWatch Logs metric filter: Backend ERROR-level logs
+#     Backend JSON formatter writes "level": record.levelname (uppercase).
+# ---------------------------------------------------------------------------
+FILTER_BACKEND_ERROR_NAME="backend-error-logs"
+echo "[+] Checking metric filter $FILTER_BACKEND_ERROR_NAME ..."
+EXISTING_BE=$(aws logs describe-metric-filters \
+  --log-group-name /leonard/backend \
+  --filter-name-prefix "$FILTER_BACKEND_ERROR_NAME" \
+  --region "$REGION" \
+  --query "metricFilters[?filterName=='$FILTER_BACKEND_ERROR_NAME'].filterName" \
+  --output text 2>/dev/null)
+if [ -n "$EXISTING_BE" ]; then
+  echo "[=] Metric filter $FILTER_BACKEND_ERROR_NAME already exists — skipping"
+else
+  aws logs put-metric-filter \
+    --log-group-name /leonard/backend \
+    --filter-name "$FILTER_BACKEND_ERROR_NAME" \
+    --filter-pattern '{ $.level = "ERROR" }' \
+    --metric-transformations \
+      "metricName=BackendErrors,metricNamespace=Leonard,metricValue=1,defaultValue=0" \
+    --region "$REGION"
+  echo "[✓] Metric filter $FILTER_BACKEND_ERROR_NAME created"
+fi
+
+# ---------------------------------------------------------------------------
+# 12. CloudWatch Alarm: Caddy 5xx — >5 errors in any 5-minute window
+# ---------------------------------------------------------------------------
+ALARM_5XX_NAME="leonard-caddy-5xx"
+echo "[+] Checking alarm $ALARM_5XX_NAME ..."
+EXISTING_A5=$(aws cloudwatch describe-alarms \
+  --alarm-names "$ALARM_5XX_NAME" \
+  --region "$REGION" \
+  --query "MetricAlarms[0].AlarmName" \
+  --output text 2>/dev/null)
+if [ "$EXISTING_A5" = "$ALARM_5XX_NAME" ]; then
+  echo "[=] Alarm $ALARM_5XX_NAME already exists — skipping"
+else
+  aws cloudwatch put-metric-alarm \
+    --alarm-name "$ALARM_5XX_NAME" \
+    --alarm-description "Caddy: >5 HTTP 5xx responses in a 5-minute window" \
+    --metric-name Caddy5xxErrors \
+    --namespace Leonard \
+    --statistic Sum \
+    --period 300 \
+    --evaluation-periods 1 \
+    --threshold 5 \
+    --comparison-operator GreaterThanThreshold \
+    --treat-missing-data notBreaching \
+    --alarm-actions "$SNS_TOPIC_ARN" \
+    --ok-actions "$SNS_TOPIC_ARN" \
+    --region "$REGION"
+  echo "[✓] Alarm $ALARM_5XX_NAME created"
+fi
+
+# ---------------------------------------------------------------------------
+# 13. CloudWatch Alarm: Backend errors — any ERROR log in a 5-minute window
+# ---------------------------------------------------------------------------
+ALARM_BACKEND_NAME="leonard-backend-errors"
+echo "[+] Checking alarm $ALARM_BACKEND_NAME ..."
+EXISTING_ABE=$(aws cloudwatch describe-alarms \
+  --alarm-names "$ALARM_BACKEND_NAME" \
+  --region "$REGION" \
+  --query "MetricAlarms[0].AlarmName" \
+  --output text 2>/dev/null)
+if [ "$EXISTING_ABE" = "$ALARM_BACKEND_NAME" ]; then
+  echo "[=] Alarm $ALARM_BACKEND_NAME already exists — skipping"
+else
+  aws cloudwatch put-metric-alarm \
+    --alarm-name "$ALARM_BACKEND_NAME" \
+    --alarm-description "Backend: 1+ ERROR-level log events in a 5-minute window" \
+    --metric-name BackendErrors \
+    --namespace Leonard \
+    --statistic Sum \
+    --period 300 \
+    --evaluation-periods 1 \
+    --threshold 0 \
+    --comparison-operator GreaterThanThreshold \
+    --treat-missing-data notBreaching \
+    --alarm-actions "$SNS_TOPIC_ARN" \
+    --ok-actions "$SNS_TOPIC_ARN" \
+    --region "$REGION"
+  echo "[✓] Alarm $ALARM_BACKEND_NAME created"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Bootstrap complete ==="
 echo ""
 echo "Resources verified/created:"
-echo "  SSM parameter   : $SSM_PARAM"
-echo "  IAM policy      : $POLICY_ARN"
-echo "  IAM role        : $ROLE_NAME"
-echo "  CW inline policy: $CW_POLICY_NAME on $ROLE_NAME"
-echo "  CW log groups   : /leonard/{caddy,backend,hapi-cdr,hapi-measure,frontend} (90d retention)"
-echo "  Instance profile: $PROFILE_NAME"
-echo "  EC2 association : $INSTANCE_ID -> $PROFILE_NAME"
-echo "  IMDSv2          : required (hop-limit=1)"
+echo "  SSM parameter    : $SSM_PARAM"
+echo "  IAM policy       : $POLICY_ARN"
+echo "  IAM role         : $ROLE_NAME"
+echo "  CW inline policy : $CW_POLICY_NAME on $ROLE_NAME"
+echo "  CW log groups    : /leonard/{caddy,backend,hapi-cdr,hapi-measure,frontend} (90d retention)"
+echo "  SNS topic        : $SNS_TOPIC_ARN"
+echo "  CW metric filters: $FILTER_5XX_NAME, $FILTER_BACKEND_ERROR_NAME"
+echo "  CW alarms        : $ALARM_5XX_NAME, $ALARM_BACKEND_NAME"
+echo "  Instance profile : $PROFILE_NAME"
+echo "  EC2 association  : $INSTANCE_ID -> $PROFILE_NAME"
+echo "  IMDSv2           : required (hop-limit=1)"
 echo ""
 echo "Next step: deploy fetch-prod-secrets.sh to the EC2 instance so it can"
 echo "read secrets using the instance profile credentials (no static keys needed)."
