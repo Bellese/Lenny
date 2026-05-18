@@ -1018,3 +1018,69 @@ async def test_get_comparison_with_match(client, test_session):
     assert data["total"] == 1
     assert data["patients"][0]["match"] is True
     assert data["patients"][0]["subject_reference"] == "Patient/p1"
+
+
+# ---------------------------------------------------------------------------
+# _job_to_response serialization of started_at
+# ---------------------------------------------------------------------------
+
+
+def test_job_to_response_serializes_started_at():
+    """_job_to_response renders started_at as an ISO string when set, None when absent."""
+    from datetime import datetime, timezone
+    from unittest.mock import MagicMock
+
+    from app.models.job import JobStatus
+    from app.routes.jobs import _job_to_response
+
+    known_dt = datetime(2024, 6, 15, 12, 0, 0, tzinfo=timezone.utc)
+
+    # Case 1: started_at is set
+    job_with = MagicMock()
+    job_with.started_at = known_dt
+    job_with.completed_at = None
+    job_with.created_at = known_dt
+    job_with.status = JobStatus.running
+    job_with.batches = []
+    job_with.id = 1
+    job_with.measure_id = "m-1"
+    job_with.measure_name = None
+    job_with.period_start = "2024-01-01"
+    job_with.period_end = "2024-12-31"
+    job_with.cdr_url = "http://cdr/fhir"
+    job_with.cdr_name = None
+    job_with.cdr_read_only = False
+    job_with.group_id = None
+    job_with.total_patients = 0
+    job_with.processed_patients = 0
+    job_with.failed_patients = 0
+    job_with.delete_requested = False
+    job_with.error_message = None
+
+    result_with = _job_to_response(job_with)
+    assert result_with["started_at"] == known_dt.isoformat()
+
+    # Case 2: started_at is None (job hasn't started yet)
+    job_without = MagicMock()
+    job_without.started_at = None
+    job_without.completed_at = None
+    job_without.created_at = known_dt
+    job_without.status = JobStatus.queued
+    job_without.batches = []
+    job_without.id = 2
+    job_without.measure_id = "m-2"
+    job_without.measure_name = None
+    job_without.period_start = "2024-01-01"
+    job_without.period_end = "2024-12-31"
+    job_without.cdr_url = "http://cdr/fhir"
+    job_without.cdr_name = None
+    job_without.cdr_read_only = False
+    job_without.group_id = None
+    job_without.total_patients = 0
+    job_without.processed_patients = 0
+    job_without.failed_patients = 0
+    job_without.delete_requested = False
+    job_without.error_message = None
+
+    result_without = _job_to_response(job_without)
+    assert result_without["started_at"] is None

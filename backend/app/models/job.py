@@ -52,6 +52,7 @@ class Job(Base):
     delete_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     cdr_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     cdr_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

@@ -167,6 +167,7 @@ async def run_job(job_id: int) -> None:
             return
 
         job.status = JobStatus.running
+        job.started_at = datetime.now(timezone.utc)
         await session.commit()
 
     try:
