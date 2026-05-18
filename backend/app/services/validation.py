@@ -689,6 +689,49 @@ def _valueset_urls(resources: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+async def _assert_no_canonical_url_clash(measures: list[dict[str, Any]]) -> None:
+    """Raise ValueError if any Measure in *measures* would introduce a canonical-URL clash.
+
+    A clash occurs when HAPI already contains a Measure with the same canonical URL
+    but a DIFFERENT FHIR resource ID. Silently PUT-upsert in that case would leave two
+    separate HAPI resources serving the same URL; the comparison endpoint would then
+    resolve the wrong one and return has_expected=false.
+
+    This is defense-in-depth: the primary fix is keeping seed/measure-bundle.json
+    in sync with the connectathon bundles (see docs/decisions.md §CMS122-URL-drift).
+    """
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        for resource in measures:
+            if resource.get("resourceType") != "Measure":
+                continue
+            canonical_url = resource.get("url", "")
+            incoming_id = resource.get("id", "")
+            if not canonical_url or not incoming_id:
+                continue
+            try:
+                resp = await client.get(
+                    f"{settings.MEASURE_ENGINE_URL}/Measure",
+                    params={"url": canonical_url, "_elements": "id,url", "_count": "2"},
+                )
+            except Exception:
+                # Network errors during the probe are non-fatal; push_resources will
+                # fail loudly if HAPI is truly unreachable.
+                continue
+            if resp.status_code != 200:
+                continue
+            bundle = resp.json()
+            for entry in bundle.get("entry", []):
+                existing_id = entry.get("resource", {}).get("id", "")
+                if existing_id and existing_id != incoming_id:
+                    raise ValueError(
+                        f"Canonical URL clash detected for Measure '{canonical_url}': "
+                        f"HAPI already has resource id='{existing_id}' at that URL, "
+                        f"but this bundle carries id='{incoming_id}'. "
+                        f"Remove the stale resource from HAPI or align the bundle IDs. "
+                        f"See docs/decisions.md §CMS122-URL-drift for background."
+                    )
+
+
 async def triage_test_bundle(
     bundle_json: dict[str, Any],
     filename: str,
@@ -721,6 +764,7 @@ async def triage_test_bundle(
             if support_resources:
                 await push_resources(support_resources)
             if primary:
+                await _assert_no_canonical_url_clash(primary)
                 await push_resources(primary)  # Measure + Library always pushed
         except Exception as exc:
             raise ValueError(
