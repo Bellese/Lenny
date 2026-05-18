@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.19.1] - 2026-05-18
+
+### Fixed
+- **Jobs / Measures / Results: table content no longer clipped at narrow viewports.** Added an inner `tableScroll` wrapper (`overflow-x: auto`) inside each table card so a horizontal scrollbar appears when the viewport is between 820px and ~1100px — rightmost columns (Status, Duration, Actions) are now reachable by scroll instead of being silently hidden. Fixes the Duration column appearing missing on prod for users with narrower windows.
+- **Jobs / Measures: Measure column now has a 260px minimum width.** Long CMS measure names like "Diabetes: Glycemic Status Assessment Greater Than 9%" no longer squeeze to 5–6 lines; they render in ≤2 lines at typical desktop widths.
+- **Jobs: Period column wraps cleanly.** Each date value stays on one line; the break only happens at the " – " separator between start and end dates.
+- **Jobs: Cohort column truncated at 145px.** Prevents long camelCase cohort identifiers from pushing the table past the card width.
+- **Mobile stacked layout unaffected.** The `@media (max-width: 820px)` stacked-card treatment on all three pages is preserved exactly.
+
 ## [0.0.18.1] - 2026-05-18
 
 ### Added

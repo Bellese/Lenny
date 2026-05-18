@@ -185,6 +185,10 @@
   overflow: hidden;
 }
 
+.tableScroll {
+  overflow-x: auto;
+}
+
 .tableHeader {
   display: flex;
   align-items: center;
@@ -822,6 +826,10 @@
 
   .popCell {
     text-align: left;
+  }
+
+  .tableScroll {
+    overflow-x: visible;
   }
 }
 

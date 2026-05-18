@@ -225,6 +225,14 @@
   box-shadow: var(--shadow-card);
 }
 
+.tableScroll {
+  overflow-x: auto;
+}
+
+.measureCell {
+  min-width: 260px;
+}
+
 .cardHeader {
   display: flex;
   align-items: center;
@@ -275,13 +283,20 @@
   flex-shrink: 0;
   white-space: nowrap;
 }
-.periodCell { color: var(--text-muted); white-space: nowrap; }
-.cohortCell,
+.periodCell { color: var(--text-muted); }
+.cohortCell {
+  font-size: 12px;
+  color: var(--text-muted);
+  max-width: 145px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .patientCountCell {
   font-size: 12px;
   color: var(--text-muted);
 }
-.dateCell { font-size: 12px; color: var(--text-dim); white-space: nowrap; }
+.dateCell { font-size: 12px; color: var(--text-dim); }
 
 .emptyRow {
   text-align: center;
@@ -522,7 +537,12 @@
     white-space: normal;
   }
 
-  .cohortCell,
+  .cohortCell {
+    max-width: none;
+    overflow: visible;
+    text-overflow: clip;
+    color: var(--text);
+  }
   .patientCountCell {
     color: var(--text);
   }
@@ -571,5 +591,13 @@
 
   .sheetFooter {
     flex-direction: column-reverse;
+  }
+
+  .tableScroll {
+    overflow-x: visible;
+  }
+
+  .measureCell {
+    min-width: 0;
   }
 }
