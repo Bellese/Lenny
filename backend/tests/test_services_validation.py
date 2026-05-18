@@ -2081,6 +2081,25 @@ class TestAssertNoCanonicalUrlClash:
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             await _assert_no_canonical_url_clash(measures)  # must not raise
 
+    async def test_malformed_json_response_is_non_fatal(self):
+        """HAPI returning HTTP 200 with non-JSON body is silently ignored."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json = MagicMock(side_effect=ValueError("not valid JSON"))
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_ctx = self._make_mock_ctx(mock_client)
+
+        measures = [
+            {
+                "resourceType": "Measure",
+                "id": "CMS122FHIRDiabetesAssessGreaterThan9Percent",
+                "url": "https://madie.cms.gov/Measure/CMS122FHIRDiabetesAssessGreaterThan9Percent",
+            }
+        ]
+        with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
+            await _assert_no_canonical_url_clash(measures)  # must not raise
+
     async def test_entry_with_empty_existing_id_no_raise(self):
         """HAPI entry with empty id is not treated as a clash — empty string is ignored."""
         mock_resp = MagicMock()

@@ -722,7 +722,12 @@ async def _assert_no_canonical_url_clash(measures: list[dict[str, Any]]) -> None
                 continue
             if resp.status_code != 200:
                 continue
-            bundle = resp.json()
+            try:
+                bundle = resp.json()
+            except Exception:
+                # Malformed JSON from HAPI (e.g. truncated response under OOM) is
+                # non-fatal; push_resources will encounter the same server shortly.
+                continue
             for entry in bundle.get("entry", []):
                 existing_id = entry.get("resource", {}).get("id", "")
                 if existing_id and existing_id != incoming_id:
