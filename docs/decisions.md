@@ -78,6 +78,8 @@ This log records significant technical and process choices with their rationale.
 
 **Alternatives considered:** Upgrading or replacing `react-scripts` (CRA successor migration) — deferred as a multi-week refactor unrelated to these alerts. Accepting 5.x with a broken dev server — rejected because it masks a real developer experience regression behind a green CI build.
 
+**Follow-up (2026-05-18):** Alert #28 (`GHSA-79cf-xcqc-c78w` / CVE-2026-6402) is a bypass of the v5.2.1 fix from GHSA-4v9v-hfq4-rm2v (alert #7): browsers don't send `Sec-Fetch-*` headers over plain HTTP, so the header-based block introduced in 5.2.1 is ineffective on the non-HTTPS default. The patched version is `5.2.4`, still 5.x, so the `react-scripts@5.0.1` 4.x-API incompatibility and the CI-stays-green-while-npm-start-breaks failure mode are unchanged. Production image (`serve@14` on static `build/`) still doesn't include webpack-dev-server. Alert #28 dismissed with `dismissed_reason=not_used` under the same rationale. This is the third iteration of this vulnerability class on the same dev-only dependency — future alerts in this family will follow the same disposition until `react-scripts` is replaced.
+
 ---
 
 ## ADR-009: Bundle chunking is per-CDR-connection, not global (2026-05-16)
