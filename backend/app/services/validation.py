@@ -689,6 +689,9 @@ def _valueset_urls(resources: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+_CLASH_PROBE_TIMEOUT_SECONDS = 10.0
+
+
 async def _assert_no_canonical_url_clash(measures: list[dict[str, Any]]) -> None:
     """Raise ValueError if any Measure in *measures* would introduce a canonical-URL clash.
 
@@ -700,7 +703,7 @@ async def _assert_no_canonical_url_clash(measures: list[dict[str, Any]]) -> None
     This is defense-in-depth: the primary fix is keeping seed/measure-bundle.json
     in sync with the connectathon bundles (see docs/decisions.md §CMS122-URL-drift).
     """
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=_CLASH_PROBE_TIMEOUT_SECONDS) as client:
         for resource in measures:
             if resource.get("resourceType") != "Measure":
                 continue
@@ -1048,6 +1051,7 @@ async def _reload_measures_from_seed_bundles() -> dict[str, int]:
                 if support_resources:
                     await push_resources(support_resources)
                 if primary:
+                    await _assert_no_canonical_url_clash(primary)
                     await push_resources(primary)
                     for r in primary:
                         if r.get("resourceType") == "Measure":
