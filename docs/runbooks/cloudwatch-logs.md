@@ -8,7 +8,7 @@
 | `/leonard/backend` | FastAPI backend | Job submissions, FHIR queries, errors, request IDs |
 | `/leonard/hapi-cdr` | HAPI FHIR CDR | FHIR interactions (bundle uploads, patient queries) |
 | `/leonard/hapi-measure` | HAPI FHIR Measure Engine | CQL evaluation, measure runs |
-| `/leonard/frontend` | React frontend (Nginx) | Static asset serving, 404s |
+| `/leonard/frontend` | React frontend (serve@14) | Static asset serving, 404s |
 
 ## One-Time Setup (apply IAM policy before first deploy)
 
@@ -27,9 +27,11 @@ Verify:
 aws iam get-role-policy --role-name leonard-ec2-prod --policy-name CloudWatchLogsWrite
 ```
 
-## Set Log Retention (run before first deploy, or immediately after)
+## Set Log Retention
 
-AWS creates log groups with no retention ("Never Expire") by default. If you pre-create the groups before deploying, you can set retention before any logs arrive. If the groups are created on first container start, set retention immediately after deploy. Set 90-day retention on all five groups:
+`bootstrap-aws.sh` (steps 4c–4d) pre-creates all five log groups and sets 90-day retention before any logs arrive. Re-running the script is idempotent — it will update retention on existing groups.
+
+If you need to re-apply retention manually (e.g., after an out-of-band group deletion):
 
 ```bash
 export AWS_PROFILE=leonard
