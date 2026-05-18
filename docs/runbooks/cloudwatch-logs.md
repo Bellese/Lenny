@@ -27,9 +27,9 @@ Verify:
 aws iam get-role-policy --role-name leonard-ec2-prod --policy-name CloudWatchLogsWrite
 ```
 
-## Set Log Retention (run after first deploy)
+## Set Log Retention (run before first deploy, or immediately after)
 
-AWS creates log groups with no retention ("Never Expire") by default. Set 90-day retention on all five groups:
+AWS creates log groups with no retention ("Never Expire") by default. If you pre-create the groups before deploying, you can set retention before any logs arrive. If the groups are created on first container start, set retention immediately after deploy. Set 90-day retention on all five groups:
 
 ```bash
 export AWS_PROFILE=leonard
@@ -42,7 +42,7 @@ done
 
 ## Viewing Logs (replaces `docker logs`)
 
-After deploying this PR, `docker logs <container>` will return "logging driver does not support reading". Use these instead:
+After deploying this PR, `docker logs <container>` will return "logging driver does not support reading" for the five services above. The `db` and `seed` services still use Docker's default json-file driver and remain accessible via `docker logs`. Use these for the CloudWatch-enabled services:
 
 ### Tail latest events (last 30 minutes)
 
