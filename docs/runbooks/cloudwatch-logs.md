@@ -89,6 +89,7 @@ fields @timestamp, request.method, request.uri, status, duration
 ```
 fields request.uri, status
 | filter status >= 400
+| filter request.uri != "/health"
 | stats count() as errors by request.uri, status
 | sort errors desc
 ```
