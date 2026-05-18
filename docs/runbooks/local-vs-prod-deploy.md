@@ -6,11 +6,15 @@
 
 **Production uses vanilla `hapiproject/hapi:v8.8.0-1`** — an off-the-shelf image with no pre-loaded data. On first boot, HAPI downloads the required IGs from the HL7 registry (~5–10 min) and the `seed` service POSTs all the connectathon bundles into the running server (~5–10 min more). After that the data lives in named Docker volumes and survives every subsequent redeploy.
 
-### Why the difference?
+### Why production can't use the prebaked images
 
-Prebaked images are faster for development iteration — no waiting on seed or IG download every time you `docker compose down -v && docker compose up`. But they need to be rebuilt whenever the measure bundles change, which adds a CI step. Production doesn't have that problem because it seeds into a persistent volume on first boot and never rebuilds the image just for a bundle update.
+`docker-compose.prebaked.yml` works by setting `volumes: []` on the HAPI containers — it strips the named volume mounts (`leonard_cdrdata`, `leonard_measuredata`). That's what makes the baked H2 inside the image visible: if the named volume were mounted, it would shadow the image filesystem immediately on container start and the baked data would never be seen.
 
-Put another way: **prebaked trades image-build time for startup time; vanilla trades startup time for a simpler CI pipeline and a prod-trustworthy seed path.**
+In production the named volume is where user-uploaded patient data lives. If you deployed a new prebaked image, the container would recreate with the volume stripped and the baked H2 would replace everything in it. **Any patient data or validation results uploaded between deploys would be gone.**
+
+Adopting prebaked as-is in prod would mean: every time the HAPI image updates (weekly bake cycle, or any seed/IG change), production resets to the baked state. For a demo or Connectathon environment that's acceptable — all the data is synthetic and gets reloaded from seed anyway. For a production environment where customers push their own data, it's a data-loss event on every deploy cycle.
+
+That's the fundamental mismatch: **"image-baked H2" and "persistent user data" are mutually exclusive with this volume setup.** Resolving it would require either moving HAPI to an external database (Postgres/MySQL, where data lives outside the container entirely) or building a migration step that merges user-uploaded resources into each new baked image — neither of which is trivial.
 
 ## Comparison table
 
