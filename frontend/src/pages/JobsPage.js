@@ -326,7 +326,7 @@ export default function JobsPage() {
       {loading && (
         <div className={styles.card} role="status" aria-label="Loading jobs">
           <table><thead><tr><th>Measure</th><th>Period</th><th>Cohort</th><th>Patients</th><th>Status</th><th>Queued</th><th>Started</th><th>Duration</th><th style={{ width: 50 }}></th></tr></thead>
-            <tbody>{[1,2,3].map(i => (<tr key={i}>{[180,100,80,80,40,80,80,60].map((w,j) => (<td key={j}><div className="skeleton" style={{ height: 14, width: w }} /></td>))}</tr>))}</tbody>
+            <tbody>{[1,2,3].map(i => (<tr key={i}>{[180,100,80,80,40,80,80,60,50].map((w,j) => (<td key={j}><div className="skeleton" style={{ height: 14, width: w }} /></td>))}</tr>))}</tbody>
           </table>
         </div>
       )}
