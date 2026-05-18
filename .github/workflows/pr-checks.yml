@@ -151,3 +151,25 @@ jobs:
       - name: Build
         working-directory: frontend
         run: npm run build
+
+  config-validation:
+    name: Config Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Validate Caddyfile
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}/Caddyfile:/etc/caddy/Caddyfile \
+            -e CADDY_HOST=lenny.bellese.dev \
+            caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile
+
+      - name: Validate docker-compose.prod.yml
+        env:
+          CADDY_HOST: lenny.bellese.dev
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+
+      - name: Validate IAM policy JSON
+        run: jq . iam/leonard-ec2-prod-cloudwatch-policy.json > /dev/null

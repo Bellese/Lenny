@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.17.19] - 2026-05-18
+
+### Added
+- **CloudWatch Logs monitoring.** All five production services (caddy, backend, hapi-fhir-cdr, hapi-fhir-measure, frontend) now ship container logs to AWS CloudWatch Logs via the `awslogs` Docker driver. Log groups `/leonard/{caddy,backend,hapi-cdr,hapi-measure,frontend}` with 90-day retention. Non-blocking mode with 16 MB in-memory buffer prevents log writes from blocking container I/O. `docker logs` is replaced by `aws logs filter-log-events` for these five services after deploy; `db` and `seed` retain the default json-file driver.
+- **Caddy structured JSON access logging.** Both vhosts (`{$CADDY_HOST}` and `api.{$CADDY_HOST}`) emit structured JSON access logs to stdout, enabling CloudWatch Logs Insights queries on `request.method`, `request.uri`, `status`, `duration`, and `request.remote_ip`.
+- **IAM policy `CloudWatchLogsWrite`.** Least-privilege inline policy on `leonard-ec2-prod` role: `CreateLogGroup`/`DescribeLogGroups` scoped to log-group ARN, stream write actions scoped to stream ARN.
+- **Config validation CI job.** New `config-validation` job in `pr-checks.yml` validates Caddyfile syntax (via `caddy validate`), `docker-compose.prod.yml` overlay resolution (via `docker compose config --quiet`), and IAM policy JSON (via `jq`).
+- **CloudWatch Logs runbook.** `docs/runbooks/cloudwatch-logs.md` documents log group table, IAM setup, retention, log viewing commands, and CloudWatch Logs Insights queries.
+- **`bootstrap-aws.sh` extended.** Steps 4c–4d apply the CloudWatch inline policy and pre-create log groups with retention idempotently, so DR rebuilds and new environments start with the full logging stack configured.
+
 ## [0.0.17.18] - 2026-05-18
 
 ### Removed

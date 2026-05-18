@@ -3,6 +3,8 @@
 #   - Creates the /leonard/prod/POSTGRES_PASSWORD SSM SecureString parameter
 #   - Creates the /leonard/prod/CDR_FERNET_KEY SSM SecureString parameter
 #   - Creates IAM policy, role, and instance profile for EC2 SSM access
+#   - Applies inline CloudWatch Logs write policy to leonard-ec2-prod role
+#   - Pre-creates CloudWatch log groups with 90-day retention
 #   - Associates the instance profile with the prod EC2 instance
 #   - Enforces IMDSv2 (http-tokens=required, hop-limit=1)
 #
@@ -191,6 +193,45 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 4c. Inline CloudWatch Logs write policy — required for awslogs driver
+#     Without this, containers using awslogs fail to initialize and won't start.
+# ---------------------------------------------------------------------------
+CW_POLICY_NAME="CloudWatchLogsWrite"
+echo "[+] Checking inline policy $CW_POLICY_NAME on role $ROLE_NAME ..."
+if aws iam get-role-policy --role-name "$ROLE_NAME" --policy-name "$CW_POLICY_NAME" --region "$REGION" >/dev/null 2>&1; then
+  echo "[=] Inline policy $CW_POLICY_NAME already exists — skipping"
+else
+  echo "[+] Applying inline CloudWatch Logs write policy ..."
+  aws iam put-role-policy \
+    --role-name "$ROLE_NAME" \
+    --policy-name "$CW_POLICY_NAME" \
+    --policy-document "file://$REPO_ROOT/iam/leonard-ec2-prod-cloudwatch-policy.json" \
+    --region "$REGION"
+  echo "[✓] Inline policy $CW_POLICY_NAME applied"
+fi
+
+# ---------------------------------------------------------------------------
+# 4d. Pre-create CloudWatch log groups with 90-day retention
+#     awslogs-create-group:true creates groups on container start with no
+#     retention (Never Expire). Pre-creating here guarantees retention is set
+#     before any logs arrive, even on DR rebuilds.
+# ---------------------------------------------------------------------------
+LOG_GROUPS=("/leonard/caddy" "/leonard/backend" "/leonard/hapi-cdr" "/leonard/hapi-measure" "/leonard/frontend")
+for LG in "${LOG_GROUPS[@]}"; do
+  echo "[+] Checking log group $LG ..."
+  if aws logs describe-log-groups --log-group-name-prefix "$LG" --region "$REGION" \
+      --query "logGroups[?logGroupName=='$LG'].logGroupName" --output text 2>/dev/null | grep -q "$LG"; then
+    echo "[=] Log group $LG already exists — ensuring 90-day retention ..."
+  else
+    echo "[+] Creating log group $LG ..."
+    aws logs create-log-group --log-group-name "$LG" --region "$REGION"
+    echo "[✓] Log group $LG created"
+  fi
+  aws logs put-retention-policy --log-group-name "$LG" --retention-in-days 90 --region "$REGION"
+  echo "[✓] Retention set to 90 days on $LG"
+done
+
+# ---------------------------------------------------------------------------
 # 5. Instance profile — skip if exists
 # ---------------------------------------------------------------------------
 echo "[+] Checking instance profile $PROFILE_NAME ..."
@@ -289,9 +330,11 @@ echo ""
 echo "=== Bootstrap complete ==="
 echo ""
 echo "Resources verified/created:"
-echo "  SSM parameter : $SSM_PARAM"
-echo "  IAM policy    : $POLICY_ARN"
-echo "  IAM role      : $ROLE_NAME"
+echo "  SSM parameter   : $SSM_PARAM"
+echo "  IAM policy      : $POLICY_ARN"
+echo "  IAM role        : $ROLE_NAME"
+echo "  CW inline policy: $CW_POLICY_NAME on $ROLE_NAME"
+echo "  CW log groups   : /leonard/{caddy,backend,hapi-cdr,hapi-measure,frontend} (90d retention)"
 echo "  Instance profile: $PROFILE_NAME"
 echo "  EC2 association : $INSTANCE_ID -> $PROFILE_NAME"
 echo "  IMDSv2          : required (hop-limit=1)"

@@ -1,3 +1,18 @@
+# Shared awslogs options — only awslogs-group differs per service.
+# Anchor merges inside each service's options: block so region/create-group/tag
+# are defined once. YAML merge keys (<<:) work at the same mapping level only;
+# nesting the anchor inside options: is required for correct merging.
+# Non-blocking mode: log writes never block container IO after driver init.
+# NOTE: if CloudWatch is unreachable at container start, driver init fails and
+# the container will not start regardless of non-blocking mode.
+# 16MB in-memory buffer (~16K typical log lines) drops oldest on overflow.
+x-log-opts: &log-opts
+  awslogs-region: us-east-1
+  awslogs-create-group: "true"
+  tag: "{{.Name}}"
+  mode: non-blocking
+  max-buffer-size: 16m
+
 services:
   frontend:
     restart: unless-stopped
@@ -5,6 +20,11 @@ services:
       context: ./frontend
       args:
         REACT_APP_API_URL: https://api.${CADDY_HOST}
+    logging:
+      driver: awslogs
+      options:
+        <<: *log-opts
+        awslogs-group: /leonard/frontend
 
   backend:
     restart: unless-stopped
@@ -19,6 +39,11 @@ services:
         hard: 0
     volumes:
       - ./seed/connectathon-bundles:/seed/connectathon-bundles:ro
+    logging:
+      driver: awslogs
+      options:
+        <<: *log-opts
+        awslogs-group: /leonard/backend
 
   db:
     restart: unless-stopped
@@ -33,12 +58,22 @@ services:
     mem_limit: 3g
     environment:
       - JAVA_TOOL_OPTIONS=-Xmx2g -Xms256m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/hapi/heapdump.hprof
+    logging:
+      driver: awslogs
+      options:
+        <<: *log-opts
+        awslogs-group: /leonard/hapi-cdr
 
   hapi-fhir-measure:
     restart: unless-stopped
     mem_limit: 4g
     environment:
       - JAVA_TOOL_OPTIONS=-Xmx2g -Xms256m -XX:+ExitOnOutOfMemoryError -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/data/hapi/heapdump.hprof
+    logging:
+      driver: awslogs
+      options:
+        <<: *log-opts
+        awslogs-group: /leonard/hapi-measure
 
   caddy:
     restart: unless-stopped
@@ -53,6 +88,11 @@ services:
     depends_on:
       - frontend
       - backend
+    logging:
+      driver: awslogs
+      options:
+        <<: *log-opts
+        awslogs-group: /leonard/caddy
 
 secrets:
   postgres_password:

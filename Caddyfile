@@ -11,11 +11,19 @@
 
 {$CADDY_HOST} {
     import security_headers
+    log {
+        output stdout
+        format json
+    }
     reverse_proxy frontend:3001
 }
 
 api.{$CADDY_HOST} {
     import security_headers
+    log {
+        output stdout
+        format json
+    }
     request_body {
         max_size 100MB
     }
