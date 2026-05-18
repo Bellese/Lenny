@@ -11,12 +11,7 @@ import { useSearch } from '../contexts/SearchContext';
 import PeriodPicker from '../components/PeriodPicker';
 import { extractCmsId, measureDisplayLabel, measureOptionLabel, findMatchingGroup } from '../utils/measureFormat';
 import { isActuallyRunning, isRunning, isComplete, selectActiveJob } from '../utils/jobStatus';
-
-function formatDateTime(dateStr) {
-  if (!dateStr) return '--';
-  const d = new Date(dateStr);
-  return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-}
+import { formatDateTime, formatDuration } from '../utils/dateFormat';
 
 function formatElapsed(startStr) {
   if (!startStr) return '--';
@@ -24,20 +19,6 @@ function formatElapsed(startStr) {
   const m = Math.floor(diff / 60);
   const s = diff % 60;
   return `${m}m ${String(s).padStart(2, '0')}s`;
-}
-
-export function formatDuration(startStr, endStr, nowFn) {
-  if (!startStr) return '—';
-  const end = endStr ? new Date(endStr) : new Date((nowFn || Date.now)());
-  const diffSec = Math.max(0, Math.floor((end - new Date(startStr)) / 1000));
-  if (diffSec < 3600) {
-    const m = Math.floor(diffSec / 60);
-    const s = diffSec % 60;
-    return `${m}:${String(s).padStart(2, '0')}`;
-  }
-  const h = Math.floor(diffSec / 3600);
-  const m = Math.floor((diffSec % 3600) / 60);
-  return `${h}h ${m}m`;
 }
 
 function estimateRemaining(startStr, progress) {
@@ -389,7 +370,7 @@ export default function JobsPage() {
                       <td data-label="Status"><StatusBadge status={job.status} /></td>
                       <td data-label="Queued" className={styles.dateCell}>{formatDateTime(job.created_at)}</td>
                       <td data-label="Started" className={styles.dateCell}>{job.started_at ? formatDateTime(job.started_at) : '—'}</td>
-                      <td data-label="Duration" className={styles.dateCell}>{formatDuration(job.started_at, job.completed_at)}</td>
+                      <td data-label="Duration" className={styles.dateCell}>{formatDuration(job.started_at || (job.completed_at ? job.created_at : null), job.completed_at)}</td>
                       <td data-label="Actions">
                         <KebabMenu items={[
                           { label: 'View results', icon: <ViewIcon />, disabled: !complete, onClick: () => navigate(`/results/${job.id}`) },
