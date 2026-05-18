@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.17.18] - 2026-05-18
+
+### Removed
+- **Retired legacy `98-89-219-217.nip.io` redirects.** The 301-redirect Caddy blocks that forwarded the legacy nip.io URLs to `lenny.bellese.dev` during the two-week soft-cutover window (issue #264 Phase 5) are removed. Clients hitting the old URLs now receive a TLS certificate error rather than a redirect. Archived deployment design and plan docs updated to reference `lenny.bellese.dev` throughout.
+
 ## [0.0.17.17] - 2026-05-17
 
 ### Added
