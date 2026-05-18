@@ -69,6 +69,7 @@ class JobResponse(BaseModel):
     delete_requested: bool
     created_at: str
     completed_at: Optional[str]
+    started_at: Optional[str] = None
     error_message: Optional[str]
 
     model_config = {"from_attributes": True}
@@ -117,6 +118,7 @@ def _job_to_response(job: Job) -> dict:
         "delete_requested": job.delete_requested,
         "created_at": job.created_at.isoformat() if job.created_at else None,
         "completed_at": job.completed_at.isoformat() if job.completed_at else None,
+        "started_at": job.started_at.isoformat() if job.started_at else None,
         "error_message": job.error_message,
     }
 

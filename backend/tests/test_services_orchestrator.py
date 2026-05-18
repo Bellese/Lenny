@@ -1025,3 +1025,51 @@ async def test_run_job_evaluate_failure_persists_error_details_and_back_compat(
         assert mr.error_details["status_code"] == 404
         # error_phase set to evaluate
         assert mr.error_phase == "evaluate"
+
+
+async def test_run_job_sets_started_at_on_transition_to_running(test_session, session_factory, mock_measure_report):
+    """run_job stamps started_at at the queued→running transition."""
+    job_id = await _setup_job(test_session)
+
+    patients = [
+        {"resourceType": "Patient", "id": "p1", "name": [{"given": ["Alice"], "family": "Test"}]},
+    ]
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch(
+            "app.services.orchestrator._get_cdr_url",
+            new_callable=AsyncMock,
+            return_value="http://cdr.example.com/fhir",
+        ),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patients",
+            new_callable=AsyncMock,
+            return_value=patients,
+        ),
+        patch.object(
+            __import__("app.services.fhir_client", fromlist=["BatchQueryStrategy"]).BatchQueryStrategy,
+            "gather_patient_data",
+            new_callable=AsyncMock,
+            return_value=__import__("app.services.fhir_client", fromlist=["GatherResult"]).GatherResult(
+                resources=[{"resourceType": "Patient", "id": "p1"}]
+            ),
+        ),
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value=mock_measure_report,
+        ),
+    ):
+        await run_job(job_id)
+
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        assert job.started_at is not None, "started_at must be set when job transitions to running"
+        assert job.status == JobStatus.complete
+        # started_at must be before or equal to completed_at
+        assert job.started_at <= job.completed_at
