@@ -28,12 +28,12 @@ Five existing services (frontend, backend, db, hapi-fhir-cdr, hapi-fhir-measure)
 
 | Host | Routes to | Purpose |
 |------|-----------|---------|
-| `https://<ip>.nip.io` | frontend:3001 | React UI |
-| `https://api.<ip>.nip.io` | backend:8000 | FastAPI |
+| `https://lenny.bellese.dev` | frontend:3001 | React UI |
+| `https://api.lenny.bellese.dev` | backend:8000 | FastAPI |
 
-Both subdomains resolve to the same Elastic IP. Caddy auto-fetches Let's Encrypt certs for both via nip.io. No IT/DNS involvement required.
+Both subdomains resolve to the same Elastic IP. Caddy auto-fetches Let's Encrypt certs for both via lenny.bellese.dev. No IT/DNS involvement required.
 
-`<ip>` format: dots replaced with dashes (e.g. `54.12.34.56` → `54-12-34-56.nip.io`).
+`<ip>` format: dots replaced with dashes (e.g. `54.12.34.56` → `lenny.bellese.dev`).
 
 ### Why not Fargate
 
@@ -139,7 +139,7 @@ jobs:
             cd /opt/leonard
             git pull origin master
             export EC2_PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-            export CADDY_HOST="${EC2_PUBLIC_IP//./-}.nip.io"
+            export CADDY_HOST="lenny.bellese.dev"
             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
             sleep 10 && curl -f https://api.${CADDY_HOST}/health || exit 1
             docker compose ps
@@ -158,7 +158,7 @@ jobs:
 cd /opt/leonard
 git checkout HEAD~1
 export EC2_PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-export CADDY_HOST="${EC2_PUBLIC_IP//./-}.nip.io"
+export CADDY_HOST="lenny.bellese.dev"
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
@@ -186,7 +186,7 @@ sudo chown -R ec2-user:ec2-user /opt/leonard
 ```bash
 cd /opt/leonard
 export EC2_PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-export CADDY_HOST="${EC2_PUBLIC_IP//./-}.nip.io"
+export CADDY_HOST="lenny.bellese.dev"
 docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 ```
 
