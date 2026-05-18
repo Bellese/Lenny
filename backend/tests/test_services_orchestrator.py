@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.job import Job, JobStatus, MeasureResult
 from app.services.fhir_client import FailedResourceFetch, GatherResult
 from app.services.orchestrator import (
@@ -236,7 +237,7 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
             {"resourceType": "Condition", "id": "cond-1"},
         ]
 
-    mock_wipe.assert_awaited_once_with(strict=False)
+    mock_wipe.assert_awaited_once_with(base_url=settings.MEASURE_ENGINE_URL, strict=False)
 
 
 async def test_run_job_stores_empty_list_when_snapshot_helper_returns_none(

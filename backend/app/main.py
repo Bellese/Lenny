@@ -470,6 +470,30 @@ async def lifespan(app: FastAPI):
         except Exception:
             logger.exception("Credential encryption backfill failed — continuing startup")
 
+    # Reconcile stale admin_operations: mark any row stuck in running/pending for
+    # >10 min as failed. asyncio.create_task does not survive restarts; a crashed
+    # container leaves those rows in running state indefinitely otherwise.
+    # Also purge rows older than 30 days to keep the table bounded.
+    try:
+        from sqlalchemy import text as _text
+
+        async with engine.connect() as _conn:
+            await _conn.execute(
+                _text("""
+                UPDATE admin_operations
+                SET status = 'failed',
+                    error = 'Interrupted by backend restart',
+                    completed_at = NOW()
+                WHERE status IN ('running', 'pending')
+                  AND started_at < NOW() - INTERVAL '10 minutes'
+                """)
+            )
+            await _conn.execute(_text("DELETE FROM admin_operations WHERE started_at < NOW() - INTERVAL '30 days'"))
+            await _conn.commit()
+        logger.info("Admin operations reconciled")
+    except Exception:
+        logger.exception("Admin operations reconcile failed — continuing startup")
+
     # Load connectathon bundles at startup (no-op if directory missing)
     try:
         summary = await load_connectathon_bundles()

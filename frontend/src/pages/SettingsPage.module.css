@@ -407,6 +407,35 @@
 .btnDanger:hover:not(:disabled) { background: color-mix(in oklch, var(--err) 18%, transparent); }
 .btnDanger:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.btnSecondary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-sunken);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 120ms ease, opacity 120ms ease;
+  flex-shrink: 0;
+}
+.btnSecondary:hover:not(:disabled) { background: var(--bg-hover); }
+.btnSecondary:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.operationSteps {
+  margin: 8px 0 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+.stepOk { color: var(--success, #16a34a); }
+.stepFailed { color: var(--err); }
+.stepRunning { color: var(--text-muted); font-style: italic; }
+
 /* Toggle switch */
 .toggle {
   position: relative;

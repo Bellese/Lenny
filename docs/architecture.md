@@ -27,6 +27,12 @@ Two compose layouts share these services:
 
 The local fast path is to set `HAPI_CDR_IMAGE` and `HAPI_MEASURE_IMAGE` in `.env` so vanilla compose reuses prebaked images without the prebaked overlay (see `.env.example`).
 
+For a detailed end-to-end comparison of local and prod deploy mechanics, see **`docs/runbooks/local-vs-prod-deploy.md`**.
+
+### Resetting state
+
+To wipe Lenny back to a known-good blank state (before a demo, after a bad test run, etc.), see **`docs/runbooks/factory-reset.md`**. The admin panel (Settings → Admin → Factory Reset) provides a UI-native path; the runbook also documents `curl` and `docker volume rm` fallbacks.
+
 ## Backend Structure
 
 ```
