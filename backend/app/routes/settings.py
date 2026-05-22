@@ -5,20 +5,27 @@ shape.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy import text as sa_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db import get_session
+from app.config import settings
+from app.db import async_session, get_session
+from app.models.admin_operation import AdminOperation, AdminOperationKind, AdminOperationStatus
 from app.models.app_setting import AppSetting
 from app.models.config import CDRConfig
 from app.models.connection_base import ConnectionKind
-from app.models.job import Job
+from app.models.job import Job, JobStatus
 from app.models.mcs_config import MCSConfig
 from app.routes.connection_factory import make_connection_router
-from app.services.fhir_client import probe_mcs_data_requirements, wipe_measure_definitions
+from app.services.bundle_loader import load_connectathon_bundles
+from app.services.fhir_client import probe_mcs_data_requirements, wipe_measure_definitions, wipe_patient_data
 from app.services.fhir_errors import (
     HINT_BY_STATUS,
     FhirOperationError,
@@ -298,3 +305,223 @@ async def wipe_measure_engine() -> dict:
         )
     logger.info("Measure engine definitions wiped via admin endpoint")
     return {"status": "ok", "message": "Measure engine definitions wiped. Engine will re-seed on next job run."}
+
+
+# ---------------------------------------------------------------------------
+# Factory Reset + Reseed
+# ---------------------------------------------------------------------------
+
+
+class FactoryResetRequest(BaseModel):
+    include_cdr: bool = True
+    include_measure_engine: bool = True
+    include_app_db: bool = True
+
+
+class AdminOperationResponse(BaseModel):
+    operation_id: int
+    status: str
+    kind: str
+    scopes: dict | None = None
+    steps: list | None = None
+    error: str | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
+
+
+async def _poll_zero_counts(base_url: str, resource_types: list[str], step_name: str) -> None:
+    """Poll until all given resource types return total=0 (or timeout after 60s)."""
+    import httpx as _httpx
+
+    deadline = asyncio.get_event_loop().time() + 60
+    async with _httpx.AsyncClient(timeout=10.0) as client:
+        for rt in resource_types:
+            while asyncio.get_event_loop().time() < deadline:
+                try:
+                    resp = await client.get(f"{base_url}/{rt}?_summary=count")
+                    if resp.status_code == 200:
+                        total = resp.json().get("total", 1)
+                        if total == 0:
+                            break
+                except Exception:
+                    pass
+                await asyncio.sleep(5)
+            else:
+                logger.warning("Poll-zero timeout for %s on %s (%s)", rt, base_url, step_name)
+
+
+async def _run_factory_reset(operation_id: int, request: FactoryResetRequest) -> None:
+    """Background task: execute factory reset steps and update the AdminOperation row."""
+    steps: list[dict] = []
+
+    async def _record(step: str, status: str, error: str | None = None) -> None:
+        steps.append({"step": step, "status": status, "error": error})
+        async with async_session() as s:
+            op = await s.get(AdminOperation, operation_id)
+            if op:
+                op.steps_json = list(steps)
+                await s.commit()
+
+    async with async_session() as session:
+        op = await session.get(AdminOperation, operation_id)
+        if op:
+            op.status = AdminOperationStatus.running
+            await session.commit()
+
+    try:
+        if request.include_cdr:
+            # Resolve active CDR URL from cdr_configs.is_active=True
+            async with async_session() as session:
+                result = await session.execute(select(CDRConfig.cdr_url).where(CDRConfig.is_active.is_(True)).limit(1))
+                active_cdr_url = result.scalar_one_or_none() or settings.DEFAULT_CDR_URL
+
+            await wipe_patient_data(base_url=active_cdr_url, strict=False)
+            await _poll_zero_counts(active_cdr_url, ["Patient", "Encounter"], "cdr_wipe")
+            await _record("wipe_cdr", "succeeded")
+
+        if request.include_measure_engine:
+            await wipe_measure_definitions()
+            await wipe_patient_data(base_url=settings.MEASURE_ENGINE_URL, strict=False)
+            await _poll_zero_counts(settings.MEASURE_ENGINE_URL, ["Patient", "Measure"], "me_wipe")
+            await _record("wipe_measure_engine", "succeeded")
+
+        if request.include_app_db:
+            async with async_session() as db_session:
+                for table in ("measure_results", "jobs", "validation_results", "validation_runs", "expected_results"):
+                    await db_session.execute(sa_text(f"DELETE FROM {table}"))
+                await db_session.commit()
+            await _record("wipe_app_db", "succeeded")
+
+        async with async_session() as session:
+            op = await session.get(AdminOperation, operation_id)
+            if op:
+                op.status = AdminOperationStatus.succeeded
+                op.completed_at = datetime.now(timezone.utc)
+                op.steps_json = list(steps)
+                await session.commit()
+        logger.info("Factory reset completed", extra={"operation_id": operation_id})
+
+    except Exception as exc:
+        error_msg = sanitize_error(exc)
+        await _record("error", "failed", error=error_msg)
+        async with async_session() as session:
+            op = await session.get(AdminOperation, operation_id)
+            if op:
+                op.status = AdminOperationStatus.failed
+                op.error = error_msg
+                op.completed_at = datetime.now(timezone.utc)
+                await session.commit()
+        logger.error("Factory reset failed", extra={"operation_id": operation_id, "error": error_msg})
+
+
+async def _run_reseed(operation_id: int) -> None:
+    """Background task: reseed connectathon bundles and update the AdminOperation row."""
+    async with async_session() as session:
+        op = await session.get(AdminOperation, operation_id)
+        if op:
+            op.status = AdminOperationStatus.running
+            await session.commit()
+
+    try:
+        summary = await load_connectathon_bundles()
+        async with async_session() as session:
+            op = await session.get(AdminOperation, operation_id)
+            if op:
+                op.status = AdminOperationStatus.succeeded
+                op.completed_at = datetime.now(timezone.utc)
+                op.steps_json = [{"step": "reseed_bundles", "status": "succeeded", "summary": summary}]
+                await session.commit()
+        logger.info("Reseed completed", extra={"operation_id": operation_id, **summary})
+
+    except Exception as exc:
+        error_msg = sanitize_error(exc)
+        async with async_session() as session:
+            op = await session.get(AdminOperation, operation_id)
+            if op:
+                op.status = AdminOperationStatus.failed
+                op.error = error_msg
+                op.completed_at = datetime.now(timezone.utc)
+                await session.commit()
+        logger.error("Reseed failed", extra={"operation_id": operation_id, "error": error_msg})
+
+
+@router.post("/admin/factory-reset", status_code=202)
+async def factory_reset(
+    request: FactoryResetRequest,
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Wipe CDR patient data, measure-engine data, and/or app DB records.
+
+    Returns 202 Accepted with an operation_id to poll via GET /admin/operations/{id}.
+    Returns 409 if a job is currently running (cancel or wait first).
+    """
+    running_job = await session.execute(select(Job.id).where(Job.status == JobStatus.running).limit(1))
+    if running_job.scalar_one_or_none() is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="A job is currently running. Cancel or wait for it to complete before resetting.",
+        )
+
+    scopes = {
+        "include_cdr": request.include_cdr,
+        "include_measure_engine": request.include_measure_engine,
+        "include_app_db": request.include_app_db,
+    }
+    op = AdminOperation(
+        kind=AdminOperationKind.factory_reset,
+        status=AdminOperationStatus.pending,
+        scopes_json=scopes,
+    )
+    session.add(op)
+    await session.flush()
+    operation_id = op.id
+    await session.commit()
+
+    asyncio.create_task(_run_factory_reset(operation_id, request))
+
+    logger.info("Factory reset accepted", extra={"operation_id": operation_id, **scopes})
+    return {"status": "accepted", "operation_id": operation_id, "scopes": scopes}
+
+
+@router.post("/admin/reseed-bundles", status_code=202)
+async def reseed_bundles(
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Reload connectathon bundles into both FHIR servers (idempotent).
+
+    Returns 202 Accepted with an operation_id to poll via GET /admin/operations/{id}.
+    """
+    op = AdminOperation(
+        kind=AdminOperationKind.reseed_bundles,
+        status=AdminOperationStatus.pending,
+    )
+    session.add(op)
+    await session.flush()
+    operation_id = op.id
+    await session.commit()
+
+    asyncio.create_task(_run_reseed(operation_id))
+
+    logger.info("Reseed accepted", extra={"operation_id": operation_id})
+    return {"status": "accepted", "operation_id": operation_id}
+
+
+@router.get("/admin/operations/{operation_id}", response_model=AdminOperationResponse)
+async def get_admin_operation(
+    operation_id: int,
+    session: AsyncSession = Depends(get_session),
+) -> AdminOperationResponse:
+    """Poll an admin operation by ID."""
+    op = await session.get(AdminOperation, operation_id)
+    if op is None:
+        raise HTTPException(status_code=404, detail="Operation not found")
+    return AdminOperationResponse(
+        operation_id=op.id,
+        status=op.status.value,
+        kind=op.kind.value,
+        scopes=op.scopes_json,
+        steps=op.steps_json,
+        error=op.error,
+        started_at=op.started_at,
+        completed_at=op.completed_at,
+    )

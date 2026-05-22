@@ -173,7 +173,7 @@ async def run_job(job_id: int) -> None:
     try:
         # Step 1: Wipe patient data from measure engine (cleanup from prior job)
         logger.info("Wiping prior patient data from measure engine", extra={"job_id": job_id})
-        await wipe_patient_data(strict=False)
+        await wipe_patient_data(base_url=settings.MEASURE_ENGINE_URL, strict=False)
         if await _stop_or_delete_job(job_id):
             return
 

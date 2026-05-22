@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import styles from './SettingsPage.module.css';
-import { getHealth, getAdminSettings, updateAdminSettings, wipeMeasureEngine } from '../api/client';
+import { getHealth, getAdminSettings, updateAdminSettings, wipeMeasureEngine, factoryReset, reseedBundles, getAdminOperation } from '../api/client';
 import ConnectionSection from '../components/ConnectionSection';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useToast } from '../components/Toast';
@@ -32,6 +32,17 @@ export default function SettingsPage() {
   const [adminSaving, setAdminSaving] = useState(false);
   const [confirmWipe, setConfirmWipe] = useState(false);
   const [wiping, setWiping] = useState(false);
+
+  // Factory reset state
+  const [confirmFactoryReset, setConfirmFactoryReset] = useState(false);
+  const [factoryResetting, setFactoryResetting] = useState(false);
+  const [factoryResetSteps, setFactoryResetSteps] = useState(null);
+  const factoryResetPollRef = useRef(null);
+
+  // Reseed state
+  const [confirmReseed, setConfirmReseed] = useState(false);
+  const [reseeding, setReseeding] = useState(false);
+  const reseedPollRef = useRef(null);
 
   const loadHealth = useCallback(async () => {
     try {
@@ -69,6 +80,62 @@ export default function SettingsPage() {
       setWiping(false);
     }
   };
+
+  const pollOperation = (operationId, setSteps, setActive, pollRef) => {
+    const poll = async () => {
+      try {
+        const op = await getAdminOperation(operationId);
+        setSteps(op.steps || []);
+        if (op.status === 'succeeded' || op.status === 'failed') {
+          setActive(false);
+          clearInterval(pollRef.current);
+          if (op.status === 'failed') {
+            toast.error(op.error || 'Operation failed');
+          } else {
+            toast.success('Done');
+          }
+        }
+      } catch {
+        // network glitch — keep polling
+      }
+    };
+    pollRef.current = setInterval(poll, 2000);
+    poll();
+  };
+
+  const handleFactoryResetConfirmed = async () => {
+    setConfirmFactoryReset(false);
+    setFactoryResetting(true);
+    setFactoryResetSteps([]);
+    try {
+      const result = await factoryReset();
+      pollOperation(result.operation_id, setFactoryResetSteps, setFactoryResetting, factoryResetPollRef);
+    } catch (err) {
+      toast.error(err.message || 'Factory reset failed');
+      setFactoryResetting(false);
+    }
+  };
+
+  const handleReseedConfirmed = async () => {
+    setConfirmReseed(false);
+    setReseeding(true);
+    setFactoryResetSteps(null);
+    try {
+      const result = await reseedBundles();
+      pollOperation(result.operation_id, () => {}, setReseeding, reseedPollRef);
+    } catch (err) {
+      toast.error(err.message || 'Reseed failed');
+      setReseeding(false);
+    }
+  };
+
+  // Clean up polling on unmount
+  useEffect(() => {
+    return () => {
+      if (factoryResetPollRef.current) clearInterval(factoryResetPollRef.current);
+      if (reseedPollRef.current) clearInterval(reseedPollRef.current);
+    };
+  }, []);
 
   const handleToggleValidation = async (enabled) => {
     setAdminSaving(true);
@@ -226,6 +293,58 @@ export default function SettingsPage() {
                 </div>
               </div>
 
+              {/* Factory Reset */}
+              <div className={styles.card}>
+                <div className={styles.cardHeader}>
+                  <span className={styles.cardTitle}>Factory Reset</span>
+                </div>
+                <div className={styles.adminRow}>
+                  <div className={styles.adminRowInfo}>
+                    <div className={styles.adminRowLabel}>Reset everything</div>
+                    <div className={styles.adminRowDesc}>
+                      Wipes all patient data from the CDR, all clinical and definition resources from
+                      the measure engine, and all job history from the app database. Connection
+                      settings (CDR and MCS) are preserved. Use before a demo or connectathon to
+                      start from a known-good blank slate.
+                    </div>
+                    {factoryResetting && factoryResetSteps !== null && (
+                      <ul className={styles.operationSteps}>
+                        {factoryResetSteps.map((s, i) => (
+                          <li key={i} className={s.status === 'failed' ? styles.stepFailed : styles.stepOk}>
+                            {s.step.replace(/_/g, ' ')}: {s.status}
+                          </li>
+                        ))}
+                        <li className={styles.stepRunning}>Working…</li>
+                      </ul>
+                    )}
+                  </div>
+                  <button
+                    className={styles.btnDanger}
+                    onClick={() => setConfirmFactoryReset(true)}
+                    disabled={factoryResetting || reseeding}
+                  >
+                    {factoryResetting ? 'Resetting…' : 'Reset everything'}
+                  </button>
+                </div>
+                <div className={styles.adminRow}>
+                  <div className={styles.adminRowInfo}>
+                    <div className={styles.adminRowLabel}>Re-seed connectathon bundles</div>
+                    <div className={styles.adminRowDesc}>
+                      Reloads the standard connectathon measure bundles and patient data into both
+                      HAPI servers. Idempotent — safe to run on a non-empty system. Run after a
+                      factory reset to restore the default demo dataset.
+                    </div>
+                  </div>
+                  <button
+                    className={styles.btnSecondary}
+                    onClick={() => setConfirmReseed(true)}
+                    disabled={factoryResetting || reseeding}
+                  >
+                    {reseeding ? 'Re-seeding…' : 'Re-seed bundles'}
+                  </button>
+                </div>
+              </div>
+
               {/* Developer Tools */}
               <div className={styles.card}>
                 <div className={styles.cardHeader}>
@@ -294,6 +413,34 @@ export default function SettingsPage() {
         tone="destructive"
         onCancel={() => setConfirmWipe(false)}
         onConfirm={handleWipeConfirmed}
+      />
+
+      <ConfirmDialog
+        open={confirmFactoryReset}
+        title="Factory Reset Lenny?"
+        body={[
+          'This will permanently delete:',
+          `• Patient data on the ${health?.cdr?.name || 'active CDR'} (all Patient, Encounter, Condition, etc.)`,
+          '• All clinical and definition resources on the measure engine',
+          '• All job history and validation runs in the app database',
+          '',
+          'Connection settings (CDR and MCS) are preserved.',
+          'This cannot be undone.',
+        ].join('\n')}
+        confirmLabel="Reset everything"
+        tone="destructive"
+        onCancel={() => setConfirmFactoryReset(false)}
+        onConfirm={handleFactoryResetConfirmed}
+      />
+
+      <ConfirmDialog
+        open={confirmReseed}
+        title="Re-seed connectathon bundles?"
+        body="This will reload the standard connectathon measure bundles and patient data. It is safe to run on a non-empty system — existing resources will be updated, not duplicated."
+        confirmLabel="Re-seed"
+        tone="neutral"
+        onCancel={() => setConfirmReseed(false)}
+        onConfirm={handleReseedConfirmed}
       />
     </div>
   );
