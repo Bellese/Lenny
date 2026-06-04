@@ -5,6 +5,7 @@
 <title>Lenny — Free, open-source digital quality measurement orchestration</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="Lenny is a free, open-source tool for calculating FHIR-based digital quality measures (dQMs). Orchestrate the DEQM workflow end-to-end without locking into a vendor.">
+<link rel="canonical" href="https://lenny.bellese.dev/">
 <link rel="icon" href="assets/favicon.ico">
 <link rel="stylesheet" href="brand-tokens.css">
 <link rel="stylesheet" href="site.css">
@@ -117,102 +118,6 @@
             <div class="hero-stat-meta">CMS125 · Breast Cancer Screening · 60 IP</div>
           </div>
         </div>
-      </div>
-    </div>
-
-    <!-- Hero B: centered -->
-    <div class="hero-centered hero-variant" data-variant="centered">
-      <p class="eyebrow eyebrow--center"><span class="dot"></span> Open source · DEQM-aligned</p>
-      <h1 class="display display--xl">
-        The workflow layer between your <span class="hi">data</span>
-        and your <span class="hi hi--alt">measures</span>.
-      </h1>
-      <p class="lede lede--center">
-        Lenny is a free utility for calculating FHIR-based digital quality measures.
-        Upload a Measure bundle, pick a period, click Calculate &mdash; and get population counts
-        plus per-patient drill-down with the resources that drove every result.
-      </p>
-      <div class="hero-cta hero-cta--center">
-        <a class="btn btn-primary btn-lg" href="https://lenny.bellese.dev" target="_blank" rel="noopener">
-          Try the live instance
-          <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3h6v6"/><path d="M11 3 4 10"/></svg>
-        </a>
-        <a class="btn btn-outline btn-lg" href="https://github.com/Bellese/Lenny" target="_blank" rel="noopener">View on GitHub</a>
-      </div>
-      <div class="screenshot-frame screenshot-frame--bleed">
-        <div class="screenshot-chrome" aria-hidden="true">
-          <span></span><span></span><span></span>
-          <span class="screenshot-url">lenny.bellese.dev / results</span>
-        </div>
-        <img src="assets/lenny-summary.png" alt="Lenny results UI" loading="lazy">
-      </div>
-    </div>
-
-    <!-- Hero C: diagram-led -->
-    <div class="hero-diagram hero-variant" data-variant="diagram">
-      <div class="hero-copy">
-        <p class="eyebrow"><span class="dot"></span> Vendor-neutral · FHIR-native</p>
-        <h1 class="display">
-          One orchestrator between your CDR and any FHIR measure engine.
-        </h1>
-        <p class="lede">
-          Lenny sits in the middle of the DEQM workflow &mdash; pulling patients from your
-          clinical data repository, handing them to a measure calculation service, and
-          turning the report into something you can actually inspect.
-        </p>
-        <div class="hero-cta">
-          <a class="btn btn-primary btn-lg" href="https://lenny.bellese.dev" target="_blank" rel="noopener">Try the live instance</a>
-          <a class="btn btn-outline btn-lg" href="#architecture">See the architecture</a>
-        </div>
-      </div>
-      <div class="hero-diagram-vis" aria-hidden="true">
-        <!-- Mini orchestration diagram -->
-        <svg viewBox="0 0 480 380" role="img" aria-label="Lenny orchestration diagram">
-          <defs>
-            <marker id="ah-mini" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-              <path d="M0,0 L10,5 L0,10 z" fill="#3B4860"/>
-            </marker>
-          </defs>
-          <!-- CDR -->
-          <g transform="translate(20,140)">
-            <rect width="120" height="100" rx="12" fill="#fff" stroke="#99ABC7" stroke-width="1.5"/>
-            <text x="60" y="40" text-anchor="middle" font-family="Nunito Sans" font-weight="700" font-size="14" fill="#002D72">Your CDR</text>
-            <text x="60" y="62" text-anchor="middle" font-family="Open Sans" font-size="11" fill="#3B4860">FHIR Server</text>
-            <text x="60" y="80" text-anchor="middle" font-family="Open Sans" font-size="10" fill="#97999B">Patient · Encounter · …</text>
-          </g>
-          <!-- Lenny center -->
-          <g transform="translate(180,120)">
-            <rect width="120" height="140" rx="14" fill="#702082"/>
-            <text x="60" y="46" text-anchor="middle" font-family="Nunito Sans" font-weight="900" font-size="22" fill="#fff">Lenny</text>
-            <text x="60" y="68" text-anchor="middle" font-family="Open Sans" font-size="10" fill="rgba(255,255,255,.8)" letter-spacing="0.06em">ORCHESTRATOR</text>
-            <line x1="20" y1="84" x2="100" y2="84" stroke="rgba(255,255,255,.25)" stroke-width="1"/>
-            <text x="60" y="104" text-anchor="middle" font-family="Open Sans" font-size="10" fill="rgba(255,255,255,.85)">Acquire</text>
-            <text x="60" y="118" text-anchor="middle" font-family="Open Sans" font-size="10" fill="rgba(255,255,255,.85)">Evaluate</text>
-            <text x="60" y="132" text-anchor="middle" font-family="Open Sans" font-size="10" fill="rgba(255,255,255,.85)">Inspect</text>
-          </g>
-          <!-- MCS -->
-          <g transform="translate(340,140)">
-            <rect width="120" height="100" rx="12" fill="#fff" stroke="#99ABC7" stroke-width="1.5"/>
-            <text x="60" y="40" text-anchor="middle" font-family="Nunito Sans" font-weight="700" font-size="14" fill="#002D72">Measure Engine</text>
-            <text x="60" y="62" text-anchor="middle" font-family="Open Sans" font-size="11" fill="#3B4860">HAPI / your choice</text>
-            <text x="60" y="80" text-anchor="middle" font-family="Open Sans" font-size="10" fill="#97999B">$evaluate-measure</text>
-          </g>
-          <!-- arrows -->
-          <path d="M140,180 L180,180" stroke="#3B4860" stroke-width="1.5" marker-end="url(#ah-mini)"/>
-          <path d="M180,200 L140,200" stroke="#3B4860" stroke-width="1.5" marker-end="url(#ah-mini)"/>
-          <path d="M300,180 L340,180" stroke="#3B4860" stroke-width="1.5" marker-end="url(#ah-mini)"/>
-          <path d="M340,200 L300,200" stroke="#3B4860" stroke-width="1.5" marker-end="url(#ah-mini)"/>
-          <!-- bottom user -->
-          <g transform="translate(180,300)">
-            <rect width="120" height="60" rx="12" fill="#CCD5E3" stroke="#99ABC7" stroke-width="1"/>
-            <text x="60" y="28" text-anchor="middle" font-family="Nunito Sans" font-weight="700" font-size="12" fill="#002D72">QI Staff</text>
-            <text x="60" y="46" text-anchor="middle" font-family="Open Sans" font-size="10" fill="#3B4860">Results · per-patient</text>
-          </g>
-          <path d="M240,260 L240,300" stroke="#3B4860" stroke-width="1.5" marker-end="url(#ah-mini)"/>
-          <!-- top label -->
-          <text x="240" y="40" text-anchor="middle" font-family="Open Sans" font-size="10" fill="#97999B" letter-spacing="0.08em">DEQM-ALIGNED WORKFLOW</text>
-          <line x1="160" y1="56" x2="320" y2="56" stroke="#C4C8CF" stroke-width="1" stroke-dasharray="2 3"/>
-        </svg>
       </div>
     </div>
 
