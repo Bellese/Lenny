@@ -234,7 +234,7 @@ async def test_wipe_patient_data(measure_url):
             assert resp.status_code == 200
 
         # Wipe
-        await wipe_patient_data()
+        await wipe_patient_data(base_url=measure_url)
 
         # Verify it's gone
         async with httpx.AsyncClient(timeout=30) as client:

@@ -1,0 +1,527 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Lenny — Free, open-source digital quality measurement orchestration</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Lenny is a free, open-source tool for calculating FHIR-based digital quality measures (dQMs). Orchestrate the DEQM workflow end-to-end without locking into a vendor.">
+<link rel="canonical" href="https://lenny.bellese.dev/">
+<link rel="icon" href="assets/favicon.ico">
+<link rel="stylesheet" href="brand-tokens.css">
+<link rel="stylesheet" href="site.css">
+
+</head>
+
+<body data-hero="split" data-logo="mark" data-accent="magenta">
+
+<!-- ============================================================ NAV -->
+<header class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="#top" aria-label="Lenny home">
+      <span class="brand-mark" aria-hidden="true">L</span>
+      <span class="brand-text">
+        <span class="brand-word">Lenny</span>
+        <span class="brand-sub">Free, open-source digital quality measurement orchestration</span>
+      </span>
+    </a>
+
+    <nav class="nav-links" aria-label="Primary">
+      <a href="#what">What it does</a>
+      <a href="#architecture">How it fits</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="https://github.com/Bellese/Lenny" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+
+    <div class="nav-cta">
+      <a class="btn btn-ghost" href="https://github.com/Bellese/Lenny" target="_blank" rel="noopener" aria-label="View source on GitHub">
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="currentColor"><path d="M8 0a8 8 0 0 0-2.53 15.59c.4.07.55-.17.55-.39v-1.34c-2.22.48-2.69-1.07-2.69-1.07-.36-.92-.89-1.17-.89-1.17-.73-.5.06-.49.06-.49.81.06 1.23.83 1.23.83.72 1.23 1.88.88 2.34.67.07-.52.28-.88.51-1.08-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.65 7.65 0 0 1 4 0c1.53-1.03 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.28.82 2.15 0 3.07-1.87 3.74-3.65 3.94.29.25.54.74.54 1.49v2.21c0 .22.15.47.55.39A8 8 0 0 0 8 0z"/></svg>
+        Source
+      </a>
+      <a class="btn btn-primary" href="https://lenny.bellese.dev" target="_blank" rel="noopener">
+        Try the live instance
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3h6v6"/><path d="M11 3 4 10"/></svg>
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ============================================================ HERO -->
+<section class="hero">
+  <div class="container">
+
+    <!-- Hero A: split copy/visual -->
+    <div class="hero-split hero-variant" data-variant="split">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="dot"></span> Patient data never leaves your organization</p>
+        <h1 class="display">
+          Run quality measures against your own data &mdash; <em>without</em> a vendor stack.
+        </h1>
+        <p class="lede">
+          Lenny is a free, open-source orchestration layer between your FHIR data and a
+          standards-compliant measure engine. Point it at your data, run the measure, and get
+          population counts and per-patient results your team can read &mdash; no vendor required.
+        </p>
+        <div class="hero-cta">
+          <a class="btn btn-primary btn-lg" href="https://lenny.bellese.dev" target="_blank" rel="noopener">
+            Try lenny.bellese.dev
+            <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3h6v6"/><path d="M11 3 4 10"/></svg>
+          </a>
+          <a class="btn btn-outline btn-lg" href="#what">See what it does</a>
+        </div>
+        <ul class="hero-facts">
+          <li>
+            <span class="hero-facts-icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="9"></circle>
+                <path d="M14.5 8.5a3 3 0 0 0-2.5-1.5c-1.5 0-2.5 1-2.5 2s1 1.6 2.5 2 2.5 1 2.5 2-1 2-2.5 2a3 3 0 0 1-2.5-1.5"></path>
+                <path d="M12 5.5v13"></path>
+              </svg>
+            </span>
+            <span class="hero-facts-text"><strong>$300&ndash;$4,000</strong> per provider / yr &mdash; what ACOs pay vendors today</span>
+          </li>
+          <li>
+            <span class="hero-facts-icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <ellipse cx="12" cy="5.5" rx="8" ry="2.8"></ellipse>
+                <path d="M4 5.5v6c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8v-6"></path>
+                <path d="M4 11.5v6c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8v-6"></path>
+              </svg>
+            </span>
+            <span class="hero-facts-text">Pre-loaded with quality measures</span>
+          </li>
+          <li>
+            <span class="hero-facts-icon" aria-hidden="true">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 3 4 6v5c0 5 3.4 8.8 8 10 4.6-1.2 8-5 8-10V6l-8-3Z"></path>
+                <path d="m9 12 2 2 4-4"></path>
+              </svg>
+            </span>
+            <span class="hero-facts-text">No license. No vendor.</span>
+          </li>
+        </ul>
+      </div>
+
+      <div class="hero-visual">
+        <div class="screenshot-frame screenshot-frame--lg">
+          <div class="screenshot-chrome" aria-hidden="true">
+            <span></span><span></span><span></span>
+            <span class="screenshot-url">lenny.bellese.dev / results</span>
+          </div>
+          <img src="assets/lenny-summary.png" alt="Lenny results screen showing a 3.3% performance rate with population breakdown and patient table" loading="lazy">
+        </div>
+        <div class="hero-visual-aside">
+          <div class="hero-stat">
+            <div class="hero-stat-num">3.3<span>%</span></div>
+            <div class="hero-stat-lbl">Performance rate</div>
+            <div class="hero-stat-meta">CMS125 · Breast Cancer Screening · 60 IP</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============================================================ TRUST STRIP -->
+<section class="strip">
+  <div class="container strip-inner">
+    <div class="strip-item">
+      <span class="strip-num">Free</span>
+      <span class="strip-lbl">Apache-licensed, on GitHub</span>
+    </div>
+    <div class="strip-divider" aria-hidden="true"></div>
+    <div class="strip-item">
+      <span class="strip-num">CMS-aligned</span>
+      <span class="strip-lbl">Follows federal quality measure standards</span>
+    </div>
+    <div class="strip-divider" aria-hidden="true"></div>
+    <div class="strip-item">
+      <span class="strip-num">No setup complexity</span>
+      <span class="strip-lbl">Installs in under a minute</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ WHO -->
+<section id="who" class="block block--alt">
+  <div class="container">
+    <header class="block-head">
+      <p class="eyebrow"><span class="dot"></span> Why Lenny</p>
+      <h2 class="block-title">Built for organizations ready to own their quality data.</h2>
+      <p class="block-lede">
+        If you&rsquo;re an ACO or health system paying per-provider fees for measure calculation,
+        Lenny turns a pure cost center into capability you own &mdash; compute, validate, and
+        inspect digital quality measures against your own FHIR data, no vendor stack required.
+      </p>
+    </header>
+
+    <div class="who-grid">
+      <article class="who-card who-card--accent">
+        <div class="who-tag">ACOs &amp; hospital quality departments</div>
+        <h3>Quality leaders with a vendor bill</h3>
+        <p>Stop paying $300&ndash;$4,000 per provider, per year for calculation you can run in-house.
+          Compute eCQMs against your own FHIR data and see the population counts &mdash; and the
+          patients &mdash; behind every result.</p>
+      </article>
+      <article class="who-card">
+        <div class="who-tag">Provider organizations</div>
+        <h3>Quality &amp; informatics analysts</h3>
+        <p>Run calculations without waiting on a vendor ticket queue. Plain-language, per-patient
+          output you can interpret without an engineer in the room.</p>
+      </article>
+      <article class="who-card">
+        <div class="who-tag">QIOs &amp; health IT consultancies</div>
+        <h3>Teams deploying across networks</h3>
+        <p>A free, FHIR-native engine you control and can stand up across provider networks &mdash;
+          a vendor-neutral foundation to build your own delivery workflows on.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ WHAT YOU CAN DO -->
+<section id="what" class="block">
+  <div class="container">
+    <header class="block-head">
+      <p class="eyebrow"><span class="dot"></span> What you can do</p>
+      <h2 class="block-title">Five things Lenny does on day one.</h2>
+    </header>
+
+    <!-- Feature 1 -->
+    <article class="feature">
+      <div class="feature-copy">
+        <div class="feature-num">01</div>
+        <h3>Run any FHIR Measure</h3>
+        <p>Upload a Measure bundle, pick a measurement period, optionally filter by FHIR Group,
+          click <strong>Calculate</strong>. Lenny pulls patients from your CDR, evaluates the measure
+          on a HAPI-based engine, and stores the results.</p>
+        <ul class="feature-list">
+          <li>Pre-loaded eCQMs</li>
+          <li>Bundle upload for your own measures</li>
+          <li>Period &amp; Group filtering at calculation time</li>
+        </ul>
+      </div>
+      <div class="feature-visual">
+        <div class="screenshot-frame">
+          <img src="assets/lenny-measures.png" alt="Lenny measures library showing eight measures with status and per-row Calculate actions" loading="lazy">
+        </div>
+      </div>
+    </article>
+
+    <!-- Feature 2 (flipped) -->
+    <article class="feature feature--flip">
+      <div class="feature-copy">
+        <div class="feature-num">02</div>
+        <h3>Inspect at every level</h3>
+        <p>Aggregate population counts &mdash; initial population, denominator, numerator, exclusions,
+          and the derived performance rate &mdash; with per-patient drill-down that shows the
+          resources that drove each result.</p>
+        <ul class="feature-list">
+          <li>Performance rate and population summary</li>
+          <li>Patient table filterable by failure, numerator, denom-only, excluded</li>
+          <li>Per-patient evaluated resources with raw FHIR available</li>
+        </ul>
+      </div>
+      <div class="feature-visual">
+        <div class="screenshot-frame">
+          <img src="assets/lenny-inspect.png" alt="Lenny results screen with performance rate, population counts, and a patient table that includes a mismatched row" loading="lazy">
+        </div>
+      </div>
+    </article>
+
+    <!-- Feature 3 -->
+    <article class="feature">
+      <div class="feature-copy">
+        <div class="feature-num">03</div>
+        <h3>Validate against expected results</h3>
+        <p>Upload a test bundle that declares expected population membership; Lenny re-runs the
+          measure per patient and reports pass/fail. Built for data validation and certification
+          workflows. <span class="muted">(Opt-in via Settings.)</span></p>
+        <ul class="feature-list">
+          <li>Per-patient actual vs. expected, side-by-side</li>
+          <li>Mismatch surfacing on the result row and population row</li>
+          <li>Test bundles in, pass/fail out &mdash; no spreadsheets</li>
+        </ul>
+      </div>
+      <div class="feature-visual">
+        <div class="screenshot-frame">
+          <img src="assets/lenny-validate.png" alt="Patient drill-down for Betty Bertha showing a population breakdown with a mismatch on Denominator Exclusion, alongside patient context and evaluated FHIR resources" loading="lazy">
+        </div>
+      </div>
+    </article>
+
+    <!-- Feature 4 (flipped) -->
+    <article class="feature feature--flip">
+      <div class="feature-copy">
+        <div class="feature-num">04</div>
+        <h3>Secure connections to your systems</h3>
+        <p>Configure several clinical data repositories (CDRs) and measure calculation services
+          (MCSs); switch the active one with one click. Verify connectivity per server, including
+          a <em>Verify with sample evaluate</em> probe that exercises engine measure resolution.</p>
+        <ul class="feature-list">
+          <li>Connect to multiple FHIR servers, switch between them with one click. Credentials encrypted at rest.</li>
+          <li>SSRF protection on every outbound URL</li>
+          <li>Read-only flag for shared / production CDRs</li>
+        </ul>
+      </div>
+      <div class="feature-visual">
+        <div class="screenshot-frame">
+          <img src="assets/lenny-results.png" alt="Settings panel with CDR and MCS connections, active flags, and verify actions" loading="lazy">
+        </div>
+      </div>
+    </article>
+
+    <!-- Feature 5 -->
+    <article class="feature feature--terminal">
+      <div class="feature-copy">
+        <div class="feature-num">05</div>
+        <h3>Up and running in under a minute</h3>
+        <p>Quality measures and sample patients ship pre-loaded, so your team can run a complete
+          calculation on day one.</p>
+        <ul class="feature-list">
+          <li>No data wrangling on day one</li>
+          <li>Reference CDR + measure engine included for local testing</li>
+          <li>Swap in your own FHIR servers from Settings at any time</li>
+        </ul>
+      </div>
+      <div class="feature-visual">
+        <div class="terminal" aria-label="Terminal example: starting Lenny">
+          <div class="terminal-chrome"><span></span><span></span><span></span></div>
+          <pre class="terminal-body"><span class="t-dim">$</span> cp .env.example .env
+<span class="t-dim">$</span> docker compose up
+<span class="t-dim">[+]</span> Running <span class="t-num">5</span>/<span class="t-num">5</span>
+ <span class="t-ok">&#10003;</span> Container lenny-postgres        Started
+ <span class="t-ok">&#10003;</span> Container lenny-hapi-cdr         Started
+ <span class="t-ok">&#10003;</span> Container lenny-hapi-measure     Started
+ <span class="t-ok">&#10003;</span> Container lenny-api               Started
+ <span class="t-ok">&#10003;</span> Container lenny-web               Started
+<span class="t-dim">&rarr;</span> Open <span class="t-link">http://localhost:3001</span></pre>
+        </div>
+      </div>
+    </article>
+
+  </div>
+</section>
+
+<!-- ============================================================ ARCHITECTURE -->
+<section id="architecture" class="block block--dark">
+  <div class="container">
+    <header class="block-head block-head--light">
+      <p class="eyebrow eyebrow--light"><span class="dot dot--light"></span> Where Lenny fits</p>
+      <h2 class="block-title">An orchestrator between your data and a measure engine.</h2>
+      <p class="block-lede">
+        Lenny sits amongst the various FHIR servers involved in the dQM workflow specified in the
+        DEQM IG. The CDR and MCS are intentionally separate and both are user-replaceable.
+      </p>
+    </header>
+
+    <div class="arch-wrap">
+      <svg class="arch-svg" viewBox="0 0 1120 460" role="img" aria-label="Lenny architecture and DEQM workflow diagram">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#A2E0DF"/>
+          </marker>
+          <marker id="ah-d" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 z" fill="#DB905B"/>
+          </marker>
+        </defs>
+
+        <!-- top label -->
+        <text x="560" y="36" text-anchor="middle" font-family="Nunito Sans" font-weight="700" font-size="11" fill="#99ABC7" letter-spacing="0.16em">DEQM-ALIGNED ORCHESTRATION</text>
+        <line x1="380" y1="50" x2="740" y2="50" stroke="rgba(153,171,199,.35)" stroke-width="1" stroke-dasharray="2 4"/>
+
+        <!-- CDR -->
+        <g transform="translate(40,140)">
+          <rect width="240" height="180" rx="14" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
+          <text x="20" y="36" font-family="Open Sans" font-size="11" fill="#99ABC7" letter-spacing="0.14em">CLINICAL DATA REPOSITORY</text>
+          <text x="20" y="74" font-family="Nunito Sans" font-weight="900" font-size="26" fill="#fff">Your CDR</text>
+          <text x="20" y="104" font-family="Open Sans" font-size="13" fill="#CCD5E3">FHIR R4 server</text>
+          <g font-family="Open Sans" font-size="12" fill="#CCD5E3">
+            <text x="20" y="132">Patient · Encounter</text>
+            <text x="20" y="150">Procedure · Observation</text>
+            <text x="20" y="168">$everything · /Patient</text>
+          </g>
+        </g>
+
+        <!-- LENNY -->
+        <g transform="translate(360,100)">
+          <rect width="400" height="260" rx="18" fill="#702082"/>
+          <rect x="0" y="0" width="400" height="260" rx="18" fill="url(#none)" stroke="#A979B4" stroke-width="1"/>
+          <text x="24" y="40" font-family="Open Sans" font-size="11" fill="rgba(255,255,255,.7)" letter-spacing="0.14em">ORCHESTRATION LAYER</text>
+          <text x="24" y="86" font-family="Nunito Sans" font-weight="900" font-size="40" fill="#fff">Lenny</text>
+
+          <!-- inner pills -->
+          <g transform="translate(24,118)">
+            <rect width="166" height="56" rx="10" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.18)"/>
+            <text x="14" y="22" font-family="Nunito Sans" font-weight="700" font-size="13" fill="#fff">Acquire</text>
+            <text x="14" y="42" font-family="Open Sans" font-size="11" fill="rgba(255,255,255,.78)">DataRequirements · Batch</text>
+          </g>
+          <g transform="translate(210,118)">
+            <rect width="166" height="56" rx="10" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.18)"/>
+            <text x="14" y="22" font-family="Nunito Sans" font-weight="700" font-size="13" fill="#fff">Evaluate</text>
+            <text x="14" y="42" font-family="Open Sans" font-size="11" fill="rgba(255,255,255,.78)">$evaluate-measure</text>
+          </g>
+          <g transform="translate(24,184)">
+            <rect width="166" height="56" rx="10" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.18)"/>
+            <text x="14" y="22" font-family="Nunito Sans" font-weight="700" font-size="13" fill="#fff">Validate</text>
+            <text x="14" y="42" font-family="Open Sans" font-size="11" fill="rgba(255,255,255,.78)">Actual vs. expected</text>
+          </g>
+          <g transform="translate(210,184)">
+            <rect width="166" height="56" rx="10" fill="rgba(255,255,255,.10)" stroke="rgba(255,255,255,.18)"/>
+            <text x="14" y="22" font-family="Nunito Sans" font-weight="700" font-size="13" fill="#fff">Inspect</text>
+            <text x="14" y="42" font-family="Open Sans" font-size="11" fill="rgba(255,255,255,.78)">Drill-down UI</text>
+          </g>
+        </g>
+
+        <!-- MCS -->
+        <g transform="translate(840,140)">
+          <rect width="240" height="180" rx="14" fill="rgba(255,255,255,.04)" stroke="rgba(255,255,255,.22)" stroke-width="1"/>
+          <text x="20" y="36" font-family="Open Sans" font-size="11" fill="#99ABC7" letter-spacing="0.14em">MEASURE CALCULATION SVC</text>
+          <text x="20" y="74" font-family="Nunito Sans" font-weight="900" font-size="26" fill="#fff">MCS</text>
+          <text x="20" y="104" font-family="Open Sans" font-size="13" fill="#CCD5E3">HAPI &mdash; or your engine</text>
+          <g font-family="Open Sans" font-size="12" fill="#CCD5E3">
+            <text x="20" y="132">$data-requirements</text>
+            <text x="20" y="150">$evaluate-measure</text>
+            <text x="20" y="168">MeasureReport</text>
+          </g>
+        </g>
+
+        <!-- arrows L<->CDR -->
+        <path d="M280,210 L360,210" stroke="#A2E0DF" stroke-width="2" marker-end="url(#ah)" fill="none"/>
+        <text x="320" y="200" text-anchor="middle" font-family="Open Sans" font-size="11" fill="#A2E0DF">resources</text>
+        <path d="M360,250 L280,250" stroke="#A2E0DF" stroke-width="2" marker-end="url(#ah)" fill="none"/>
+        <text x="320" y="270" text-anchor="middle" font-family="Open Sans" font-size="11" fill="#A2E0DF">requirements</text>
+
+        <!-- arrows L<->MCS -->
+        <path d="M760,210 L840,210" stroke="#DB905B" stroke-width="2" marker-end="url(#ah-d)" fill="none"/>
+        <text x="800" y="200" text-anchor="middle" font-family="Open Sans" font-size="11" fill="#DB905B">Measure + data</text>
+        <path d="M840,250 L760,250" stroke="#DB905B" stroke-width="2" marker-end="url(#ah-d)" fill="none"/>
+        <text x="800" y="270" text-anchor="middle" font-family="Open Sans" font-size="11" fill="#DB905B">MeasureReport</text>
+
+        <!-- user/reporting at bottom -->
+        <g transform="translate(360,390)">
+          <rect width="400" height="56" rx="10" fill="rgba(255,255,255,.06)" stroke="rgba(255,255,255,.18)"/>
+          <text x="200" y="24" text-anchor="middle" font-family="Nunito Sans" font-weight="700" font-size="13" fill="#fff">Quality-improvement staff</text>
+          <text x="200" y="44" text-anchor="middle" font-family="Open Sans" font-size="11" fill="rgba(255,255,255,.7)">Population counts · per-patient drill-down · CSV / FHIR export</text>
+        </g>
+        <path d="M560,360 L560,390" stroke="rgba(255,255,255,.5)" stroke-width="1.5" marker-end="url(#ah-d)" fill="none"/>
+      </svg>
+    </div>
+
+    <div class="arch-grid">
+      <div class="arch-card">
+        <h4>Five Docker services</h4>
+        <p>Web · API · Postgres · HAPI CDR · HAPI Measure Engine. The CDR and MCS are intentionally
+          separate and user-replaceable.</p>
+      </div>
+      <div class="arch-card">
+        <h4>Security posture</h4>
+        <p>Fernet-encrypted credential storage, bearer-token API auth, SSRF protection on every
+          outbound URL, per-connection request timeouts, read-only flag for shared CDRs.</p>
+      </div>
+      <div class="arch-card">
+        <h4>Operating footprint</h4>
+        <p>5 containers · 8&ndash;16 GB RAM · 4 cores · 20 GB disk. Stack: React + FastAPI +
+          async SQLAlchemy + PostgreSQL + HAPI FHIR.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ ROADMAP -->
+<section id="roadmap" class="block block--alt">
+  <div class="container">
+    <header class="block-head">
+      <p class="eyebrow"><span class="dot"></span> Roadmap &amp; known limitations</p>
+      <h2 class="block-title">Active development. Weekly releases. Honest about what&rsquo;s next.</h2>
+      <p class="block-lede">
+        We&rsquo;re building in the open. Here&rsquo;s what&rsquo;s next.
+      </p>
+    </header>
+
+    <ol class="roadmap">
+      <li class="roadmap-item">
+        <div class="roadmap-status roadmap-status--prog">In progress</div>
+        <h4>Expanded measure coverage</h4>
+        <p>Seven of the twelve target connectathon measures ship ready-to-run today. The remaining
+          five are slated for debugging and inclusion in future updates.</p>
+      </li>
+      <li class="roadmap-item">
+        <div class="roadmap-status roadmap-status--prog">In progress</div>
+        <h4>Intuitive result visualization</h4>
+        <p>Refinement of the output UI is underway to deliver more digestible summaries and
+          clearer drill-down for both successful and failed calculations.</p>
+      </li>
+      <li class="roadmap-item">
+        <div class="roadmap-status roadmap-status--plan">Planned</div>
+        <h4>Dynamic MCS synchronization</h4>
+        <p>Automatically refresh the available measures list when the active Measure Calculation
+          Service changes.</p>
+      </li>
+      <li class="roadmap-item">
+        <div class="roadmap-status roadmap-status--plan">Planned</div>
+        <h4>Full DEQM role integration</h4>
+        <p>Native support for Terminology Servers, Measure Repositories, and Receiving Systems
+          (issues <code>#280</code>&ndash;<code>#282</code>) &mdash; moving beyond current
+          localized or pending implementations.</p>
+      </li>
+      <li class="roadmap-item">
+        <div class="roadmap-status roadmap-status--research">Research</div>
+        <h4>Optimized data exchange</h4>
+        <p>Transitioning from expensive <code>$everything</code> fetches to a precision
+          <code>$gather</code> approach based on data requirements. Support for FHIR Bulk Data
+          and invited-pull workflows is under consideration.</p>
+      </li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============================================================ FINAL CTA -->
+<section class="cta">
+  <div class="container cta-inner">
+    <div class="cta-copy">
+      <h2>Spin up Lenny in under a minute.</h2>
+      <p>Try the live instance, or run it locally with a single <code>docker compose up</code>.</p>
+    </div>
+    <div class="cta-actions">
+      <a class="btn btn-primary btn-lg" href="https://lenny.bellese.dev" target="_blank" rel="noopener">
+        Try lenny.bellese.dev
+        <svg width="14" height="14" viewBox="0 0 14 14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 3h6v6"/><path d="M11 3 4 10"/></svg>
+      </a>
+      <a class="btn btn-outline-light btn-lg" href="https://github.com/Bellese/Lenny" target="_blank" rel="noopener">
+        Bellese/Lenny on GitHub
+      </a>
+      <a class="btn btn-ghost-light btn-lg" href="https://github.com/Bellese/Lenny/issues/new?labels=enhancement&amp;title=Feature%20suggestion%3A%20" target="_blank" rel="noopener">
+        Suggest a feature
+      </a>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================================ FOOTER -->
+<footer class="footer">
+  <div class="container footer-inner">
+    <div class="footer-brand">
+      <span class="brand-mark brand-mark--sm" aria-hidden="true">L</span>
+      <div>
+        <div class="footer-name">Lenny</div>
+        <div class="footer-meta">
+          A project by <a href="https://bellese.io" target="_blank" rel="noopener">Bellese Technologies</a>.
+          Inspired by the Measure Calculation Tool.
+        </div>
+      </div>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/Bellese/Lenny" target="_blank" rel="noopener">github.com/Bellese/Lenny</a>
+      <a href="https://lenny.bellese.dev" target="_blank" rel="noopener">lenny.bellese.dev</a>
+      <a href="mailto:hello@bellese.io">Contact</a>
+    </div>
+  </div>
+</footer>
+
+</main>
+
+</body>
+</html>

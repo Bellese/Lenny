@@ -1,5 +1,6 @@
 """SQLAlchemy models for Lenny."""
 
+from app.models.admin_operation import AdminOperation, AdminOperationKind, AdminOperationStatus
 from app.models.app_setting import AppSetting
 from app.models.base import Base
 from app.models.config import CDRConfig
@@ -13,6 +14,9 @@ from app.models.validation import (
 )
 
 __all__ = [
+    "AdminOperation",
+    "AdminOperationKind",
+    "AdminOperationStatus",
     "AppSetting",
     "Base",
     "Job",

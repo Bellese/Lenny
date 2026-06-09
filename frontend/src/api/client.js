@@ -261,6 +261,28 @@ export function wipeMeasureEngine() {
   });
 }
 
+export function factoryReset(scopes = {}) {
+  return request('/settings/admin/factory-reset', {
+    method: 'POST',
+    body: JSON.stringify({
+      include_cdr: true,
+      include_measure_engine: true,
+      include_app_db: true,
+      ...scopes,
+    }),
+  });
+}
+
+export function reseedBundles() {
+  return request('/settings/admin/reseed-bundles', {
+    method: 'POST',
+  });
+}
+
+export function getAdminOperation(operationId) {
+  return request(`/settings/admin/operations/${operationId}`);
+}
+
 // Validation
 export function uploadTestBundle(file) {
   const formData = new FormData();

@@ -797,7 +797,7 @@ async def test_wipe_patient_data():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        await wipe_patient_data()
+        await wipe_patient_data(base_url="http://test-fhir:8080/fhir")
 
     # Should have made delete calls for each resource type
     assert mock_ctx.delete.call_count >= 10  # At least 10 resource types
@@ -819,7 +819,7 @@ async def test_wipe_patient_data_includes_qi_core_types():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        await wipe_patient_data()
+        await wipe_patient_data(base_url="http://test-fhir:8080/fhir")
 
     wiped_types = {url.split("/")[-1].split("?")[0] for url in deleted_urls}
     for expected_type in (
@@ -856,7 +856,7 @@ async def test_wipe_patient_data_patient_deleted_after_clinical_resources():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        await wipe_patient_data()
+        await wipe_patient_data(base_url="http://test-fhir:8080/fhir")
 
     assert "Patient" in delete_order, "Patient must be in the wipe list"
     patient_idx = delete_order.index("Patient")
@@ -882,8 +882,8 @@ async def test_wipe_patient_data_strict_raises_after_consecutive_failures():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with pytest.raises(RuntimeError, match="Measure engine unreachable"):
-            await wipe_patient_data()
+        with pytest.raises(RuntimeError, match="FHIR server unreachable"):
+            await wipe_patient_data(base_url="http://test-fhir:8080/fhir")
 
     assert mock_ctx.delete.call_count == 3
 
@@ -896,8 +896,8 @@ async def test_wipe_patient_data_non_strict_raises_after_consecutive_failures():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with pytest.raises(RuntimeError, match="Measure engine unreachable"):
-            await wipe_patient_data(strict=False)
+        with pytest.raises(RuntimeError, match="FHIR server unreachable"):
+            await wipe_patient_data(base_url="http://test-fhir:8080/fhir", strict=False)
 
     assert mock_ctx.delete.call_count == 3
 

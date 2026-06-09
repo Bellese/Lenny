@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.19.2] - 2026-05-18
+
+### Security
+- **Dependabot alert #29 (GHSA-58qx-3vcg-4xpx / CVE-2026-45736) resolved.** Bumped `ws` from `8.20.0` to `8.20.1` for `webpack-dev-server` via a scoped npm override in `frontend/package.json`. Fixes uninitialized memory disclosure in `ws.close()` when a `TypedArray` is passed as the reason argument. `jsdom`'s `ws@7.5.10` is unaffected (different major version, not in the vulnerable range). No API or behavioral changes.
+
 ## [0.0.19.1] - 2026-05-18
 
 ### Fixed

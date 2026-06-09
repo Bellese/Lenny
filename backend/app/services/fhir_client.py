@@ -918,12 +918,12 @@ async def delete_measure(measure_id: str) -> None:
             resp.raise_for_status()
 
 
-async def wipe_patient_data(*, strict: bool = True) -> None:
-    """Delete patient-related data from the measure engine.
+async def wipe_patient_data(*, base_url: str, strict: bool = True) -> None:
+    """Delete patient-related data from a FHIR server.
 
-    Called at the START of a new job to clean up data from the prior run.
-    This allows the previous job's evaluated resources to remain available
-    for inspection until a new job begins.
+    Called at the START of a new job (with base_url=MEASURE_ENGINE_URL) to clean
+    up data from the prior run, and by the factory-reset endpoint (with the active
+    CDR URL) to wipe all patient data from the CDR.
 
     Raises RuntimeError after 3 consecutive HTTP failures regardless of strict mode.
     A timed-out DELETE leaves HAPI's server-side operation still running; pushing new
@@ -964,13 +964,13 @@ async def wipe_patient_data(*, strict: bool = True) -> None:
         for rt in resource_types:
             try:
                 # Use conditional delete: DELETE ResourceType?_lastUpdated=gt1900-01-01
-                delete_url = f"{settings.MEASURE_ENGINE_URL}/{rt}?_lastUpdated=gt1900-01-01"
+                delete_url = f"{base_url}/{rt}?_lastUpdated=gt1900-01-01"
                 resp = await client.delete(delete_url)
                 if resp.status_code < 300:
                     logger.info("Wiped resource type", extra={"resourceType": rt})
                 else:
                     # Fall back to individual delete via search-and-delete
-                    await _delete_all_of_type(client, rt)
+                    await _delete_all_of_type(client, rt, base_url)
                 consecutive_failures = 0
             except httpx.HTTPError:
                 consecutive_failures += 1
@@ -980,7 +980,7 @@ async def wipe_patient_data(*, strict: bool = True) -> None:
                 )
                 if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
                     raise RuntimeError(
-                        f"Measure engine unreachable: {consecutive_failures} consecutive "
+                        f"FHIR server unreachable: {consecutive_failures} consecutive "
                         "timeouts during wipe. Job aborted."
                     )
 
@@ -994,22 +994,23 @@ async def wipe_measure_definitions() -> None:
     After this call the bundle_loader must re-seed the engine before the next job.
     """
     definition_types = ["Library", "Measure", "ValueSet", "CodeSystem", "ConceptMap"]
+    base_url = settings.MEASURE_ENGINE_URL
     async with httpx.AsyncClient(timeout=300.0) as client:
         for rt in definition_types:
             try:
-                delete_url = f"{settings.MEASURE_ENGINE_URL}/{rt}?_lastUpdated=gt1900-01-01"
+                delete_url = f"{base_url}/{rt}?_lastUpdated=gt1900-01-01"
                 resp = await client.delete(delete_url)
                 if resp.status_code < 300:
                     logger.info("Wiped measure definition type", extra={"resourceType": rt})
                 else:
-                    await _delete_all_of_type(client, rt)
+                    await _delete_all_of_type(client, rt, base_url)
             except httpx.HTTPError:
                 logger.warning("Failed to wipe measure definition type", extra={"resourceType": rt})
 
 
-async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str) -> None:
-    """Delete all resources of a given type one by one."""
-    url: Optional[str] = f"{settings.MEASURE_ENGINE_URL}/{resource_type}?_count=100"
+async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str, base_url: str) -> None:
+    """Delete all resources of a given type one by one from the given FHIR server."""
+    url: Optional[str] = f"{base_url}/{resource_type}?_count=100"
     while url:
         resp = await client.get(url)
         if resp.status_code != 200:
@@ -1022,7 +1023,7 @@ async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str) -> 
             res = entry.get("resource", {})
             res_id = res.get("id")
             if res_id:
-                del_url = f"{settings.MEASURE_ENGINE_URL}/{resource_type}/{res_id}"
+                del_url = f"{base_url}/{resource_type}/{res_id}"
                 try:
                     await client.delete(del_url)
                 except httpx.HTTPError:
