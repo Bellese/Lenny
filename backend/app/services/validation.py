@@ -601,7 +601,10 @@ async def _find_existing_codesystem_id(
 async def _delete_existing_valueset(existing_id: str, client: httpx.AsyncClient) -> None:
     """Delete a stale ValueSet so HAPI rebuilds terminology tables from patched compose."""
     resp = await client.delete(f"{settings.MEASURE_ENGINE_URL}/ValueSet/{existing_id}")
-    if resp.status_code not in {200, 204, 404}:
+    # 409 = referential integrity: other resources (Measure/Library) already reference this
+    # ValueSet and HAPI won't delete it.  Treat as a no-op — push_resources will PUT the same
+    # content to the existing ID and HAPI will accept it with a 200 update (issue #359).
+    if resp.status_code not in {200, 204, 404, 409}:
         resp.raise_for_status()
 
 

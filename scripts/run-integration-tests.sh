@@ -41,6 +41,28 @@ USE_PREBAKED="${USE_PREBAKED:-0}"
 REQUIRE_PREBAKED="${REQUIRE_PREBAKED:-0}"
 _using_prebaked=false
 
+# ---------------------------------------------------------------------------
+# Sanity check: abort if the dev stack is running.
+# docker-compose.yml and docker-compose.test.yml share the same Compose project
+# name (both derive it from the working directory).  When the dev stack is up,
+# Docker Compose reuses its db / hapi-fhir-cdr / hapi-fhir-measure containers
+# rather than creating fresh ones, so HAPI already contains seed data.  This
+# causes UniqueViolationError on expected_results and HAPI 409 on ValueSet
+# DELETE in test_smart_load.py (issue #359).
+# ---------------------------------------------------------------------------
+if docker compose -f "$PROJECT_ROOT/docker-compose.yml" ps --quiet 2>/dev/null | grep -q .; then
+    echo ""
+    echo "ERROR: The dev stack is running. docker-compose.yml and docker-compose.test.yml"
+    echo "       share the same Compose project name, so the test script would reuse dev"
+    echo "       containers that already carry seed data, causing spurious test failures."
+    echo ""
+    echo "       Stop the dev stack first, then re-run:"
+    echo "         docker compose down -v"
+    echo "         $0 $*"
+    echo ""
+    exit 1
+fi
+
 if [ "$USE_PREBAKED" = "1" ]; then
     echo "==> USE_PREBAKED=1 — resolving pre-baked HAPI images from GHCR..."
     SEED_HASH=$(cd "$PROJECT_ROOT" && find seed/ docker/seed-hapi.sh docker-compose.test.yml \

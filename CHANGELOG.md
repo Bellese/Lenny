@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.19.3] - 2026-06-09
+
+### Fixed
+- **Bundle loader no longer fails with 409 Conflict when the dev stack is running.** `_delete_existing_valueset` now treats HTTP 409 (referential integrity — Measure/Library resources already reference the ValueSet) as a no-op instead of calling `raise_for_status()`. The ValueSet is left in place and the subsequent PUT updates it normally. Previously, starting the test suite or re-running the seed service while the dev stack was up caused the entire bundle load to abort. (#359)
+- **`run-integration-tests.sh` aborts early when the dev stack is already running.** Docker Compose derives the project name from the working directory, so `docker-compose.yml` and `docker-compose.test.yml` share containers. The script now detects a running dev stack and exits with a clear message (`docker compose down -v` first). (#359)
+- **`test_smart_load.py` `loader_result` fixture truncates `expected_results` before loading.** Prevents `uq_measure_patient` UniqueViolationError when the dev seed has already written rows for the same measure+patient pairs. (#359)
+
 ## [0.0.19.2] - 2026-05-18
 
 ### Security
