@@ -12,6 +12,7 @@ from app.services.fhir_client import BundleUploadResult
 from app.services.validation import (
     _assert_no_canonical_url_clash,
     _classify_bundle_entries,
+    _delete_existing_valueset,
     _extract_patient_name,
     _extract_population_counts,
     _extract_test_case_info,
@@ -1929,6 +1930,63 @@ class TestMissingValueSetStubs:
         prepared_valueset = next(resource for resource in prepared if resource.get("resourceType") == "ValueSet")
         assert prepared_valueset["id"] == expected_id
         assert valueset["id"] == "bundle-id"
+
+
+# ---------------------------------------------------------------------------
+# _delete_existing_valueset (issue #359 — 409 referential-integrity handling)
+# ---------------------------------------------------------------------------
+
+
+def _make_delete_mock(status_code: int, raise_side_effect=None):
+    """Return (mock_client, mock_response) wired to respond with status_code on DELETE."""
+    mock_response = MagicMock()
+    mock_response.status_code = status_code
+    mock_response.raise_for_status = MagicMock(side_effect=raise_side_effect)
+    mock_client = AsyncMock()
+    mock_client.delete = AsyncMock(return_value=mock_response)
+    return mock_client, mock_response
+
+
+# Accepted status codes — the complete set from the production implementation.
+_ACCEPTED_DELETE_STATUSES = [200, 204, 404, 409]
+
+
+@pytest.mark.asyncio
+class TestDeleteExistingValueset:
+    """_delete_existing_valueset must treat 409 Conflict as a no-op.
+
+    HAPI returns 409 when a DELETE targets a ValueSet that is still referenced
+    by a Measure or Library resource.  Before issue #359 the 409 propagated as
+    HTTPStatusError, causing the entire bundle load to fail when the dev stack
+    had already seeded those resources.
+    """
+
+    async def test_409_conflict_is_treated_as_no_op(self):
+        """409 must not raise, must not call raise_for_status, and must DELETE the right URL."""
+        mock_client, mock_response = _make_delete_mock(409)
+
+        await _delete_existing_valueset("vs-in-use", mock_client)
+
+        mock_client.delete.assert_awaited_once_with("http://hapi-fhir-measure:8080/fhir/ValueSet/vs-in-use")
+        mock_response.raise_for_status.assert_not_called()
+
+    @pytest.mark.parametrize("status_code", _ACCEPTED_DELETE_STATUSES)
+    async def test_accepted_status_codes_do_not_raise(self, status_code):
+        mock_client, mock_response = _make_delete_mock(status_code)
+
+        await _delete_existing_valueset("some-id", mock_client)
+
+        mock_client.delete.assert_awaited_once()
+        mock_response.raise_for_status.assert_not_called()
+
+    async def test_unexpected_status_calls_raise_for_status(self):
+        """Codes outside {200, 204, 404, 409} must propagate via raise_for_status."""
+        mock_client, mock_response = _make_delete_mock(500, raise_side_effect=RuntimeError("HAPI error"))
+
+        with pytest.raises(RuntimeError, match="HAPI error"):
+            await _delete_existing_valueset("some-id", mock_client)
+        mock_client.delete.assert_awaited_once()
+        mock_response.raise_for_status.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

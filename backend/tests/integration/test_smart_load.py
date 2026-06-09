@@ -38,7 +38,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.models.validation import ExpectedResult
 from app.services.bundle_loader import load_connectathon_bundles
@@ -174,6 +174,13 @@ async def loader_result(integration_session_factory, tmp_path_factory):
     """
     if os.environ.get("HAPI_PREBAKED") == "1":
         pytest.skip("Bundle-loader tests skipped in pre-baked mode — run nightly")
+
+    # Truncate expected_results before loading so a dirty environment (dev stack
+    # already ran the seed service and wrote rows) doesn't hit uq_measure_patient
+    # on the subsequent INSERTs.  The fixture owns its own preconditions (issue #359).
+    async with integration_session_factory() as session:
+        await session.execute(delete(ExpectedResult))
+        await session.commit()
 
     # Build a temp directory with only the CI-subset bundles (symlinked from the
     # real bundle dir) so the production loader signature is unchanged.
