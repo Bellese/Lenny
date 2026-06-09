@@ -46,6 +46,7 @@
     "serialize-javascript": "^7.0.5",
     "underscore": "^1.13.8",
     "http-proxy-agent": "^7.0.0",
+    "uuid": "^11.1.1",
     "webpack-dev-server": {
       "ws": ">=8.20.1"
     }
