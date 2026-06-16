@@ -449,6 +449,15 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
             "2026-07-01",
             "2027-06-30",
         ),
+        # OBSENC patient for CMS529 — different encounter class than the ACUTE probe above;
+        # HAPI may index OBSENC encounters on a separate path that lags behind ACUTE.
+        (
+            "CMS529",
+            "https://madie.cms.gov/Measure/CMSFHIR529HybridHospitalWideReadmission",
+            "2152d065-ba97-4334-a1e5-a9239e600906",
+            "2026-07-01",
+            "2027-06-30",
+        ),
     ]
     _loaded_bundle_names = {n for n, _ in _get_golden_bundles()}
     _active_gates = []
@@ -460,9 +469,10 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
         if not _ents:
             continue
         _mid = _ents[0]["resource"]["id"]
+        _gate_key = f"{_prefix}:{_mpat[:8]}"
         _active_gates.append(
             (
-                _prefix,
+                _gate_key,
                 f"{TEST_MEASURE_URL}/Measure/{_mid}/$evaluate-measure"
                 f"?subject=Patient/{_mpat}&periodStart={_pstart}&periodEnd={_pend}",
             )
@@ -471,7 +481,7 @@ def _load_golden_bundles_to_hapi(_require_infrastructure):
     if _active_gates:
         _gate_timeout = 600
         _gate_deadline = _time.monotonic() + _gate_timeout
-        _gate_pending = {prefix: url for prefix, url in _active_gates}
+        _gate_pending = {key: url for key, url in _active_gates}
         while _gate_pending and _time.monotonic() < _gate_deadline:
             _newly_done: set[str] = set()
             for _prefix, _gurl in list(_gate_pending.items()):
