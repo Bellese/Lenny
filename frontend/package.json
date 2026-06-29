@@ -47,8 +47,11 @@
     "underscore": "^1.13.8",
     "http-proxy-agent": "^7.0.0",
     "uuid": "^11.1.1",
+    "form-data": "^3.0.5",
+    "js-yaml": "^4.2.0",
+    "ws": "7.5.11",
     "webpack-dev-server": {
-      "ws": ">=8.20.1"
+      "ws": ">=8.21.0"
     }
   }
 }
