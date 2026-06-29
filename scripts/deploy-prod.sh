@@ -3,13 +3,15 @@
 #
 # Boot flow (full deploy, no arguments):
 #   1. Preflight checks (root, fetch script present)
+#   1.5 Reclaim disk (docker image prune + builder prune --keep-storage 5GB)
 #   2. env -i → fetch-prod-secrets.sh (writes /run/leonard/env)
 #   3. Verify /run/leonard/env; extract POSTGRES_PASSWORD to Docker secret file
 #   4. docker compose up -d db
 #   5. Wait for db healthcheck to pass (12 × 5s = 60s max)
 #   6. scripts/reconcile-db-password.sh
-#   7. docker compose up -d (remaining services)
-#   8. Health check: curl https://api.lenny.bellese.dev/health (24 × 5s = 2 min max)
+#   7. docker compose pull (pre-built images)
+#   8. docker compose up -d --build (remaining services)
+#   9. Health check: curl https://api.lenny.bellese.dev/health (24 × 5s = 2 min max)
 #
 # --post-db-restart mode:
 #   Runs only steps 1–3 and 6 (preflight, fetch, extract secret, reconcile).
@@ -83,6 +85,29 @@ if [[ ! -f "$RECONCILE_SCRIPT" ]]; then
 fi
 if [[ ! -x "$RECONCILE_SCRIPT" ]]; then
     die 1 "reconcile-db-password.sh is not executable at '${RECONCILE_SCRIPT}'"
+fi
+
+# ── step 1.5: reclaim disk before deploy (full deploy only; self-healing) ─────
+# Every deploy's `pull` (step 7) orphans the previous :latest images and
+# `up --build` (step 8) adds BuildKit cache; with no cleanup step this exhausted
+# the 30 GB root volume and broke a deploy on ENOSPC (issue #368). Reclaim FIRST,
+# before secret-fetch (mktemp → root FS) and before pull/build, so each deploy
+# frees space before it consumes it. Skipped in --post-db-restart mode (no
+# pull/build there). Data-safe: `image prune -f` removes only dangling (untagged)
+# images; `builder prune` removes only build cache. Neither touches running
+# containers, in-use tagged images, or named volumes — HAPI H2 (cdrdata/
+# measuredata), Postgres (pgdata), and Caddy volumes are safe.
+# On failure (e.g. an unsupported flag) we WARN but continue — a cleanup hiccup
+# must not block an otherwise-healthy deploy, but it must be visible in the logs
+# (not silently swallowed) so a broken flag doesn't quietly recreate issue #368.
+if [[ "$POST_DB_RESTART" -eq 0 ]]; then
+    printf '[+] Reclaiming disk before deploy (dangling images + build cache)...\n'
+    docker image prune -f \
+        || printf '[!] WARNING: docker image prune failed — continuing deploy\n' >&2
+    docker builder prune -f --keep-storage 5GB \
+        || printf '[!] WARNING: docker builder prune failed — continuing deploy\n' >&2
+    printf '[+] Disk after reclaim:\n'
+    df -h /
 fi
 
 # ── step 2: fetch secrets ─────────────────────────────────────────────────────
