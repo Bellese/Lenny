@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import func, select
 
+from app.config import settings
 from app.models.validation import ExpectedResult, ValidationResult, ValidationRun, ValidationStatus
-from app.services.fhir_client import BundleUploadResult
+from app.services.fhir_client import BundleUploadResult, GatherResult
 from app.services.validation import (
     _assert_no_canonical_url_clash,
     _classify_bundle_entries,
@@ -1054,7 +1055,9 @@ class TestRunValidation:
         await test_session.refresh(run)
 
         strategy = MagicMock()
-        strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "patient-1"}])
+        strategy.gather_patient_data = AsyncMock(
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "patient-1"}])
+        )
 
         def make_ctx():
             return self._make_session_ctx(test_session)
@@ -1125,6 +1128,11 @@ class TestRunValidation:
         assert rows[1].status == "error"
         assert "Measure not found on engine after reload attempt" in rows[1].error_message
         mock_wipe.assert_awaited_once()
+        # Regression guard: the pre-push wipe must target the measure engine explicitly
+        # (wipe_patient_data requires the keyword-only base_url argument).
+        _, wipe_kwargs = mock_wipe.await_args
+        assert wipe_kwargs.get("base_url") == settings.MEASURE_ENGINE_URL
+        assert wipe_kwargs.get("strict") is False
         mock_push.assert_awaited_once()
         # Warmup burst adds 1 call per measure + 1 main eval = 2 total
         assert mock_evaluate.await_count == 2
@@ -1175,7 +1183,9 @@ class TestRunValidation:
         monkeypatch.setattr("app.services.validation.settings.MAX_WORKERS", 2)
 
         strategy = MagicMock()
-        strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "patient-1"}])
+        strategy.gather_patient_data = AsyncMock(
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "patient-1"}])
+        )
 
         def make_ctx():
             return self._make_session_ctx(test_session)
@@ -1280,7 +1290,7 @@ class TestRunValidation:
         async def gather_side_effect(cdr_url, patient_ref, auth_headers):
             if patient_ref == "patient-2":
                 raise RuntimeError("CDR connection refused")
-            return [{"resourceType": "Patient", "id": patient_ref}]
+            return GatherResult(resources=[{"resourceType": "Patient", "id": patient_ref}])
 
         strategy = MagicMock()
         strategy.gather_patient_data = AsyncMock(side_effect=gather_side_effect)
@@ -1359,7 +1369,9 @@ class TestRunValidation:
         monkeypatch.setattr("app.services.validation.settings.MEASURE_ENGINE_URL", "http://measure/fhir")
 
         strategy = MagicMock()
-        strategy.gather_patient_data = AsyncMock(return_value=[{"resourceType": "Patient", "id": "patient-1"}])
+        strategy.gather_patient_data = AsyncMock(
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "patient-1"}])
+        )
 
         def make_ctx():
             return self._make_session_ctx(test_session)
