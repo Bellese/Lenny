@@ -1,46 +1,14 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import styles from './App.module.css';
-import MeasuresPage from './pages/MeasuresPage';
-import JobsPage from './pages/JobsPage';
-import GroupsPage from './pages/GroupsPage';
-import ResultsPage from './pages/ResultsPage';
-import SettingsPage from './pages/SettingsPage';
-import ValidationPage from './pages/ValidationPage';
+import { ROUTES } from './routes';
 import { getHealth, getAdminSettings } from './api/client';
 import {
-  MeasuresIcon, JobsIcon, ResultsIcon, ValidateIcon,
   SettingsIcon, SearchIcon, XIcon, SunIcon, MoonIcon, GithubIcon,
 } from './components/Icons';
 import HealthChipGroup from './components/HealthChipGroup';
 import SearchContext from './contexts/SearchContext';
 import pkg from '../package.json';
-
-const ALL_NAV_ITEMS = [
-  { path: '/measures',   label: 'Measures',   Icon: MeasuresIcon,  kbd: 'M', feature: null },
-  { path: '/jobs',       label: 'Jobs',        Icon: JobsIcon,      kbd: 'J', feature: null },
-  { path: '/groups',     label: 'Groups',      Icon: JobsIcon,      kbd: 'G', feature: 'groups' },
-  { path: '/results',    label: 'Results',     Icon: ResultsIcon,   kbd: 'E', feature: null },
-  { path: '/validation', label: 'Validation',  Icon: ValidateIcon,  kbd: 'V', feature: 'validation' },
-];
-
-const PAGE_TITLE = {
-  '/measures': 'Measures',
-  '/jobs': 'Jobs',
-  '/groups': 'Groups',
-  '/results': 'Results',
-  '/validation': 'Validation',
-  '/settings': 'Settings',
-};
-
-const SEARCH_PLACEHOLDER = {
-  '/measures': 'Search measures…',
-  '/jobs': 'Search jobs…',
-  '/groups': 'Search groups…',
-  '/results': 'Search patients…',
-  '/validation': 'Search validation runs…',
-  '/settings': 'Search…',
-};
 
 const HEALTH_KINDS = [
   { kind: 'cdr', healthKey: 'cdr', settingsHash: '#cdr-connections' },
@@ -189,21 +157,24 @@ export default function App() {
         return;
       }
       if (!isInput && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) {
-        if (e.key === 'm' || e.key === 'M') navigate('/measures');
-        else if (e.key === 'j' || e.key === 'J') navigate('/jobs');
-        else if (e.key === 'e' || e.key === 'E') navigate('/results');
-        else if ((e.key === 'v' || e.key === 'V') && features.validation) navigate('/validation');
-        else if ((e.key === 'g' || e.key === 'G') && features.groups) navigate('/groups');
+        // Feature-filtered inside the effect (not the render body) so this
+        // array's identity doesn't change every render — [navigate, features]
+        // stays the full dependency list and the listener isn't re-subscribed
+        // on every keystroke.
+        const shortcutRoutes = ROUTES.filter(r => r.nav && (!r.feature || features[r.feature]));
+        const match = shortcutRoutes.find(r => r.nav.kbd.toLowerCase() === e.key.toLowerCase());
+        if (match) navigate(match.path);
       }
     };
     window.addEventListener('keydown', h);
     return () => window.removeEventListener('keydown', h);
   }, [navigate, features]);
 
-  const navItems = ALL_NAV_ITEMS.filter(({ feature }) => !feature || features[feature]);
+  const navItems = ROUTES.filter(r => r.nav && (!r.feature || features[r.feature]));
   const basePath = '/' + location.pathname.split('/')[1];
-  const pageTitle = PAGE_TITLE[basePath] || 'Lenny';
-  const searchPlaceholder = SEARCH_PLACEHOLDER[basePath] || 'Search…';
+  const activeRoute = ROUTES.find(r => r.path === basePath);
+  const pageTitle = activeRoute?.title || 'Lenny';
+  const searchPlaceholder = activeRoute?.searchPlaceholder || 'Search…';
   const cdrChip = chips.cdr;
   const cdrOk = cdrChip.state === 'healthy';
 
@@ -279,7 +250,7 @@ export default function App() {
             <span>Close</span>
           </button>
           <div className={styles.navGroupLabel}>Workspace</div>
-          {navItems.map(({ path, label, Icon, kbd }) => (
+          {navItems.map(({ path, nav: { label, Icon, kbd } }) => (
             <NavLink
               key={path}
               to={path}
@@ -332,14 +303,13 @@ export default function App() {
         {/* Main content */}
         <main className={styles.main} role="main">
           <Routes>
-            <Route path="/" element={<Navigate to="/measures" replace />} />
-            <Route path="/measures" element={<MeasuresPage />} />
-            <Route path="/jobs" element={<JobsPage />} />
-            <Route path="/groups" element={<GroupsPage />} />
-            <Route path="/results" element={<ResultsPage />} />
-            <Route path="/results/:jobId" element={<ResultsPage />} />
-            <Route path="/validation" element={<ValidationPage />} />
-            <Route path="/settings" element={<SettingsPage />} />
+            {ROUTES.map(({ path, redirectTo, Component }) => (
+              <Route
+                key={path}
+                path={path}
+                element={redirectTo ? <Navigate to={redirectTo} replace /> : <Component />}
+              />
+            ))}
           </Routes>
         </main>
       </div>
