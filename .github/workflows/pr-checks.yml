@@ -149,6 +149,12 @@ jobs:
         working-directory: frontend
         run: npm ci
 
+      - name: Test
+        working-directory: frontend
+        run: npm test -- --watchAll=false
+        env:
+          CI: true
+
       - name: Build
         working-directory: frontend
         run: npm run build
