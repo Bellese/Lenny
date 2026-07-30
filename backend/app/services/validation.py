@@ -1236,7 +1236,7 @@ async def run_validation(validation_run_id: int) -> None:
 
             # Best-effort for validation: stale resources are worse than ideal, but
             # aborting prevents patient-level comparison entirely on slow HAPI deletes.
-            await wipe_patient_data(strict=False)
+            await wipe_patient_data(base_url=settings.MEASURE_ENGINE_URL, strict=False)
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
 
@@ -1248,7 +1248,8 @@ async def run_validation(validation_run_id: int) -> None:
                 async with semaphore:
                     if await _stop_or_delete_validation_run(validation_run_id):
                         return set()
-                    resources = await strategy.gather_patient_data(cdr_url, patient_ref, auth_headers)
+                    gather_result = await strategy.gather_patient_data(cdr_url, patient_ref, auth_headers)
+                    resources = gather_result.resources
                     if resources:
                         await push_resources(resources)
                     return {
