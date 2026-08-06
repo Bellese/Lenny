@@ -767,6 +767,7 @@ async def evaluate_measure(
     period_start: str,
     period_end: str,
     measure_engine_url: str | None = None,
+    auth_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Call $evaluate-measure on the measure engine for a single patient.
 
@@ -776,6 +777,9 @@ async def evaluate_measure(
             haven't yet been wired to per-job active-MCS context. The
             orchestrator passes `job.mcs_url` so jobs run against the MCS
             that was active at job creation time, not whatever's active now.
+        auth_headers: Credentials for the MCS, resolved from the job's linked
+            MCSConfig. Omitted for unauthenticated engines (local HAPI). A
+            remote MCS rejects every evaluation with 401 without these.
 
     Raises FhirOperationError (with the MCS OperationOutcome preserved) on
     4xx/5xx responses and on 200 OK where the body is an OperationOutcome
@@ -796,7 +800,7 @@ async def evaluate_measure(
                 extra={"measure_id": measure_id, "patient_id": patient_id, "attempt": attempt + 1},
             )
             start_ms = int(time.monotonic() * 1000)
-            resp = await client.get(url)
+            resp = await client.get(url, headers=auth_headers or {})
             latency_ms = int(time.monotonic() * 1000) - start_ms
             try:
                 resp.raise_for_status()
@@ -918,7 +922,7 @@ async def delete_measure(measure_id: str) -> None:
             resp.raise_for_status()
 
 
-async def wipe_patient_data(*, base_url: str, strict: bool = True) -> None:
+async def wipe_patient_data(*, base_url: str, strict: bool = True, auth_headers: dict[str, str] | None = None) -> None:
     """Delete patient-related data from a FHIR server.
 
     Called at the START of a new job (with base_url=MEASURE_ENGINE_URL) to clean
@@ -929,6 +933,10 @@ async def wipe_patient_data(*, base_url: str, strict: bool = True) -> None:
     A timed-out DELETE leaves HAPI's server-side operation still running; pushing new
     data over it causes the in-flight DELETE to wipe the freshly-pushed resources.
     The strict parameter is kept for API compatibility but no longer silences failures.
+
+    `auth_headers` credentials the target server. A remote MCS rejects every DELETE
+    with 401 without them, which would leave the prior job's patients in place and
+    contaminate the next evaluation.
     """
     # Delete clinical resources before Patient: HAPI returns 409 when Patient is
     # referenced by Condition/Encounter/etc., so Patient must be last.
@@ -965,7 +973,7 @@ async def wipe_patient_data(*, base_url: str, strict: bool = True) -> None:
             try:
                 # Use conditional delete: DELETE ResourceType?_lastUpdated=gt1900-01-01
                 delete_url = f"{base_url}/{rt}?_lastUpdated=gt1900-01-01"
-                resp = await client.delete(delete_url)
+                resp = await client.delete(delete_url, headers=auth_headers or {})
                 if resp.status_code < 300:
                     logger.info("Wiped resource type", extra={"resourceType": rt})
                 else:
@@ -1036,21 +1044,36 @@ async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str, bas
                 break
 
 
-async def resolve_evaluated_resource(reference: str) -> dict[str, Any]:
-    """Resolve an evaluatedResource reference from the measure engine."""
-    url = f"{settings.MEASURE_ENGINE_URL}/{reference}"
+async def resolve_evaluated_resource(
+    reference: str,
+    base_url: str | None = None,
+    auth_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Resolve an evaluatedResource reference from the measure engine.
+
+    `base_url`/`auth_headers` target the job's MCS. They default to the env-var
+    engine with no credentials, which only works for a local unauthenticated HAPI.
+    """
+    url = f"{base_url or settings.MEASURE_ENGINE_URL}/{reference}"
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url)
+        resp = await client.get(url, headers=auth_headers or {})
         resp.raise_for_status()
         return resp.json()
 
 
-async def snapshot_evaluated_resources(measure_report: dict[str, Any]) -> list[dict[str, Any]] | None:
+async def snapshot_evaluated_resources(
+    measure_report: dict[str, Any],
+    base_url: str | None = None,
+    auth_headers: dict[str, str] | None = None,
+) -> list[dict[str, Any]] | None:
     """Resolve every evaluatedResource reference in a MeasureReport to a stored snapshot.
 
     Returns a list of full FHIR resources. Per-reference failures are skipped and logged
     rather than raised — partial snapshots are still useful and the caller has already
     persisted the MeasureReport itself. Returns None when there is nothing to snapshot.
+
+    `base_url`/`auth_headers` identify the MCS the report came from, so snapshots
+    are read back from the same server that evaluated them.
     """
     refs = [
         r.get("reference")
@@ -1063,7 +1086,7 @@ async def snapshot_evaluated_resources(measure_report: dict[str, Any]) -> list[d
     resources: list[dict[str, Any]] = []
     for ref in refs:
         try:
-            resources.append(await resolve_evaluated_resource(ref))
+            resources.append(await resolve_evaluated_resource(ref, base_url, auth_headers))
         except Exception as exc:
             logger.warning(
                 "Failed to snapshot evaluated resource",

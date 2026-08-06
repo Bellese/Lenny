@@ -1032,7 +1032,7 @@ async def test_snapshot_evaluated_resources_returns_resolved_list():
         "Encounter/e1": {"resourceType": "Encounter", "id": "e1"},
     }
 
-    async def fake_resolve(ref):
+    async def fake_resolve(ref, base_url=None, auth_headers=None):
         return fake_resources[ref]
 
     with patch("app.services.fhir_client.resolve_evaluated_resource", side_effect=fake_resolve):
@@ -1054,7 +1054,7 @@ async def test_snapshot_evaluated_resources_skips_failed_refs():
         ],
     }
 
-    async def fake_resolve(ref):
+    async def fake_resolve(ref, base_url=None, auth_headers=None):
         if ref == "Encounter/e1":
             raise RuntimeError("404 not found")
         return {"resourceType": ref.split("/")[0], "id": ref.split("/")[1]}
@@ -1852,3 +1852,69 @@ def test_wait_for_valueset_expansion_logs_timeout(monkeypatch, caplog):
 
     assert expanded == {}
     assert "ValueSet expansion timed out" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# MCS auth wiring — evaluate_measure / resolve_evaluated_resource
+# (regression: remote MCS connections got 401 because no auth was ever sent)
+# ---------------------------------------------------------------------------
+
+
+async def test_evaluate_measure_sends_auth_headers(mock_measure_report):
+    """evaluate_measure forwards auth headers to the MCS."""
+    mock_response = _make_response(200, mock_measure_report)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await evaluate_measure(
+            "measure-1",
+            "patient-1",
+            "2024-01-01",
+            "2024-12-31",
+            measure_engine_url="https://mcs.example.org/fhir",
+            auth_headers={"Authorization": "Bearer tok-123"},
+        )
+
+    sent = mock_ctx.get.call_args.kwargs.get("headers")
+    assert sent is not None, "evaluate_measure must pass headers to the MCS"
+    assert sent.get("Authorization") == "Bearer tok-123"
+
+
+async def test_evaluate_measure_without_auth_sends_no_authorization(mock_measure_report):
+    """Unauthenticated MCS (local HAPI) keeps working — no Authorization header."""
+    mock_response = _make_response(200, mock_measure_report)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await evaluate_measure("measure-1", "patient-1", "2024-01-01", "2024-12-31")
+
+    sent = mock_ctx.get.call_args.kwargs.get("headers") or {}
+    assert "Authorization" not in sent
+
+
+async def test_resolve_evaluated_resource_uses_given_base_and_auth():
+    """Snapshot reads target the job's MCS with its credentials, not the env default."""
+    mock_response = _make_response(200, {"resourceType": "Condition", "id": "c1"})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await resolve_evaluated_resource(
+            "Condition/c1",
+            base_url="https://mcs.example.org/fhir",
+            auth_headers={"Authorization": "Bearer tok-123"},
+        )
+
+    assert mock_ctx.get.call_args[0][0] == "https://mcs.example.org/fhir/Condition/c1"
+    assert mock_ctx.get.call_args.kwargs.get("headers", {}).get("Authorization") == "Bearer tok-123"

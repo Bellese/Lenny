@@ -7,13 +7,16 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
+from app.models.config import AuthType
 from app.models.job import Job, JobStatus, MeasureResult
-from app.services.fhir_client import FailedResourceFetch, GatherResult
+from app.models.mcs_config import MCSConfig
+from app.services.fhir_client import BatchQueryStrategy, FailedResourceFetch, GatherResult
 from app.services.orchestrator import (
     _error_measure_report,
     _extract_patient_name,
     _extract_populations,
     _get_cdr_auth_headers,
+    _get_mcs_auth_headers,
     run_job,
 )
 
@@ -237,7 +240,8 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
             {"resourceType": "Condition", "id": "cond-1"},
         ]
 
-    mock_wipe.assert_awaited_once_with(base_url=settings.MEASURE_ENGINE_URL, strict=False)
+    # Job has no mcs_url, so the wipe falls back to the env-var engine with no credentials.
+    mock_wipe.assert_awaited_once_with(base_url=settings.MEASURE_ENGINE_URL, strict=False, auth_headers={})
 
 
 async def test_run_job_stores_empty_list_when_snapshot_helper_returns_none(
@@ -421,7 +425,9 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
         {"resourceType": "Patient", "id": "p2", "name": [{"given": ["Bob"], "family": "Bad"}]},
     ]
 
-    async def mock_evaluate(measure_id, patient_id, period_start, period_end, measure_engine_url=None):
+    async def mock_evaluate(
+        measure_id, patient_id, period_start, period_end, measure_engine_url=None, auth_headers=None
+    ):
         if patient_id == "p2":
             raise Exception("Evaluation failed for p2")
         return mock_measure_report
@@ -1074,3 +1080,158 @@ async def test_run_job_sets_started_at_on_transition_to_running(test_session, se
         assert job.status == JobStatus.complete
         # started_at must be before or equal to completed_at
         assert job.started_at <= job.completed_at
+
+
+# ---------------------------------------------------------------------------
+# _get_mcs_auth_headers — MCS credentials must reach the measure engine.
+# Regression: remote MCS jobs failed every patient with HTTP 401
+# "Authorization header missing Bearer token" because auth was never resolved.
+# ---------------------------------------------------------------------------
+
+
+async def test_get_mcs_auth_headers_builds_from_linked_config(test_session, session_factory):
+    """A bearer-authed MCS config yields an Authorization header for $evaluate-measure."""
+    cfg = MCSConfig(
+        name="Remote MCS",
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-123"},
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    job = Job(
+        measure_id="m-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr.example.com/fhir",
+        status=JobStatus.queued,
+        mcs_url=cfg.mcs_url,
+        mcs_id=cfg.id,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    with (
+        patch("app.services.orchestrator.async_session", session_factory),
+        patch(
+            "app.services.orchestrator._build_auth_headers",
+            new_callable=AsyncMock,
+            return_value={"Authorization": "Bearer tok-123"},
+        ) as mock_auth,
+    ):
+        headers = await _get_mcs_auth_headers(job.id)
+
+    assert headers == {"Authorization": "Bearer tok-123"}
+    assert mock_auth.call_args[0][0] == AuthType.bearer
+
+
+async def test_get_mcs_auth_headers_empty_when_no_mcs_linked(test_session, session_factory):
+    """Local/legacy jobs with no mcs_id need no credentials."""
+    job = Job(
+        measure_id="m-local",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr.example.com/fhir",
+        status=JobStatus.queued,
+        mcs_id=None,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    with patch("app.services.orchestrator.async_session", session_factory):
+        assert await _get_mcs_auth_headers(job.id) == {}
+
+
+async def test_get_mcs_auth_headers_raises_when_config_deleted(test_session, session_factory):
+    """Credentials are unrecoverable if the MCS config was deleted — fail loudly, not silently."""
+    job = Job(
+        measure_id="m-orphan",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr.example.com/fhir",
+        status=JobStatus.queued,
+        mcs_url="https://mcs.example.org/fhir",
+        mcs_id=99999,  # points at a config that does not exist
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    with patch("app.services.orchestrator.async_session", session_factory):
+        with pytest.raises(RuntimeError, match="no longer exists"):
+            await _get_mcs_auth_headers(job.id)
+
+
+async def test_run_job_targets_job_mcs_with_credentials(test_session, session_factory, mock_measure_report):
+    """Wipe, push, and evaluate all target the job's MCS with its credentials.
+
+    Regression: jobs against a remote MCS pushed patient data to the env-var
+    engine (so the remote never received it) and evaluated without auth (so every
+    patient 401'd). Both had to be true for a remote MCS job to produce results.
+    """
+    cfg = MCSConfig(
+        name="Remote MCS",
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-123"},
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    job = Job(
+        measure_id="m-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr.example.com/fhir",
+        status=JobStatus.queued,
+        mcs_url=cfg.mcs_url,
+        mcs_id=cfg.id,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+    job_id = job.id
+
+    patients = [{"resourceType": "Patient", "id": "p1", "name": [{"given": ["A"], "family": "B"}]}]
+    expected_auth = {"Authorization": "Bearer tok-123"}
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock) as mock_push,
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch(
+            "app.services.orchestrator._get_cdr_url",
+            new_callable=AsyncMock,
+            return_value="http://cdr.example.com/fhir",
+        ),
+        patch.object(BatchQueryStrategy, "gather_patients", new_callable=AsyncMock, return_value=patients),
+        patch.object(
+            BatchQueryStrategy,
+            "gather_patient_data",
+            new_callable=AsyncMock,
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]),
+        ),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value=mock_measure_report,
+        ) as mock_eval,
+    ):
+        await run_job(job_id)
+
+    # Wipe cleans the MCS this job will actually use — not the env-var engine.
+    mock_wipe.assert_awaited_once_with(
+        base_url="https://mcs.example.org/fhir", strict=False, auth_headers=expected_auth
+    )
+    # Patient data is pushed to that same MCS, authenticated.
+    assert mock_push.await_args.kwargs["target_url"] == "https://mcs.example.org/fhir"
+    assert mock_push.await_args.kwargs["auth_headers"] == expected_auth
+    # Evaluation carries the credentials that were missing in the 401 regression.
+    assert mock_eval.await_args.kwargs["measure_engine_url"] == "https://mcs.example.org/fhir"
+    assert mock_eval.await_args.kwargs["auth_headers"] == expected_auth

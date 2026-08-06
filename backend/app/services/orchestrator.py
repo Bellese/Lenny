@@ -18,6 +18,7 @@ from app.config import settings
 from app.db import async_session
 from app.models.config import CDRConfig
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
+from app.models.mcs_config import MCSConfig
 from app.services.fhir_client import (
     BatchQueryStrategy,
     DataRequirementsStrategy,
@@ -171,9 +172,16 @@ async def run_job(job_id: int) -> None:
         await session.commit()
 
     try:
+        # Resolve the MCS up front: the wipe below must target the same engine the
+        # job will push to and evaluate against, not the env-var default. Pointing
+        # the wipe at a different server would leave the real target's prior-run
+        # data in place and silently contaminate this job's populations.
+        mcs_url = await _get_mcs_url(job_id)
+        mcs_auth_headers = await _get_mcs_auth_headers(job_id)
+
         # Step 1: Wipe patient data from measure engine (cleanup from prior job)
         logger.info("Wiping prior patient data from measure engine", extra={"job_id": job_id})
-        await wipe_patient_data(base_url=settings.MEASURE_ENGINE_URL, strict=False)
+        await wipe_patient_data(base_url=mcs_url, strict=False, auth_headers=mcs_auth_headers)
         if await _stop_or_delete_job(job_id):
             return
 
@@ -238,9 +246,8 @@ async def run_job(job_id: int) -> None:
         # Step 5: Process batches with concurrency control
         semaphore = asyncio.Semaphore(settings.MAX_WORKERS)
 
-        # Resolve MCS URL once for the whole job. Falls back to the env-var
-        # default if Job.mcs_url is NULL (legacy rows pre-dating PR #4).
-        mcs_url = await _get_mcs_url(job_id)
+        # mcs_url / mcs_auth_headers were resolved before the wipe above so every
+        # MCS interaction in this job targets one server with one set of credentials.
 
         async def process_batch(batch_id: int) -> None:
             async with semaphore:
@@ -251,6 +258,7 @@ async def run_job(job_id: int) -> None:
                     cdr_url=cdr_url,
                     auth_headers=auth_headers,
                     mcs_url=mcs_url,
+                    mcs_auth_headers=mcs_auth_headers,
                 )
 
         # Check for cancellation before starting
@@ -345,6 +353,28 @@ async def _get_cdr_url(job_id: int) -> str:
     return settings.DEFAULT_CDR_URL
 
 
+async def _get_mcs_auth_headers(job_id: int) -> dict[str, str]:
+    """Resolve auth headers by reading live credentials from the referenced MCS config.
+
+    Mirrors `_get_cdr_auth_headers`: the job snapshots `mcs_id`, and credentials are
+    read from the live config rather than duplicated onto the job row, so secrets
+    live in exactly one place.
+
+    A job with no `mcs_id` predates MCS connections or targets the env-var engine —
+    unauthenticated, so no headers. A job whose linked config has been deleted has
+    unrecoverable credentials and raises rather than silently evaluating without
+    auth, which a remote MCS would reject with 401 on every patient.
+    """
+    async with async_session() as session:
+        job = await session.get(Job, job_id)
+        if job is None or job.mcs_id is None:
+            return {}
+        cfg = await session.get(MCSConfig, job.mcs_id)
+        if cfg is None:
+            raise RuntimeError(f"MCS config {job.mcs_id} referenced by job {job_id} no longer exists.")
+        return await _build_auth_headers(cfg.auth_type, cfg.auth_credentials)
+
+
 async def _get_mcs_url(job_id: int) -> str:
     """Resolve the MCS URL for a job.
 
@@ -370,6 +400,7 @@ async def _process_single_batch(
     cdr_url: str,
     auth_headers: dict[str, str],
     mcs_url: str,
+    mcs_auth_headers: dict[str, str] | None = None,
 ) -> None:
     """Process a single batch in two phases.
 
@@ -431,7 +462,11 @@ async def _process_single_batch(
                 try:
                     gather_result = await strategy.gather_patient_data(cdr_url, patient_id, auth_headers)
                     if gather_result.resources:
-                        await push_resources(gather_result.resources)
+                        await push_resources(
+                            gather_result.resources,
+                            target_url=mcs_url,
+                            auth_headers=mcs_auth_headers,
+                        )
                     logger.info(
                         f"Pushed {len(gather_result.resources)} resources for {patient_id[:8]}",
                         extra={"job_id": job_id, "patient_id": patient_id},
@@ -546,7 +581,12 @@ async def _process_single_batch(
 
                 try:
                     measure_report = await evaluate_measure(
-                        measure_id, patient_id, period_start, period_end, measure_engine_url=mcs_url
+                        measure_id,
+                        patient_id,
+                        period_start,
+                        period_end,
+                        measure_engine_url=mcs_url,
+                        auth_headers=mcs_auth_headers,
                     )
 
                     populations = _extract_populations(measure_report)
@@ -564,7 +604,7 @@ async def _process_single_batch(
                     # new rows without refs.
                     evaluated_resources_snapshot: list[dict] | None = None
                     try:
-                        snapshot_result = await snapshot_evaluated_resources(measure_report)
+                        snapshot_result = await snapshot_evaluated_resources(measure_report, mcs_url, mcs_auth_headers)
                         evaluated_resources_snapshot = snapshot_result if snapshot_result is not None else []
                     except Exception as snap_exc:
                         logger.warning(
