@@ -107,3 +107,21 @@ This log records significant technical and process choices with their rationale.
 **Defense-in-depth:** `_assert_no_canonical_url_clash()` queries `Measure?url={canonical}` before every `push_resources` call during bundle upload. If HAPI already has a Measure at that canonical URL under a different FHIR ID, the upload fails with a clear error message referencing this ADR.
 
 **Alternatives considered:** (a) Canonical-URL normalisation in the comparison endpoint (would mask drift rather than prevent it). (b) Dedup-by-canonical-URL in `push_resources` (silent PUT-overwrite masks the problem and loses the original resource). (c) No seed-file change — runtime normalisation only (would not fix the prebaked images; a rebake would still leave two resources).
+
+---
+
+## ADR-011: MCS credentials are read from the live config, and every MCS interaction targets the job's MCS (2026-08-06)
+
+**Decision:** Add `_get_mcs_auth_headers(job_id)` resolving credentials from the live `MCSConfig` via `Job.mcs_id`, and route all four measure-engine interactions — wipe, push, `$evaluate-measure`, and evaluated-resource snapshot — at the job's MCS with those credentials.
+
+**Root cause:** MCS connections wired the *URL* through to jobs (`Job.mcs_url`, `_get_mcs_url()`) but never the *credentials*. `evaluate_measure()` had no auth parameter at all, and `push_resources()` / `wipe_patient_data()` / `resolve_evaluated_resource()` all defaulted to `settings.MEASURE_ENGINE_URL`. A job against a remote MCS therefore pushed patient data to the local engine and evaluated against the remote one without auth — every patient failed `HTTP 401 "Authorization header missing Bearer token"`.
+
+**Why credentials live on the config, not the job:** `Job` snapshots `mcs_url`/`mcs_name`/`mcs_id` so job rendering never depends on current config state. Credentials are deliberately excluded from that snapshot and read live, matching `_get_cdr_auth_headers()`. Duplicating secrets onto every job row would multiply the blast radius of a database disclosure and leave stale tokens scattered across history. The cost is that deleting an MCS config makes its jobs unrunnable — handled by raising a clear error rather than silently evaluating unauthenticated.
+
+**Why the wipe moved above MCS resolution in `run_job`:** the wipe must clear the same server the job will push to and evaluate against. Wiping a different server leaves the real target's prior-run patients in place, and those inflate the next evaluation's populations — a silent wrong answer rather than a visible failure.
+
+**Consequence — the wipe is now destructive against shared infrastructure.** Pointing the wipe at the job's MCS means Lenny deletes all patient data on a remote MCS at job start. Correct for a dedicated engine, dangerous for a shared connectathon server. Tracked in #392; a scoped wipe (delete only the IDs this job pushes) is the likely resolution.
+
+**Alternatives considered:** (a) Snapshot credentials onto `Job` — rejected, secret sprawl. (b) Add `mcs_auth_type` mirroring `cdr_auth_type` — unnecessary: `mcs_id` alone distinguishes "no MCS linked" from "config deleted", so no migration was needed. (c) Fix only the 401 and leave push targeting the local engine — rejected, would have produced clean `200`s with every population at zero.
+
+**Status:** Verified against the CMS connectathon server — 401s went 122 → 0, all responses 200, and patient data reached the remote MCS (0 → 56 Patients). Remaining failures there are server-side (`HSEARCH800001`, Hibernate Search not initialized), not client-side.
