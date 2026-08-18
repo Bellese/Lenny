@@ -18,8 +18,8 @@ from app.db import get_session
 from app.dependencies import CDRContext, ConnectionContext, get_active_cdr, get_active_mcs
 from app.models.job import BatchStatus, Job, JobStatus, MeasureResult
 from app.models.validation import ExpectedResult
-from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups
-from app.services.validation import _extract_population_counts, compare_populations
+from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups, measure_exists
+from app.services.validation import _extract_population_counts, compare_populations, sanitize_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -198,6 +198,58 @@ async def create_job(
                 },
             )
     cdr_url = body.cdr_url or cdr.cdr_url
+
+    # Confirm the measure actually lives on the MCS this job will run against,
+    # before a Job row exists. Otherwise the job queues, starts, and fails deep
+    # in the worker with an opaque error — the user's real mistake being that
+    # they switched to an MCS that doesn't carry this measure.
+    mcs_auth_headers = await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
+    try:
+        found = await measure_exists(
+            body.measure_id,
+            mcs.mcs_url,
+            auth_headers=mcs_auth_headers,
+            timeout=float(mcs.request_timeout_seconds),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Measure existence check failed",
+            extra={"measure_id": body.measure_id, "mcs_id": mcs.id, "mcs_name": mcs.name},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "diagnostics": (
+                            f"Cannot reach measure calculation server '{mcs.name}' to verify "
+                            f"measure '{body.measure_id}': {sanitize_error(exc)}"
+                        ),
+                    }
+                ],
+            },
+        ) from exc
+    if not found:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "not-found",
+                        "diagnostics": (
+                            f"Measure '{body.measure_id}' does not exist on the active measure "
+                            f"calculation server '{mcs.name}'. Upload it there, or switch to an "
+                            f"MCS connection that has it."
+                        ),
+                    }
+                ],
+            },
+        )
 
     job = Job(
         measure_id=body.measure_id,

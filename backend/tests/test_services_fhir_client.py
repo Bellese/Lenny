@@ -11,8 +11,11 @@ from app.services.fhir_client import (
     _acquire_smart_token,
     _build_auth_headers,
     _chunk_request_entries,
+    _remap_valueset_ids_for_hapi,
+    delete_measure,
     evaluate_measure,
     list_measures,
+    measure_exists,
     push_resources,
     resolve_evaluated_resource,
     upload_measure_bundle,
@@ -1171,12 +1174,23 @@ async def test_snapshot_evaluated_resources_returns_none_when_no_refs():
 
 
 # ---------------------------------------------------------------------------
-# list_measures
+# Measure-management functions: base_url targeting (issue #396)
+#
+# These four tests are the regression guard for the whole bug. Every measure-
+# management call must hit the base_url it was handed and never
+# settings.MEASURE_ENGINE_URL — that env-var read is what made the measure list
+# ignore the connected MCS. `_ACTIVE_MCS` is deliberately different from the
+# env-var default (`http://hapi-fhir-measure:8080/fhir`) so a regression shows
+# up as a failed URL assertion rather than an accidental pass.
 # ---------------------------------------------------------------------------
+
+_ACTIVE_MCS = "https://attendee-mcs.example.com/fhir"
 
 
 async def test_list_measures(mock_measure_bundle):
-    """list_measures returns the bundle from the measure engine."""
+    """list_measures queries the passed base_url, not settings.MEASURE_ENGINE_URL."""
+    from app.config import settings
+
     mock_response = _make_response(200, mock_measure_bundle)
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
@@ -1185,19 +1199,20 @@ async def test_list_measures(mock_measure_bundle):
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        result = await list_measures()
+        result = await list_measures(_ACTIVE_MCS, auth_headers={"Authorization": "Bearer tok"})
 
     assert result["resourceType"] == "Bundle"
     assert len(result["entry"]) == 1
-
-
-# ---------------------------------------------------------------------------
-# upload_measure_bundle
-# ---------------------------------------------------------------------------
+    called_url = mock_ctx.get.await_args.args[0]
+    assert called_url.startswith(_ACTIVE_MCS)
+    assert settings.MEASURE_ENGINE_URL not in called_url
+    assert mock_ctx.get.await_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
 
 
 async def test_upload_measure_bundle():
-    """upload_measure_bundle posts a bundle and returns the response."""
+    """upload_measure_bundle POSTs to the passed base_url, not the env-var engine."""
+    from app.config import settings
+
     input_bundle = {"resourceType": "Bundle", "type": "transaction", "entry": []}
     response_bundle = {"resourceType": "Bundle", "type": "transaction-response"}
     mock_response = _make_response(200, response_bundle)
@@ -1208,9 +1223,126 @@ async def test_upload_measure_bundle():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        result = await upload_measure_bundle(input_bundle)
+        result = await upload_measure_bundle(
+            input_bundle,
+            _ACTIVE_MCS,
+            auth_headers={"Authorization": "Bearer tok"},
+        )
 
     assert result["type"] == "transaction-response"
+    posted_url = mock_ctx.post.await_args.args[0]
+    assert posted_url == _ACTIVE_MCS
+    assert posted_url != settings.MEASURE_ENGINE_URL
+    headers = mock_ctx.post.await_args.kwargs["headers"]
+    assert headers["Authorization"] == "Bearer tok"
+    assert headers["Content-Type"] == "application/fhir+json"
+
+
+async def test_delete_measure_targets_passed_base_url():
+    """delete_measure DELETEs against the passed base_url with its auth headers."""
+    from app.config import settings
+
+    mock_response = _make_response(204, {})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await delete_measure("CMS122", _ACTIVE_MCS, auth_headers={"Authorization": "Bearer tok"})
+
+    called_url = mock_ctx.delete.await_args.args[0]
+    assert called_url == f"{_ACTIVE_MCS}/Measure/CMS122"
+    assert settings.MEASURE_ENGINE_URL not in called_url
+    assert mock_ctx.delete.await_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
+
+
+async def test_remap_valueset_ids_queries_passed_base_url():
+    """_remap_valueset_ids_for_hapi resolves existing ValueSets on the upload target.
+
+    Querying the env-var engine here would rewrite ids to values that don't
+    exist on the server the bundle is about to be POSTed to.
+    """
+    from app.config import settings
+
+    entries = [
+        {
+            "resource": {"resourceType": "ValueSet", "id": "1014", "url": "http://vs.example.com/1014"},
+            "request": {"method": "PUT", "url": "ValueSet/1014"},
+        }
+    ]
+    existing = {"entry": [{"resource": {"id": "1014-20240112"}}]}
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=_make_response(200, existing))
+
+    out = await _remap_valueset_ids_for_hapi(entries, client, _ACTIVE_MCS, {"Authorization": "Bearer tok"})
+
+    called_url = client.get.await_args.args[0]
+    assert called_url == f"{_ACTIVE_MCS}/ValueSet"
+    assert settings.MEASURE_ENGINE_URL not in called_url
+    assert client.get.await_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
+    # And the remap itself still happened.
+    assert out[0]["resource"]["id"] == "1014-20240112"
+    assert out[0]["request"]["url"] == "ValueSet/1014-20240112"
+
+
+# ---------------------------------------------------------------------------
+# measure_exists
+# ---------------------------------------------------------------------------
+
+
+async def test_measure_exists_true_when_total_positive():
+    """total > 0 in the count bundle means the measure is present."""
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle", "total": 1}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        assert await measure_exists("CMS122", _ACTIVE_MCS) is True
+
+    assert mock_ctx.get.await_args.args[0] == f"{_ACTIVE_MCS}/Measure"
+    assert mock_ctx.get.await_args.kwargs["params"] == {"_id": "CMS122", "_summary": "count"}
+
+
+async def test_measure_exists_false_when_total_zero():
+    """total == 0 means the measure is absent — a normal answer, not an error."""
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle", "total": 0}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        assert await measure_exists("CMS122", _ACTIVE_MCS) is False
+
+
+async def test_measure_exists_propagates_transport_errors():
+    """Connection failures must NOT be swallowed into False.
+
+    POST /jobs distinguishes "measure absent" (400) from "MCS unreachable"
+    (502); collapsing the two here would make that impossible.
+    """
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(httpx.ConnectError):
+            await measure_exists("CMS122", _ACTIVE_MCS)
+
+
+async def test_measure_exists_propagates_http_status_errors():
+    """A 500 from the MCS raises rather than reporting the measure as missing."""
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=_make_response(500, {"resourceType": "OperationOutcome"}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await measure_exists("CMS122", _ACTIVE_MCS)
 
 
 # ---------------------------------------------------------------------------

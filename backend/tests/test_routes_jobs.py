@@ -1,8 +1,23 @@
 """Tests for job endpoints (POST /jobs, GET /jobs, GET /jobs/{id}, POST /jobs/{id}/cancel)."""
 
+from unittest.mock import AsyncMock, patch
+
 import pytest
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def measure_present():
+    """POST /jobs pre-flights the measure against the active MCS (issue #396).
+
+    Default every test in this module to "the measure is there" so the existing
+    creation tests keep exercising job creation rather than the pre-flight.
+    Tests that care about the pre-flight override `.return_value` /
+    `.side_effect` on the yielded mock.
+    """
+    with patch("app.routes.jobs.measure_exists", new_callable=AsyncMock, return_value=True) as mock:
+        yield mock
 
 
 async def test_create_job_valid(client):
@@ -1084,3 +1099,111 @@ def test_job_to_response_serializes_started_at():
 
     result_without = _job_to_response(job_without)
     assert result_without["started_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# POST /jobs measure pre-flight against the active MCS (issue #396)
+# ---------------------------------------------------------------------------
+
+
+async def _make_active_mcs(test_session):
+    """Activate a named MCS row and return it."""
+    from sqlalchemy import update as sa_update
+
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    await test_session.execute(sa_update(MCSConfig).values(is_active=False))
+    cfg = MCSConfig(
+        name="Attendee MCS",
+        mcs_url="https://attendee-mcs.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        is_default=False,
+        request_timeout_seconds=45,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+    return cfg
+
+
+_JOB_PAYLOAD = {
+    "measure_id": "CMS122",
+    "period_start": "2024-01-01",
+    "period_end": "2024-12-31",
+    "cdr_url": "https://example.com/fhir",
+}
+
+
+async def test_create_job_checks_measure_against_active_mcs(client, test_session, measure_present):
+    """The pre-flight targets the active MCS, with its timeout."""
+    await _make_active_mcs(test_session)
+
+    resp = await client.post("/jobs", json=_JOB_PAYLOAD)
+
+    assert resp.status_code == 201
+    assert measure_present.await_args.args[0] == "CMS122"
+    assert measure_present.await_args.args[1] == "https://attendee-mcs.example.com/fhir"
+    assert measure_present.await_args.kwargs["timeout"] == 45.0
+
+
+async def test_create_job_measure_absent_returns_400(client, test_session, measure_present):
+    """Measure missing on the active MCS → 400 naming the measure and the MCS."""
+    from sqlalchemy import select
+
+    from app.models.job import Job
+
+    await _make_active_mcs(test_session)
+    measure_present.return_value = False
+
+    resp = await client.post("/jobs", json=_JOB_PAYLOAD)
+
+    assert resp.status_code == 400
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    assert "CMS122" in detail["issue"][0]["diagnostics"]
+    assert "Attendee MCS" in detail["issue"][0]["diagnostics"]
+    # No Job row was inserted.
+    rows = (await test_session.execute(select(Job))).scalars().all()
+    assert rows == []
+
+
+async def test_create_job_mcs_unreachable_returns_502(client, test_session, measure_present):
+    """Transport failure on the pre-flight → 502, NOT 400.
+
+    A 400 would tell the user their measure doesn't exist when the real
+    problem is that their MCS is down.
+    """
+    import httpx
+    from sqlalchemy import select
+
+    from app.models.job import Job
+
+    await _make_active_mcs(test_session)
+    measure_present.side_effect = httpx.ConnectError("refused")
+
+    resp = await client.post("/jobs", json=_JOB_PAYLOAD)
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    assert "Attendee MCS" in detail["issue"][0]["diagnostics"]
+    rows = (await test_session.execute(select(Job))).scalars().all()
+    assert rows == []
+
+
+async def test_create_job_preflight_runs_after_ssrf_rejection(client, measure_present):
+    """An SSRF-rejected cdr_url still 400s without ever touching the MCS."""
+    resp = await client.post(
+        "/jobs",
+        json={
+            "measure_id": "CMS122",
+            "period_start": "2024-01-01",
+            "period_end": "2024-12-31",
+            "cdr_url": "https://169.254.169.254/fhir",
+        },
+    )
+    assert resp.status_code == 400
+    assert "SSRF protection" in resp.json()["detail"]["issue"][0]["diagnostics"]
+    measure_present.assert_not_awaited()

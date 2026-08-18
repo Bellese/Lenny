@@ -79,11 +79,18 @@ async def health_check(
             resp = await client.get(me_url)
             latency_ms = round((time.monotonic() - t0) * 1000)
             if resp.status_code == 200:
-                status["measure_engine"] = {"status": "connected", "name": mcs.name}
+                status["measure_engine"] = {
+                    "status": "connected",
+                    "id": mcs.id,
+                    "name": mcs.name,
+                    "is_read_only": mcs.is_read_only,
+                }
             else:
                 status["measure_engine"] = {
                     "status": "disconnected",
+                    "id": mcs.id,
                     "name": mcs.name,
+                    "is_read_only": mcs.is_read_only,
                     "error": f"HTTP {resp.status_code}",
                     "error_details": _http_error_details(me_url, resp.status_code, latency_ms),
                 }
@@ -92,7 +99,9 @@ async def health_check(
         latency_ms = round((time.monotonic() - t0) * 1000)
         status["measure_engine"] = {
             "status": "disconnected",
+            "id": mcs.id,
             "name": mcs.name,
+            "is_read_only": mcs.is_read_only,
             "error": sanitize_error(exc)[:200],
             "error_details": _network_error_details(me_url, exc, latency_ms),
         }

@@ -45,7 +45,7 @@ class ConnectionContext:
     is_default: bool
     cdr_url: str = ""
     mcs_url: str = ""
-    is_read_only: bool = False  # CDR-specific; default for other kinds
+    is_read_only: bool = False  # Shared across kinds (issue #396) — blocks writes
     request_timeout_seconds: int = 30
     kind: ConnectionKind = ConnectionKind.cdr
 
@@ -112,6 +112,9 @@ async def get_active_mcs(session: AsyncSession = Depends(get_session)) -> Connec
             auth_credentials=None,
             is_default=True,
             mcs_url=settings.MEASURE_ENGINE_URL,
+            # The built-in local measure engine is writable — uploading and
+            # deleting measure bundles against it is the whole point.
+            is_read_only=False,
             request_timeout_seconds=30,
             kind=ConnectionKind.mcs,
         )
@@ -122,6 +125,7 @@ async def get_active_mcs(session: AsyncSession = Depends(get_session)) -> Connec
         auth_credentials=cfg.auth_credentials,
         is_default=cfg.is_default,
         mcs_url=cfg.mcs_url,
+        is_read_only=cfg.is_read_only,
         request_timeout_seconds=cfg.request_timeout_seconds,
         kind=ConnectionKind.mcs,
     )

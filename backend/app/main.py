@@ -115,6 +115,23 @@ async def _run_schema_migrations(conn) -> None:
         ]:
             await conn.execute(text(stmt))
 
+        # Issue #396: is_read_only moved up from CDRConfig to ConnectionConfigMixin,
+        # so mcs_configs gains the column too. Wrapped in a table-existence guard
+        # (same pattern as the bundle_uploads ALTER below) because a DB old enough
+        # to predate the MCS table gets the column from create_all instead — that
+        # runs after this function.
+        await conn.execute(
+            text("""
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'mcs_configs') THEN
+                    ALTER TABLE mcs_configs ADD COLUMN IF NOT EXISTS is_read_only BOOLEAN NOT NULL DEFAULT FALSE;
+                END IF;
+            END
+            $$;
+            """)
+        )
+
         # Normalize legacy CDR rows before adding unique indexes. Production may
         # already contain duplicate names or multiple active/default rows created
         # before these constraints existed.

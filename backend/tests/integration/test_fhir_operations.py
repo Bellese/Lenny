@@ -29,10 +29,7 @@ pytestmark = pytest.mark.integration
 
 async def test_list_measures(measure_url):
     """list_measures() should return a bundle containing CMS122."""
-    from unittest.mock import patch
-
-    with patch("app.config.settings.MEASURE_ENGINE_URL", measure_url):
-        bundle = await list_measures()
+    bundle = await list_measures(measure_url)
 
     assert bundle["resourceType"] == "Bundle"
     entries = bundle.get("entry", [])
@@ -47,8 +44,6 @@ async def test_list_measures(measure_url):
 
 async def test_upload_and_list_measure(measure_url):
     """Uploading a measure bundle should make the measure appear in the list."""
-    from unittest.mock import patch
-
     # A minimal measure bundle to upload
     bundle = {
         "resourceType": "Bundle",
@@ -72,26 +67,25 @@ async def test_upload_and_list_measure(measure_url):
         ],
     }
 
-    with patch("app.config.settings.MEASURE_ENGINE_URL", measure_url):
-        result = await upload_measure_bundle(bundle)
-        assert result["resourceType"] == "Bundle"
+    result = await upload_measure_bundle(bundle, measure_url)
+    assert result["resourceType"] == "Bundle"
 
-        # HAPI v7 search result cache (disabled via reuse_cached_search_results_millis=0
-        # in docker-compose.test.yml). Short retry kept as safety net for any
-        # residual indexing lag.
-        measure_ids: list[str] = []
-        for _ in range(3):
-            listed = await list_measures()
-            measure_ids = [
-                e["resource"]["id"]
-                for e in listed.get("entry", [])
-                if e.get("resource", {}).get("resourceType") == "Measure"
-            ]
-            if "test-integration-measure" in measure_ids:
-                break
-            await asyncio.sleep(1)
+    # HAPI v7 search result cache (disabled via reuse_cached_search_results_millis=0
+    # in docker-compose.test.yml). Short retry kept as safety net for any
+    # residual indexing lag.
+    measure_ids: list[str] = []
+    for _ in range(3):
+        listed = await list_measures(measure_url)
+        measure_ids = [
+            e["resource"]["id"]
+            for e in listed.get("entry", [])
+            if e.get("resource", {}).get("resourceType") == "Measure"
+        ]
+        if "test-integration-measure" in measure_ids:
+            break
+        await asyncio.sleep(1)
 
-        assert "test-integration-measure" in measure_ids, f"Measure not found after upload. IDs present: {measure_ids}"
+    assert "test-integration-measure" in measure_ids, f"Measure not found after upload. IDs present: {measure_ids}"
 
 
 # ---------------------------------------------------------------------------

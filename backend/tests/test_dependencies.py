@@ -136,3 +136,55 @@ async def test_activate_concurrent_raises_integrity_error(test_session):
     with pytest.raises(IntegrityError):
         await test_session.commit()
     await test_session.rollback()
+
+
+# ---------------------------------------------------------------------------
+# get_active_mcs: is_read_only (issue #396)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_active_mcs_fallback_is_writable(test_session):
+    """No active MCS row → the built-in local engine, which IS writable.
+
+    Defaulting this to True would break measure upload/delete on a stock
+    install, where no mcs_configs row exists yet.
+    """
+    from app.dependencies import get_active_mcs
+
+    ctx = await get_active_mcs(session=test_session)
+    assert ctx.kind == ConnectionKind.mcs
+    assert ctx.is_read_only is False
+
+
+@pytest.mark.asyncio
+async def test_get_active_mcs_populates_is_read_only(test_session):
+    """The DB branch carries the row's is_read_only through to the context."""
+    from app.dependencies import get_active_mcs
+    from app.models.mcs_config import MCSConfig
+
+    cfg = MCSConfig(
+        mcs_url="https://shared-mcs.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        name="Shared MCS",
+        is_default=False,
+        is_read_only=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+
+    ctx = await get_active_mcs(session=test_session)
+    assert ctx.kind == ConnectionKind.mcs
+    assert ctx.name == "Shared MCS"
+    assert ctx.mcs_url == "https://shared-mcs.example.com/fhir"
+    assert ctx.is_read_only is True
+
+
+def test_is_read_only_is_shared_by_the_mixin():
+    """is_read_only lives on the mixin, so every connection kind gets it."""
+    from app.models.mcs_config import MCSConfig
+
+    assert "is_read_only" in ConnectionConfigMixin.__dict__
+    assert "is_read_only" in CDRConfig.__table__.columns
+    assert "is_read_only" in MCSConfig.__table__.columns

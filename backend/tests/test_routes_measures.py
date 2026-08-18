@@ -1,14 +1,76 @@
-"""Tests for measure endpoints (GET /measures, POST /measures/upload)."""
+"""Tests for measure endpoints (GET /measures, POST /measures/upload, DELETE /measures/{id})."""
 
 import json
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+import pytest_asyncio
 
 import app.routes.measures as measures_module
 
 pytestmark = pytest.mark.asyncio
+
+
+@pytest.fixture(autouse=True)
+def _reset_limiter():
+    """Reset the 10/minute upload rate limiter so tests don't 429 each other."""
+    from app.limiter import limiter
+
+    limiter.reset()
+
+
+@pytest_asyncio.fixture
+async def active_mcs(test_session):
+    """Make a named, writable MCS the active connection and return the row.
+
+    Without a row in `mcs_configs`, `get_active_mcs` falls back to the env-var
+    engine — which is precisely the state issue #396 was about, so tests that
+    care about MCS scoping need a real row.
+    """
+    from sqlalchemy import update as sa_update
+
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    await test_session.execute(sa_update(MCSConfig).values(is_active=False))
+    cfg = MCSConfig(
+        name="Attendee MCS",
+        mcs_url="https://attendee-mcs.example.com/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok"},
+        is_active=True,
+        is_default=False,
+        is_read_only=False,
+        request_timeout_seconds=45,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+    return cfg
+
+
+@pytest_asyncio.fixture
+async def read_only_mcs(test_session):
+    """Make a read-only MCS the active connection."""
+    from sqlalchemy import update as sa_update
+
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    await test_session.execute(sa_update(MCSConfig).values(is_active=False))
+    cfg = MCSConfig(
+        name="Shared Read-Only MCS",
+        mcs_url="https://shared-mcs.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        is_default=False,
+        is_read_only=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+    return cfg
 
 
 async def test_get_measures_success(client, mock_measure_bundle):
@@ -30,6 +92,57 @@ async def test_get_measures_success(client, mock_measure_bundle):
     assert m["title"] == "Test Measure"
     assert m["version"] == "1.0"
     assert m["status"] == "active"
+
+
+async def test_get_measures_reads_from_active_mcs(client, mock_measure_bundle, active_mcs):
+    """Regression (issue #396): GET /measures hits the ACTIVE MCS, not MEASURE_ENGINE_URL."""
+    from app.config import settings
+
+    with patch(
+        "app.routes.measures.list_measures",
+        new_callable=AsyncMock,
+        return_value=mock_measure_bundle,
+    ) as mock_list:
+        resp = await client.get("/measures")
+
+    assert resp.status_code == 200
+    called_base = mock_list.await_args.args[0]
+    assert called_base == "https://attendee-mcs.example.com/fhir"
+    assert called_base != settings.MEASURE_ENGINE_URL
+    # Credentials + per-connection timeout are threaded through.
+    assert mock_list.await_args.kwargs["auth_headers"] == {"Authorization": "Bearer tok"}
+    assert mock_list.await_args.kwargs["timeout"] == 45.0
+
+
+async def test_get_measures_includes_mcs_block(client, mock_measure_bundle, active_mcs):
+    """GET /measures reports which MCS the list came from."""
+    with patch(
+        "app.routes.measures.list_measures",
+        new_callable=AsyncMock,
+        return_value=mock_measure_bundle,
+    ):
+        resp = await client.get("/measures")
+
+    data = resp.json()
+    assert data["mcs"] == {
+        "id": active_mcs.id,
+        "name": "Attendee MCS",
+        "url": "https://attendee-mcs.example.com/fhir",
+    }
+
+
+async def test_get_measures_502_names_the_mcs(client, active_mcs):
+    """A failed upstream call names the MCS rather than falling back to the local engine."""
+    with patch(
+        "app.routes.measures.list_measures",
+        new_callable=AsyncMock,
+        side_effect=ConnectionError("Connection refused"),
+    ):
+        resp = await client.get("/measures")
+
+    assert resp.status_code == 502
+    diag = resp.json()["detail"]["issue"][0]["diagnostics"]
+    assert "Attendee MCS" in diag
 
 
 async def test_get_measures_engine_unreachable(client):
@@ -139,7 +252,9 @@ async def test_upload_measure_engine_rejects(client):
 
     assert resp.status_code == 502
     data = resp.json()["detail"]
-    assert "Measure engine rejected bundle" in data["issue"][0]["diagnostics"]
+    diag = data["issue"][0]["diagnostics"]
+    assert diag.startswith("Measure engine ")
+    assert "rejected bundle" in diag
 
 
 async def test_get_measures_engine_unreachable_does_not_leak_hostname(client):
@@ -238,7 +353,7 @@ async def test_delete_measure_success(client):
         resp = await client.delete("/measures/measure-1")
 
     assert resp.status_code == 204
-    mock_delete.assert_awaited_once_with("measure-1")
+    assert mock_delete.await_args.args[0] == "measure-1"
 
 
 async def test_delete_measure_not_found(client):
@@ -269,3 +384,99 @@ async def test_delete_measure_engine_error(client):
     assert resp.status_code == 502
     data = resp.json()["detail"]
     assert "Cannot reach measure engine" in data["issue"][0]["diagnostics"]
+
+
+# ---------------------------------------------------------------------------
+# Active-MCS targeting + read-only guard (issue #396)
+# ---------------------------------------------------------------------------
+
+
+async def test_upload_measure_targets_active_mcs(client, active_mcs):
+    """POST /measures/upload sends the bundle to the active MCS, not the env-var engine."""
+    from app.config import settings
+
+    bundle = {"resourceType": "Bundle", "type": "transaction", "entry": []}
+    with patch(
+        "app.routes.measures.upload_measure_bundle",
+        new_callable=AsyncMock,
+        return_value={"resourceType": "Bundle", "type": "transaction-response"},
+    ) as mock_upload:
+        resp = await client.post(
+            "/measures/upload",
+            files={"file": ("bundle.json", json.dumps(bundle).encode(), "application/json")},
+        )
+
+    assert resp.status_code == 200
+    called_base = mock_upload.await_args.args[1]
+    assert called_base == "https://attendee-mcs.example.com/fhir"
+    assert called_base != settings.MEASURE_ENGINE_URL
+    assert mock_upload.await_args.kwargs["auth_headers"] == {"Authorization": "Bearer tok"}
+    assert mock_upload.await_args.kwargs["timeout"] == 45.0
+
+
+async def test_delete_measure_targets_active_mcs(client, active_mcs):
+    """DELETE /measures/{id} deletes from the active MCS, not the env-var engine."""
+    from app.config import settings
+
+    with patch(
+        "app.routes.measures.delete_measure",
+        new_callable=AsyncMock,
+        return_value=None,
+    ) as mock_delete:
+        resp = await client.delete("/measures/measure-1")
+
+    assert resp.status_code == 204
+    called_base = mock_delete.await_args.args[1]
+    assert called_base == "https://attendee-mcs.example.com/fhir"
+    assert called_base != settings.MEASURE_ENGINE_URL
+    assert mock_delete.await_args.kwargs["auth_headers"] == {"Authorization": "Bearer tok"}
+
+
+async def test_upload_measure_read_only_mcs_returns_403(client, read_only_mcs):
+    """A read-only MCS rejects uploads with a 403 OperationOutcome."""
+    bundle = {"resourceType": "Bundle", "type": "transaction", "entry": []}
+    with patch(
+        "app.routes.measures.upload_measure_bundle",
+        new_callable=AsyncMock,
+    ) as mock_upload:
+        resp = await client.post(
+            "/measures/upload",
+            files={"file": ("bundle.json", json.dumps(bundle).encode(), "application/json")},
+        )
+
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    assert detail["issue"][0]["code"] == "forbidden"
+    assert "Shared Read-Only MCS" in detail["issue"][0]["diagnostics"]
+    mock_upload.assert_not_awaited()
+
+
+async def test_upload_measure_read_only_rejected_before_reading_body(client, read_only_mcs):
+    """The 403 fires before the upload body is read.
+
+    A read-only MCS must not require transferring a 100MB bundle to learn it
+    can't be written. The file here is *not* valid JSON and doesn't end in
+    .json — both of which produce a 400 in the normal path — so a 403 proves
+    neither the filename check nor the body read happened first.
+    """
+    resp = await client.post(
+        "/measures/upload",
+        files={"file": ("bundle.xml", b"not json at all{{{", "application/xml")},
+    )
+    assert resp.status_code == 403
+
+
+async def test_delete_measure_read_only_mcs_returns_403(client, read_only_mcs):
+    """A read-only MCS rejects deletes with a 403 OperationOutcome."""
+    with patch(
+        "app.routes.measures.delete_measure",
+        new_callable=AsyncMock,
+    ) as mock_delete:
+        resp = await client.delete("/measures/measure-1")
+
+    assert resp.status_code == 403
+    detail = resp.json()["detail"]
+    assert detail["issue"][0]["code"] == "forbidden"
+    assert "Shared Read-Only MCS" in detail["issue"][0]["diagnostics"]
+    mock_delete.assert_not_awaited()
