@@ -21,6 +21,42 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/measures", tags=["measures"])
 
 
+async def _resolve_auth(mcs: ConnectionContext) -> dict[str, str]:
+    """Resolve MCS credentials, converting failures into a 502 OperationOutcome.
+
+    SMART auth makes a token-endpoint round trip, so `_build_auth_headers` can
+    fail exactly like any other upstream call (`ValueError` on malformed
+    credentials, `HTTPStatusError` from the token endpoint). Left unguarded it
+    escapes as a bare 500 with no OperationOutcome body — the one MCS failure
+    mode on this surface that wouldn't name the server.
+
+    Deliberately a wrapper rather than moving the call inside each handler's
+    existing `try`: `delete_measure_route` catches `httpx.HTTPStatusError` and
+    maps 404 to "measure not found", which would mis-report a 404 from a SMART
+    token endpoint as a missing measure.
+    """
+    try:
+        return await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
+    except Exception as exc:
+        logger.exception(
+            "Failed to resolve MCS credentials",
+            extra={"mcs_id": mcs.id, "mcs_name": mcs.name},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "diagnostics": (f"Cannot authenticate to measure engine '{mcs.name}': {sanitize_error(exc)}"),
+                    }
+                ],
+            },
+        ) from exc
+
+
 def _read_only_outcome(mcs: ConnectionContext, action: str) -> HTTPException:
     """403 OperationOutcome for a write attempt against a read-only MCS."""
     return HTTPException(
@@ -48,7 +84,7 @@ async def get_measures(mcs: ConnectionContext = Depends(get_active_mcs)) -> dict
     No fallback to the local engine: if the connected MCS is unreachable the
     caller gets a 502 naming it, not a silently different measure list.
     """
-    auth_headers = await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
+    auth_headers = await _resolve_auth(mcs)
     try:
         bundle = await list_measures(
             mcs.mcs_url,
@@ -109,8 +145,13 @@ async def upload_measure(
     Accepts a JSON file containing a FHIR Bundle with Measure and Library
     resources. POSTs it to the active MCS as a transaction Bundle.
     """
-    # Checked before the body is read so a large upload to a read-only MCS is
-    # rejected without transferring it.
+    # Checked before `file.read()` and before any upstream call, so a read-only
+    # MCS costs no memory and no network round trip.
+    #
+    # NOT a guard against transferring the bytes: Starlette has already parsed
+    # the multipart body into `file` (spooling to disk past its threshold)
+    # before this handler is entered. Rejecting the transfer itself would have
+    # to happen at the ASGI/proxy layer, which this is not.
     if mcs.is_read_only:
         raise _read_only_outcome(mcs, "upload measure bundles")
 
@@ -176,7 +217,7 @@ async def upload_measure(
             },
         )
 
-    auth_headers = await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
+    auth_headers = await _resolve_auth(mcs)
     try:
         result = await upload_measure_bundle(
             bundle_json,
@@ -220,7 +261,7 @@ async def delete_measure_route(
     if mcs.is_read_only:
         raise _read_only_outcome(mcs, "delete measures")
 
-    auth_headers = await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
+    auth_headers = await _resolve_auth(mcs)
     try:
         await delete_measure(
             measure_id,

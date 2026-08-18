@@ -1238,6 +1238,50 @@ async def test_upload_measure_bundle():
     assert headers["Content-Type"] == "application/fhir+json"
 
 
+async def test_upload_measure_bundle_threads_base_url_into_remap():
+    """upload_measure_bundle hands its base_url + credentials to the ValueSet remap.
+
+    `_remap_valueset_ids_for_hapi` is tested directly elsewhere, so only the
+    wiring is at risk — but "the passed base_url is used everywhere" is the
+    central guard of issue #396, and an untested wire is where it would rot.
+    Asserted with the collaborator mocked so the assertion can't be satisfied
+    by the remap silently no-opping on a non-200 lookup.
+    """
+    from app.config import settings
+
+    input_bundle = {
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{"resource": {"resourceType": "ValueSet", "id": "1014", "url": "http://vs.example.com/1014"}}],
+    }
+    mock_response = _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+    with (
+        patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx,
+        patch(
+            "app.services.fhir_client._remap_valueset_ids_for_hapi",
+            new_callable=AsyncMock,
+            side_effect=lambda entries, client, base_url, auth_headers=None: entries,
+        ) as mock_remap,
+    ):
+        mock_ctx = AsyncMock()
+        mock_ctx.post = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await upload_measure_bundle(
+            input_bundle,
+            _ACTIVE_MCS,
+            auth_headers={"Authorization": "Bearer tok"},
+        )
+
+    mock_remap.assert_awaited_once()
+    remap_base = mock_remap.await_args.args[2]
+    assert remap_base == _ACTIVE_MCS
+    assert remap_base != settings.MEASURE_ENGINE_URL
+    assert mock_remap.await_args.args[3] == {"Authorization": "Bearer tok"}
+
+
 async def test_delete_measure_targets_passed_base_url():
     """delete_measure DELETEs against the passed base_url with its auth headers."""
     from app.config import settings

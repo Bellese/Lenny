@@ -371,6 +371,7 @@ async def test_delete_measure_success(client):
         resp = await client.delete("/measures/measure-1")
 
     assert resp.status_code == 204
+    mock_delete.assert_awaited_once()
     assert mock_delete.await_args.args[0] == "measure-1"
 
 
@@ -471,12 +472,15 @@ async def test_upload_measure_read_only_mcs_returns_403(client, read_only_mcs):
 
 
 async def test_upload_measure_read_only_rejected_before_reading_body(client, read_only_mcs):
-    """The 403 fires before the upload body is read.
+    """The 403 fires before the upload body is read into memory.
 
-    A read-only MCS must not require transferring a 100MB bundle to learn it
-    can't be written. The file here is *not* valid JSON and doesn't end in
-    .json — both of which produce a 400 in the normal path — so a 403 proves
-    neither the filename check nor the body read happened first.
+    The file here is *not* valid JSON and doesn't end in .json — both of which
+    produce a 400 in the normal path — so a 403 proves neither the filename
+    check nor `file.read()` happened first.
+
+    Note this does NOT mean the bytes were never transferred: Starlette parses
+    the multipart body before the handler runs. What it buys is no read into
+    memory and no upstream round trip.
     """
     resp = await client.post(
         "/measures/upload",
@@ -497,4 +501,84 @@ async def test_delete_measure_read_only_mcs_returns_403(client, read_only_mcs):
     detail = resp.json()["detail"]
     assert detail["issue"][0]["code"] == "forbidden"
     assert "Shared Read-Only MCS" in detail["issue"][0]["diagnostics"]
+    mock_delete.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Credential-resolution failures (SMART token endpoint) return 502, not 500
+# ---------------------------------------------------------------------------
+
+
+async def test_get_measures_credential_failure_returns_502(client, active_mcs):
+    """A SMART token-endpoint failure is a 502 OperationOutcome naming the MCS.
+
+    `_build_auth_headers` makes a network call for SMART auth, so it fails the
+    same ways the measure query does. Unguarded it escapes as a bare 500 with
+    no OperationOutcome body — the one MCS failure mode on this surface that
+    wouldn't name the server.
+    """
+    with (
+        patch(
+            "app.routes.measures._build_auth_headers",
+            new_callable=AsyncMock,
+            side_effect=ValueError("token endpoint returned no access_token"),
+        ),
+        patch("app.routes.measures.list_measures", new_callable=AsyncMock) as mock_list,
+    ):
+        resp = await client.get("/measures")
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    assert "Attendee MCS" in detail["issue"][0]["diagnostics"]
+    # Never attempted the upstream call with no credentials.
+    mock_list.assert_not_awaited()
+
+
+async def test_upload_measure_credential_failure_returns_502(client, active_mcs):
+    """Same guard on the upload route."""
+    bundle = {"resourceType": "Bundle", "type": "transaction", "entry": []}
+    with (
+        patch(
+            "app.routes.measures._build_auth_headers",
+            new_callable=AsyncMock,
+            side_effect=ValueError("token endpoint returned no access_token"),
+        ),
+        patch("app.routes.measures.upload_measure_bundle", new_callable=AsyncMock) as mock_upload,
+    ):
+        resp = await client.post(
+            "/measures/upload",
+            files={"file": ("bundle.json", json.dumps(bundle).encode(), "application/json")},
+        )
+
+    assert resp.status_code == 502
+    assert "Attendee MCS" in resp.json()["detail"]["issue"][0]["diagnostics"]
+    mock_upload.assert_not_awaited()
+
+
+async def test_delete_measure_credential_failure_is_not_reported_as_not_found(client, active_mcs):
+    """A 404 from a SMART token endpoint must not be mapped to "measure not found".
+
+    This is why credential resolution is wrapped separately rather than moved
+    inside the handler's own `try`: that block maps `httpx.HTTPStatusError`
+    with status 404 to a 404 "Measure {id} not found", which would blame the
+    measure for an auth misconfiguration.
+    """
+    request = httpx.Request("POST", "https://idp.example.com/token")
+    response = httpx.Response(404, request=request)
+
+    with (
+        patch(
+            "app.routes.measures._build_auth_headers",
+            new_callable=AsyncMock,
+            side_effect=httpx.HTTPStatusError("not found", request=request, response=response),
+        ),
+        patch("app.routes.measures.delete_measure", new_callable=AsyncMock) as mock_delete,
+    ):
+        resp = await client.delete("/measures/measure-1")
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail["issue"][0]["code"] != "not-found"
+    assert "Attendee MCS" in detail["issue"][0]["diagnostics"]
     mock_delete.assert_not_awaited()

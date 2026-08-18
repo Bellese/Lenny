@@ -1251,3 +1251,27 @@ async def test_create_job_preflight_runs_after_ssrf_rejection(client, measure_pr
     assert resp.status_code == 400
     assert "SSRF protection" in resp.json()["detail"]["issue"][0]["diagnostics"]
     measure_present.assert_not_awaited()
+
+
+async def test_create_job_credential_failure_returns_502(client, test_session, measure_present):
+    """A SMART token failure on the pre-flight is a 502 naming the MCS, not a 500."""
+    from sqlalchemy import select
+
+    from app.models.job import Job
+
+    await _make_active_mcs(test_session)
+
+    with patch(
+        "app.routes.jobs._build_auth_headers",
+        new_callable=AsyncMock,
+        side_effect=ValueError("token endpoint returned no access_token"),
+    ):
+        resp = await client.post("/jobs", json=_JOB_PAYLOAD)
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    assert "Attendee MCS" in detail["issue"][0]["diagnostics"]
+    measure_present.assert_not_awaited()
+    rows = (await test_session.execute(select(Job))).scalars().all()
+    assert rows == []

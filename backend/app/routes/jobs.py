@@ -214,8 +214,14 @@ async def create_job(
     # evaluation, which legitimately runs for many minutes (cap is 1800s), and
     # this is an interactive request. The pre-flight is a metadata count query;
     # if the MCS can't answer it in 10s, "unreachable → 502" is the right answer.
-    mcs_auth_headers = await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
+    #
+    # `_build_auth_headers` is inside the `try` on purpose: SMART auth makes a
+    # token-endpoint round trip, so credential resolution fails the same ways
+    # the count query does and deserves the same 502 OperationOutcome rather
+    # than a bare 500. (Unlike the measures routes, nothing in this `except`
+    # chain special-cases a status code, so no mis-mapping is possible here.)
     try:
+        mcs_auth_headers = await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
         found = await measure_exists(
             body.measure_id,
             mcs.mcs_url,
