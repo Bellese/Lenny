@@ -115,7 +115,11 @@ async def test_get_measures_reads_from_active_mcs(client, mock_measure_bundle, a
 
 
 async def test_get_measures_includes_mcs_block(client, mock_measure_bundle, active_mcs):
-    """GET /measures reports which MCS the list came from."""
+    """GET /measures reports which MCS the list came from — identity only.
+
+    `url` is deliberately absent: the 502 path sanitizes internal hostnames out
+    of its diagnostics, and publishing mcs_url on the 200 path would undo that.
+    """
     with patch(
         "app.routes.measures.list_measures",
         new_callable=AsyncMock,
@@ -124,11 +128,25 @@ async def test_get_measures_includes_mcs_block(client, mock_measure_bundle, acti
         resp = await client.get("/measures")
 
     data = resp.json()
-    assert data["mcs"] == {
-        "id": active_mcs.id,
-        "name": "Attendee MCS",
-        "url": "https://attendee-mcs.example.com/fhir",
-    }
+    assert data["mcs"] == {"id": active_mcs.id, "name": "Attendee MCS"}
+
+
+async def test_get_measures_does_not_leak_mcs_url(client, mock_measure_bundle):
+    """The success payload must not publish the MCS base URL.
+
+    The default local engine is `http://hapi-fhir-measure:8080/fhir`; the 502
+    path strips that hostname, so the 200 path must not hand it out either.
+    """
+    with patch(
+        "app.routes.measures.list_measures",
+        new_callable=AsyncMock,
+        return_value=mock_measure_bundle,
+    ):
+        resp = await client.get("/measures")
+
+    assert "url" not in resp.json()["mcs"]
+    assert "hapi-fhir-measure" not in resp.text
+    assert "8080" not in resp.text
 
 
 async def test_get_measures_502_names_the_mcs(client, active_mcs):

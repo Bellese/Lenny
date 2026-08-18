@@ -71,10 +71,14 @@ async def get_measures(mcs: ConnectionContext = Depends(get_active_mcs)) -> dict
                         "description": resource.get("description"),
                     }
                 )
+        # Identity only — deliberately no `url`. The 502 path below sanitizes
+        # internal hostnames out of its diagnostics; publishing mcs_url on the
+        # 200 path would undo that for no benefit. Consumers that need the URL
+        # read it from GET /settings/mcs-connections.
         return {
             "measures": measures,
             "total": len(measures),
-            "mcs": {"id": mcs.id, "name": mcs.name, "url": mcs.mcs_url},
+            "mcs": {"id": mcs.id, "name": mcs.name},
         }
     except Exception as exc:
         logger.exception("Failed to fetch measures from engine", extra={"mcs_id": mcs.id, "mcs_name": mcs.name})

@@ -1137,7 +1137,7 @@ _JOB_PAYLOAD = {
 
 
 async def test_create_job_checks_measure_against_active_mcs(client, test_session, measure_present):
-    """The pre-flight targets the active MCS, with its timeout."""
+    """The pre-flight targets the active MCS."""
     await _make_active_mcs(test_session)
 
     resp = await client.post("/jobs", json=_JOB_PAYLOAD)
@@ -1145,7 +1145,51 @@ async def test_create_job_checks_measure_against_active_mcs(client, test_session
     assert resp.status_code == 201
     assert measure_present.await_args.args[0] == "CMS122"
     assert measure_present.await_args.args[1] == "https://attendee-mcs.example.com/fhir"
-    assert measure_present.await_args.kwargs["timeout"] == 45.0
+
+
+async def test_create_job_preflight_timeout_is_bounded(client, test_session, measure_present):
+    """The pre-flight is capped at 10s regardless of the connection's timeout.
+
+    `request_timeout_seconds` is sized for measure evaluation (cap 1800s). Using
+    it here would let one hung MCS hang an interactive POST /jobs for half an
+    hour. The pre-flight is a `_summary=count` lookup; 10s is generous.
+    """
+    from app.routes.jobs import _PREFLIGHT_TIMEOUT_SECONDS
+
+    assert _PREFLIGHT_TIMEOUT_SECONDS == 10
+
+    await _make_active_mcs(test_session)  # request_timeout_seconds=45
+
+    resp = await client.post("/jobs", json=_JOB_PAYLOAD)
+
+    assert resp.status_code == 201
+    assert measure_present.await_args.kwargs["timeout"] == 10.0
+
+
+async def test_create_job_preflight_honors_shorter_connection_timeout(client, test_session, measure_present):
+    """A connection configured tighter than the ceiling still wins (it's a min())."""
+    from sqlalchemy import update as sa_update
+
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    await test_session.execute(sa_update(MCSConfig).values(is_active=False))
+    test_session.add(
+        MCSConfig(
+            name="Impatient MCS",
+            mcs_url="https://impatient-mcs.example.com/fhir",
+            auth_type=AuthType.none,
+            is_active=True,
+            is_default=False,
+            request_timeout_seconds=3,
+        )
+    )
+    await test_session.commit()
+
+    resp = await client.post("/jobs", json=_JOB_PAYLOAD)
+
+    assert resp.status_code == 201
+    assert measure_present.await_args.kwargs["timeout"] == 3.0
 
 
 async def test_create_job_measure_absent_returns_400(client, test_session, measure_present):

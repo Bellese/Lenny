@@ -32,6 +32,12 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 _GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,256}$")
 
+# Ceiling for the `measure_exists` pre-flight on POST /jobs. The connection's own
+# `request_timeout_seconds` (up to 1800s) is sized for measure evaluation, not for
+# a `_summary=count` lookup on an interactive request. Taken as a min() with the
+# connection value so a deliberately short connection timeout still wins.
+_PREFLIGHT_TIMEOUT_SECONDS = 10
+
 
 class JobCreate(BaseModel):
     measure_id: str
@@ -203,13 +209,18 @@ async def create_job(
     # before a Job row exists. Otherwise the job queues, starts, and fails deep
     # in the worker with an opaque error — the user's real mistake being that
     # they switched to an MCS that doesn't carry this measure.
+    #
+    # Deliberately NOT mcs.request_timeout_seconds: that is sized for measure
+    # evaluation, which legitimately runs for many minutes (cap is 1800s), and
+    # this is an interactive request. The pre-flight is a metadata count query;
+    # if the MCS can't answer it in 10s, "unreachable → 502" is the right answer.
     mcs_auth_headers = await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
     try:
         found = await measure_exists(
             body.measure_id,
             mcs.mcs_url,
             auth_headers=mcs_auth_headers,
-            timeout=float(mcs.request_timeout_seconds),
+            timeout=float(min(mcs.request_timeout_seconds, _PREFLIGHT_TIMEOUT_SECONDS)),
         )
     except Exception as exc:
         logger.warning(
