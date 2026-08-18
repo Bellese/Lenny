@@ -78,6 +78,35 @@ describe('JobsPage — stale measure_id reset on MCS switch (#396)', () => {
     expect(screen.queryByRole('option', { name: 'CMS999' })).not.toBeInTheDocument();
   });
 
+  test('clears both the dropdown and a stale measure_id when the refetch after an MCS switch fails', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
+    api.getGroups = jest.fn().mockResolvedValue({ groups: [] });
+    api.getMeasures = jest.fn()
+      .mockResolvedValueOnce({ measures: [{ id: 'CMS999' }] })
+      .mockRejectedValueOnce(new Error('unreachable'));
+
+    const { rerender } = render(<Harness mcsId="mcs-a" />);
+    await waitFor(() => expect(api.getMeasures).toHaveBeenCalledTimes(1));
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    const select = await screen.findByLabelText('Measure');
+    await waitFor(() => expect(select.value).toBe('CMS999'));
+
+    // Switch MCS, but the measures refetch for the NEW connection fails —
+    // the dropdown must not keep offering the OLD MCS's measures, and the
+    // now-stale selection must not be left in formData either (#396).
+    rerender(<Harness mcsId="mcs-b" />);
+
+    await waitFor(() => expect(api.getMeasures).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(select.value).toBe(''));
+    expect(screen.queryByRole('option', { name: 'CMS999' })).not.toBeInTheDocument();
+
+    // The failure must stay scoped to the measure dropdown — the Jobs page
+    // itself (jobs list / its own loading+error state) is unaffected since
+    // getJobs succeeded independently of getMeasures.
+    expect(screen.queryByText(/Failed to load jobs/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('table', { name: /Calculation jobs/i })).toBeInTheDocument();
+  });
+
   test('does not clear the (empty) selection before the first fetch resolves', async () => {
     api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
     api.getGroups = jest.fn().mockResolvedValue({ groups: [] });

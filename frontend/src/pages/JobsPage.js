@@ -82,7 +82,17 @@ export default function JobsPage() {
       const list = Array.isArray(data) ? data : data.measures || data.entry || [];
       setMeasures(list);
       setMeasuresLoaded(true);
-    } catch { /* non-blocking — leave the previous list/loaded flag as-is */ }
+    } catch {
+      // Non-blocking for the Jobs page itself (jobs list / loading / error
+      // state are untouched) — but the measure dropdown must not keep
+      // offering the PREVIOUS MCS's measures after a failed refetch (e.g.
+      // right after switching MCS and the new one being unreachable). Clear
+      // it, same as MeasuresPage does in its own catch branch, and mark it
+      // "loaded" so the reset effect below clears any now-stale
+      // formData.measure_id instead of stranding it (#396).
+      setMeasures([]);
+      setMeasuresLoaded(true);
+    }
   }, []);
 
   const loadGroups = useCallback(async () => {
