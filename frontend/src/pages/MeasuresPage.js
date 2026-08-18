@@ -50,6 +50,13 @@ function StatusBadge({ status }) {
 
 export default function MeasuresPage() {
   const [measures, setMeasures] = useState([]);
+  // The `mcs` block from the last successful GET /measures response — i.e.
+  // where the measures ON SCREEN actually came from. This is deliberately
+  // separate from the health-polled context's `mcs`: during a switch, a
+  // reload, or a failed refetch the two can differ, and the subtitle must
+  // describe the data on screen, not the currently-connected server —
+  // otherwise we'd recreate this exact bug one layer up (#396).
+  const [measuresMcs, setMeasuresMcs] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -65,10 +72,12 @@ export default function MeasuresPage() {
     try {
       const data = await getMeasures();
       setMeasures(Array.isArray(data) ? data : data.measures || data.entry || []);
+      setMeasuresMcs(Array.isArray(data) ? null : (data.mcs || null));
     } catch (err) {
       // Never render a stale list from a previous connection — the whole
       // point of this fix is that an unreachable MCS shows empty, not old data.
       setMeasures([]);
+      setMeasuresMcs(null);
       const { issues, errorDetails } = parseFhirError(err.body);
       setError({ message: err.message || 'Cannot reach measure engine', issues, errorDetails });
     } finally {
@@ -131,7 +140,8 @@ export default function MeasuresPage() {
           <h1 className={styles.title}>Measures</h1>
           {!loading && !error && (
             <div className={styles.sub}>
-              {visible.length} measure{visible.length !== 1 ? 's' : ''} on {mcs.name || 'the active connection'}
+              {visible.length} measure{visible.length !== 1 ? 's' : ''} on{' '}
+              {measuresMcs?.name || mcs.name || 'the active connection'}
             </div>
           )}
         </div>

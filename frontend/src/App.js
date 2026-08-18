@@ -254,6 +254,10 @@ function AppShell() {
   );
 }
 
+// Split from AppShell because a component can't consume a value from a
+// Provider it renders itself — AppShell needs `cdr` (sidebar, status
+// footer), so ConnectionProvider has to sit one level above it. Do not
+// collapse this back into a single component.
 export default function App() {
   return (
     <ConnectionProvider>

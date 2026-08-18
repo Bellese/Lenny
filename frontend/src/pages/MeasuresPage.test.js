@@ -35,10 +35,25 @@ function renderWithMcs(mcsOverrides = {}) {
 }
 
 describe('MeasuresPage — MCS awareness (#396)', () => {
-  test('subtitle names the active MCS', async () => {
+  test('subtitle names the MCS from the GET /measures response, not the health-polled context', async () => {
+    api.getMeasures = jest.fn().mockResolvedValue({
+      measures: [{ id: 'CMS1' }],
+      total: 1,
+      mcs: { id: 'mcs-1', name: 'Response-Named MCS', url: 'http://response-mcs' },
+    });
+    // Context intentionally names a DIFFERENT connection to prove the
+    // subtitle describes what the on-screen list actually came from,
+    // not wherever the health poll currently believes we're connected.
+    renderWithMcs({ name: 'Context-Named MCS' });
+    expect(await screen.findByText('1 measure on Response-Named MCS')).toBeInTheDocument();
+    expect(screen.queryByText(/Context-Named MCS/)).not.toBeInTheDocument();
+  });
+
+  test('falls back to the context MCS name when the response has no mcs block, and never renders "undefined"', async () => {
     api.getMeasures = jest.fn().mockResolvedValue({ measures: [{ id: 'CMS1' }], total: 1 });
-    renderWithMcs();
-    expect(await screen.findByText('1 measure on Alphora Sandbox')).toBeInTheDocument();
+    renderWithMcs({ name: 'Context-Named MCS' });
+    expect(await screen.findByText('1 measure on Context-Named MCS')).toBeInTheDocument();
+    expect(screen.queryByText(/undefined/i)).not.toBeInTheDocument();
   });
 
   test('error state names the MCS, renders no measures, and offers Retry', async () => {

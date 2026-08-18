@@ -42,43 +42,64 @@ export function ConnectionProvider({ children }) {
     try {
       health = await getHealth();
     } catch {
-      // Network error — bump failure counts for both kinds.
-      const next = {};
-      for (const { kind } of HEALTH_KINDS) {
-        failureCounts.current[kind] = failureCounts.current[kind] + 1;
-        const nextState = failureCounts.current[kind] >= FAILURE_DEBOUNCE ? 'unreachable' : 'pending';
-        next[kind] = { state: nextState, name: '', id: null, isReadOnly: false, errorDetails: null };
-      }
-      setChips(prev => ({ ...prev, ...next }));
+      // Network error — bump failure counts for both kinds. Fail closed on
+      // isReadOnly: a network-level failure tells us nothing new about
+      // read-only status, so carry forward whatever we last confirmed
+      // rather than resetting to false and re-enabling destructive controls
+      // against a server we previously knew was read-only (#396).
+      setChips(prev => {
+        const next = {};
+        for (const { kind } of HEALTH_KINDS) {
+          failureCounts.current[kind] = failureCounts.current[kind] + 1;
+          const nextState = failureCounts.current[kind] >= FAILURE_DEBOUNCE ? 'unreachable' : 'pending';
+          next[kind] = {
+            state: nextState,
+            name: '',
+            id: null,
+            isReadOnly: prev[kind]?.isReadOnly ?? false,
+            errorDetails: null,
+          };
+        }
+        return { ...prev, ...next };
+      });
       return;
     }
 
-    const next = {};
-    for (const { kind, healthKey } of HEALTH_KINDS) {
-      const section = health?.[healthKey] || {};
-      const ok = section.status === 'connected' || section.status === 'healthy';
-      if (ok) {
-        failureCounts.current[kind] = 0;
-        next[kind] = {
-          state: 'healthy',
-          name: section.name || '',
-          id: section.id ?? null,
-          isReadOnly: !!section.is_read_only,
-          errorDetails: null,
-        };
-      } else {
-        failureCounts.current[kind] = failureCounts.current[kind] + 1;
-        const debounced = failureCounts.current[kind] >= FAILURE_DEBOUNCE;
-        next[kind] = {
-          state: debounced ? 'unreachable' : 'pending',
-          name: section.name || '',
-          id: section.id ?? null,
-          isReadOnly: !!section.is_read_only,
-          errorDetails: section.error_details || null,
-        };
+    setChips(prev => {
+      const next = {};
+      for (const { kind, healthKey } of HEALTH_KINDS) {
+        const rawSection = health?.[healthKey];
+        // Only trust is_read_only from a response that actually came back
+        // with this kind's block populated — a transient/degraded probe
+        // that omits it must not flip a previously-known read-only
+        // connection back to writable (#396).
+        const hasSection = rawSection != null;
+        const section = rawSection || {};
+        const ok = section.status === 'connected' || section.status === 'healthy';
+        const isReadOnly = hasSection ? !!section.is_read_only : (prev[kind]?.isReadOnly ?? false);
+        if (ok) {
+          failureCounts.current[kind] = 0;
+          next[kind] = {
+            state: 'healthy',
+            name: section.name || '',
+            id: section.id ?? null,
+            isReadOnly,
+            errorDetails: null,
+          };
+        } else {
+          failureCounts.current[kind] = failureCounts.current[kind] + 1;
+          const debounced = failureCounts.current[kind] >= FAILURE_DEBOUNCE;
+          next[kind] = {
+            state: debounced ? 'unreachable' : 'pending',
+            name: section.name || '',
+            id: section.id ?? null,
+            isReadOnly,
+            errorDetails: section.error_details || null,
+          };
+        }
       }
-    }
-    setChips(prev => ({ ...prev, ...next }));
+      return { ...prev, ...next };
+    });
   }, []);
 
   useEffect(() => {

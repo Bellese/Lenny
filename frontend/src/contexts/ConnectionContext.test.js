@@ -1,13 +1,14 @@
 import React from 'react';
 import '@testing-library/jest-dom';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { ConnectionProvider, useConnection } from './ConnectionContext';
 import * as api from '../api/client';
 
 jest.mock('../api/client');
 
 function Probe() {
-  const { cdr, mcs } = useConnection();
+  const { cdr, mcs, refresh } = useConnection();
   return (
     <div>
       <span data-testid="mcs-id">{mcs.id}</span>
@@ -16,6 +17,7 @@ function Probe() {
       <span data-testid="mcs-readonly">{String(mcs.isReadOnly)}</span>
       <span data-testid="cdr-id">{cdr.id}</span>
       <span data-testid="cdr-name">{cdr.name}</span>
+      <button onClick={refresh}>refresh</button>
     </div>
   );
 }
@@ -60,5 +62,47 @@ describe('ConnectionContext — provider exposes mcs/cdr identity from health (#
 
     await waitFor(() => expect(screen.getByTestId('mcs-name')).toHaveTextContent(''));
     expect(screen.getByTestId('mcs-readonly')).toHaveTextContent('false');
+  });
+
+  test('fails closed: preserves isReadOnly through a total health-check failure (#396)', async () => {
+    api.getHealth = jest.fn()
+      .mockResolvedValueOnce({
+        cdr: { status: 'healthy', name: 'Local CDR', id: 'cdr-1' },
+        measure_engine: { status: 'healthy', name: 'Alphora Sandbox', id: 'mcs-2', is_read_only: true },
+      })
+      .mockRejectedValueOnce(new Error('network down'));
+
+    render(
+      <ConnectionProvider>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('mcs-readonly')).toHaveTextContent('true'));
+
+    await userEvent.click(screen.getByRole('button', { name: 'refresh' }));
+    await waitFor(() => expect(api.getHealth).toHaveBeenCalledTimes(2));
+    // A network failure must not silently re-enable Upload/Delete against a
+    // server we previously confirmed was read-only.
+    expect(screen.getByTestId('mcs-readonly')).toHaveTextContent('true');
+  });
+
+  test('fails closed: preserves isReadOnly when a later probe omits the measure_engine block (#396)', async () => {
+    api.getHealth = jest.fn()
+      .mockResolvedValueOnce({
+        cdr: { status: 'healthy', name: 'Local CDR', id: 'cdr-1' },
+        measure_engine: { status: 'healthy', name: 'Alphora Sandbox', id: 'mcs-2', is_read_only: true },
+      })
+      .mockResolvedValueOnce({ cdr: { status: 'healthy', name: 'Local CDR', id: 'cdr-1' } });
+
+    render(
+      <ConnectionProvider>
+        <Probe />
+      </ConnectionProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('mcs-readonly')).toHaveTextContent('true'));
+
+    await userEvent.click(screen.getByRole('button', { name: 'refresh' }));
+    await waitFor(() => expect(api.getHealth).toHaveBeenCalledTimes(2));
+    expect(screen.getByTestId('mcs-readonly')).toHaveTextContent('true');
   });
 });
