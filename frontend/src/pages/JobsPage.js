@@ -8,6 +8,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import PulseDot from '../components/PulseDot';
 import { TrashIcon, ViewIcon, SparkIcon, PlusIcon, XIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
+import { useConnection } from '../contexts/ConnectionContext';
 import PeriodPicker from '../components/PeriodPicker';
 import { extractCmsId, measureDisplayLabel, measureOptionLabel, findMatchingGroup } from '../utils/measureFormat';
 import { isActuallyRunning, isRunning, isComplete, selectActiveJob } from '../utils/jobStatus';
@@ -56,6 +57,7 @@ export default function JobsPage() {
   const pollRef = useRef(null);
   const toast = useToast();
   const { query } = useSearch();
+  const { mcs } = useConnection();
 
   const loadJobs = useCallback(async () => {
     try {
@@ -88,10 +90,18 @@ export default function JobsPage() {
     loadJobs();
     loadMeasures();
     loadGroups();
-  }, [loadJobs, loadMeasures, loadGroups]);
+    // mcs.id: re-fetch whenever the active MCS changes (#396), so activating
+    // a different measure engine in Settings refreshes the measure/group list
+    // this page's "New calculation" form is built from.
+  }, [loadJobs, loadMeasures, loadGroups, mcs.id]);
 
   useEffect(() => {
-    if (measures.length > 0 && !formData.measure_id) {
+    if (!measures.length) return;
+    // Default when empty, and ALSO reset when the current selection is no
+    // longer in the newly loaded list (e.g. after switching MCS) — otherwise
+    // a stale measure_id survives and POST /jobs rejects it (#396).
+    const stillPresent = measures.some(m => m.id === formData.measure_id);
+    if (!formData.measure_id || !stillPresent) {
       setFormData(prev => ({ ...prev, measure_id: measures[0].id || '' }));
     }
   }, [measures]);

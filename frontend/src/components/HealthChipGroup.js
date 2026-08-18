@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import HealthIndicator from './HealthIndicator';
+import { useConnection } from '../contexts/ConnectionContext';
 import styles from './HealthChipGroup.module.css';
 
 const KIND_LABEL = { cdr: 'CDR', mcs: 'Measure Engine' };
@@ -16,8 +17,12 @@ function aggregateState(chipEntries) {
   return 'pending';
 }
 
-export default function HealthChipGroup({ chips, kinds, onChipClick }) {
+export default function HealthChipGroup({ kinds, onChipClick }) {
   // kinds: array of { kind, settingsHash } in render order.
+  // Chip data (state/name/errorDetails per kind) comes from ConnectionContext —
+  // this component only owns rendering, not the health-poll itself (#396).
+  const { cdr, mcs } = useConnection();
+  const chips = { cdr, mcs };
   const chipEntries = kinds.map(({ kind }) => [kind, chips[kind] || { state: 'pending', name: '', errorDetails: null }]);
   const agg = aggregateState(chipEntries);
   const [popoverOpen, setPopoverOpen] = useState(false);

@@ -28,7 +28,7 @@ const KIND_SPECS = {
     urlField: 'mcs_url',
     urlLabel: 'Measure Engine URL',
     urlPlaceholder: 'http://localhost:8081/fhir',
-    showReadOnly: false,
+    showReadOnly: true,
     showBundleChunking: false,
     api: { create: createMcsConnection, update: updateMcsConnection, test: testMcsConnection },
   },
