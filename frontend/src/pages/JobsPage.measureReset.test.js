@@ -55,6 +55,46 @@ describe('JobsPage — stale measure_id reset on MCS switch (#396)', () => {
     await waitFor(() => expect(select.value).toBe('CMS111'));
   });
 
+  test('clears a stale measure_id when the new MCS has zero measures', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
+    api.getGroups = jest.fn().mockResolvedValue({ groups: [] });
+    api.getMeasures = jest.fn()
+      .mockResolvedValueOnce({ measures: [{ id: 'CMS999' }] })
+      .mockResolvedValueOnce({ measures: [] });
+
+    const { rerender } = render(<Harness mcsId="mcs-a" />);
+    await waitFor(() => expect(api.getMeasures).toHaveBeenCalledTimes(1));
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    const select = await screen.findByLabelText('Measure');
+    await waitFor(() => expect(select.value).toBe('CMS999'));
+
+    // Switch to an MCS with zero measures — the most literal case of "the
+    // current selection is absent from the newly loaded list". The stale
+    // id must be cleared, not left for POST /jobs to reject (#396).
+    rerender(<Harness mcsId="mcs-b" />);
+
+    await waitFor(() => expect(api.getMeasures).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(select.value).toBe(''));
+    expect(screen.queryByRole('option', { name: 'CMS999' })).not.toBeInTheDocument();
+  });
+
+  test('does not clear the (empty) selection before the first fetch resolves', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
+    api.getGroups = jest.fn().mockResolvedValue({ groups: [] });
+    let resolveMeasures;
+    api.getMeasures = jest.fn(() => new Promise(r => { resolveMeasures = r; }));
+
+    render(<Harness mcsId="mcs-a" />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    const select = await screen.findByLabelText('Measure');
+    // Nothing has loaded yet — the initial empty array must not be treated
+    // as "loaded and empty" and short-circuit anything unexpected.
+    expect(select.value).toBe('');
+
+    resolveMeasures({ measures: [{ id: 'CMS999' }] });
+    await waitFor(() => expect(select.value).toBe('CMS999'));
+  });
+
   test('leaves a still-present selection untouched across an MCS switch', async () => {
     api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
     api.getGroups = jest.fn().mockResolvedValue({ groups: [] });

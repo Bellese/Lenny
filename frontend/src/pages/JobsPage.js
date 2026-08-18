@@ -46,6 +46,11 @@ export default function JobsPage() {
   const location = useLocation();
   const [jobs, setJobs] = useState([]);
   const [measures, setMeasures] = useState([]);
+  // Distinguishes "haven't fetched yet" (initial mount) from "fetched and
+  // the list is genuinely empty" — the reset effect below must not touch
+  // formData.measure_id before the former, but must clear it for the
+  // latter (#396).
+  const [measuresLoaded, setMeasuresLoaded] = useState(false);
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -76,7 +81,8 @@ export default function JobsPage() {
       const data = await getMeasures();
       const list = Array.isArray(data) ? data : data.measures || data.entry || [];
       setMeasures(list);
-    } catch { /* non-blocking */ }
+      setMeasuresLoaded(true);
+    } catch { /* non-blocking — leave the previous list/loaded flag as-is */ }
   }, []);
 
   const loadGroups = useCallback(async () => {
@@ -96,15 +102,26 @@ export default function JobsPage() {
   }, [loadJobs, loadMeasures, loadGroups, mcs.id]);
 
   useEffect(() => {
-    if (!measures.length) return;
+    // Before the first fetch resolves there's nothing to reconcile against —
+    // don't clear a selection (there shouldn't be one yet) just because the
+    // initial state happens to be an empty array.
+    if (!measuresLoaded) return;
     // Default when empty, and ALSO reset when the current selection is no
     // longer in the newly loaded list (e.g. after switching MCS) — otherwise
-    // a stale measure_id survives and POST /jobs rejects it (#396).
+    // a stale measure_id survives and POST /jobs rejects it (#396). This
+    // must also fire when the new list is itself empty (switching to an
+    // MCS with zero measures) — an empty list is the most literal case of
+    // "the current selection is absent from the newly loaded list", and
+    // leaving a stale id in that state is exactly the bug this issue exists
+    // to fix.
     const stillPresent = measures.some(m => m.id === formData.measure_id);
     if (!formData.measure_id || !stillPresent) {
-      setFormData(prev => ({ ...prev, measure_id: measures[0].id || '' }));
+      const nextId = measures[0]?.id || '';
+      if (nextId !== formData.measure_id) {
+        setFormData(prev => ({ ...prev, measure_id: nextId }));
+      }
     }
-  }, [measures]);
+  }, [measures, measuresLoaded]);
 
   useEffect(() => {
     const hasActive = jobs.some(j => isRunning(j.status) || j.delete_requested);
