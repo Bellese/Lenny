@@ -46,7 +46,9 @@ backend/app/
     job.py          Job, MeasureReport (each Job snapshots cdr_id + mcs_id at creation)
     validation.py   ExpectedResult, ValidationRun
     config.py       CDRConfig + ConnectionConfigMixin (URL, auth, encrypted credentials)
-    mcs_config.py   MCSConfig (parallel of CDRConfig, no is_read_only flag)
+    mcs_config.py   MCSConfig (parallel of CDRConfig; is_read_only comes from the
+                    shared mixin as of #396, plus an MCS-only wipe_before_job flag
+                    gating the destructive pre-job wipe — see ADR-012)
     base.py         SQLAlchemy declarative base
 
   routes/
