@@ -125,7 +125,7 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
   - No review approval required. Status checks are the gate; a solo maintainer can still merge.
   - Force pushes and branch deletion on `main` are blocked.
 
-  Protection was absent until 2026-08-19 despite this file describing it, so anything merged before that date did **not** pass through this gate.
+  Protection was absent until 2026-08-19 despite this file describing it, so anything merged before that date did **not** pass through this gate. `deploy.yml:23-27` also skips re-running tests on the strength of that guarantee, so the deploy pipeline's central assumption was unfounded for the same period. Both are now true; if protection is ever removed, that comment and this section become wrong together.
 - **Pre-merge hooks:** the `pr-checks.yml` workflow gates merges via the branch protection above. The Deploy workflow does NOT re-run tests (deliberate — see in-line comment in `deploy.yml:23-27`); CI parity comes from `strict: true` requiring the PR to be rebased onto current `main` and green before it can merge.
 
 ### Deploy status command (for `/land-and-deploy`)
