@@ -92,7 +92,17 @@ export default function SettingsPage() {
           if (op.status === 'failed') {
             toast.error(op.error || 'Operation failed');
           } else {
-            toast.success('Done');
+            // A read-only connection makes Lenny decline that step (#397). Saying
+            // "Done" there would tell the admin their target was wiped when it
+            // wasn't, so name the skipped steps instead.
+            const skipped = (op.steps || []).filter((s) => s.status === 'skipped');
+            if (skipped.length > 0) {
+              toast.warning(
+                `Finished, but skipped: ${skipped.map((s) => s.step.replace(/_/g, ' ')).join(', ')}`
+              );
+            } else {
+              toast.success('Done');
+            }
           }
         }
       } catch {
@@ -307,14 +317,27 @@ export default function SettingsPage() {
                       settings (CDR and MCS) are preserved. Use before a demo or connectathon to
                       start from a known-good blank slate.
                     </div>
-                    {factoryResetting && factoryResetSteps !== null && (
+                    {factoryResetSteps !== null && factoryResetSteps.length > 0 && (
                       <ul className={styles.operationSteps}>
                         {factoryResetSteps.map((s, i) => (
-                          <li key={i} className={s.status === 'failed' ? styles.stepFailed : styles.stepOk}>
+                          <li
+                            key={i}
+                            className={
+                              s.status === 'failed'
+                                ? styles.stepFailed
+                                : s.status === 'skipped'
+                                  ? styles.stepSkipped
+                                  : styles.stepOk
+                            }
+                          >
                             {s.step.replace(/_/g, ' ')}: {s.status}
+                            {/* A skipped step carries its reason in `error` (#397). Without
+                                showing it, the admin sees a step that did not run and has no
+                                way to learn that a read-only connection is why. */}
+                            {s.error && <div className={styles.stepReason}>{s.error}</div>}
                           </li>
                         ))}
-                        <li className={styles.stepRunning}>Working…</li>
+                        {factoryResetting && <li className={styles.stepRunning}>Working…</li>}
                       </ul>
                     )}
                   </div>
