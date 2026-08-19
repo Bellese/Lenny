@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 pytestmark = pytest.mark.asyncio
@@ -653,8 +654,16 @@ async def test_get_job_measure_report_all_errors_returns_empty_bundle(client, te
 # ---------------------------------------------------------------------------
 
 
-async def test_get_comparison_httpx_exception_returns_no_expected(client, test_session):
-    """Returns has_expected=False when httpx raises while resolving measure URL."""
+async def test_get_comparison_unreachable_mcs_returns_502(client, test_session):
+    """An unreachable measure engine is reported, not disguised as missing data.
+
+    Contract change (issue #397). This previously returned 200 with
+    has_expected=False, which the UI renders as "No expected results available for
+    this measure and period. Load a connectathon bundle via Settings" — telling the
+    user to load data they already have, when the real problem is that Lenny could
+    not reach the server. ComparisonView already renders "Comparison unavailable:
+    {error}" on a rejected fetch; it just never received one.
+    """
     from unittest.mock import AsyncMock, patch
 
     import httpx as _httpx
@@ -689,9 +698,142 @@ async def test_get_comparison_httpx_exception_returns_no_expected(client, test_s
 
         resp = await client.get(f"/jobs/{job.id}/comparison")
 
-    assert resp.status_code == 200
-    data = resp.json()
-    assert data["has_expected"] is False
+    assert resp.status_code == 502, resp.text
+    body = resp.json()
+    assert body["detail"]["resourceType"] == "OperationOutcome"
+
+
+async def test_get_comparison_measure_absent_still_returns_200_empty(client, test_session):
+    """A 404 from the engine means "no such measure", which is not an outage.
+
+    The distinction that matters for #397: "I could not ask the server" is an error;
+    "the server answered and the measure is not there" is a legitimate empty result.
+    Collapsing both into 502 would replace one misleading message with another.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from app.models.job import Job, JobStatus
+
+    job = Job(
+        measure_id="CMS-nonexistent",
+        period_start="2019-01-01",
+        period_end="2019-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    with patch("app.routes.jobs.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=httpx.Response(404, json={}, request=httpx.Request("GET", "http://x")))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get(f"/jobs/{job.id}/comparison")
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["has_expected"] is False
+
+
+async def test_get_comparison_resolves_measure_against_the_jobs_mcs(client, test_session):
+    """The lookup targets job.mcs_url with that job's credentials (issue #397).
+
+    A historical job's comparison must resolve against the server it actually ran
+    on, not settings.MEASURE_ENGINE_URL and not whatever MCS happens to be active
+    now. Sending no credentials also meant an authenticated remote MCS 401'd, the
+    bare except swallowed it, and the view silently degraded.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from app.models.connection_base import AuthType
+    from app.models.job import Job, JobStatus
+    from app.models.mcs_config import MCSConfig
+
+    cfg = MCSConfig(
+        name="Remote MCS",
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-cmp"},
+        is_active=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2019-01-01",
+        period_end="2019-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+        mcs_url=cfg.mcs_url,
+        mcs_id=cfg.id,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    seen: dict[str, object] = {}
+
+    async def _get(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return httpx.Response(200, json={"url": "http://cms.gov/Measure/CMS124"}, request=httpx.Request("GET", url))
+
+    with patch("app.routes.jobs.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get(f"/jobs/{job.id}/comparison")
+
+    assert resp.status_code == 200, resp.text
+    assert seen["url"].startswith("https://mcs.example.org/fhir/Measure/CMS124"), seen["url"]
+    assert seen["headers"] == {"Authorization": "Bearer tok-cmp"}, seen["headers"]
+
+
+async def test_get_comparison_legacy_job_without_mcs_url_still_works(client, test_session):
+    """A job predating the mcs_url snapshot falls back to the env-var engine.
+
+    Same back-compat rule as orchestrator._get_mcs_url. Without it, every
+    historical job's comparison view would break on upgrade.
+    """
+    from unittest.mock import AsyncMock, patch
+
+    from app.config import settings as app_settings
+    from app.models.job import Job, JobStatus
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2019-01-01",
+        period_end="2019-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+        mcs_url=None,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    seen: dict[str, object] = {}
+
+    async def _get(url, **kwargs):
+        seen["url"] = url
+        return httpx.Response(200, json={"url": "http://cms.gov/Measure/CMS124"}, request=httpx.Request("GET", url))
+
+    with patch("app.routes.jobs.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get(f"/jobs/{job.id}/comparison")
+
+    assert resp.status_code == 200, resp.text
+    assert seen["url"].startswith(app_settings.MEASURE_ENGINE_URL), seen["url"]
 
 
 async def test_get_comparison_patient_not_in_expected_skipped(client, test_session):
@@ -900,7 +1042,14 @@ async def test_get_comparison_no_job(client):
 
 
 async def test_get_comparison_no_results(client, test_session):
-    """Returns has_expected=False when no MeasureResults exist for job."""
+    """Returns has_expected=False when no MeasureResults exist for job.
+
+    The measure lookup is now mocked to SUCCEED. Previously this test made a real
+    HTTP call to the docker-internal engine hostname, which failed, and the bare
+    `except` turned that into the same 200-with-empty this asserts — so it passed
+    for the wrong reason. With the lookup succeeding, it exercises what its name
+    says: a job with no expected results and no MeasureResults.
+    """
     from app.models.job import Job, JobStatus
 
     job = Job(
@@ -914,7 +1063,18 @@ async def test_get_comparison_no_results(client, test_session):
     await test_session.commit()
     await test_session.refresh(job)
 
-    resp = await client.get(f"/jobs/{job.id}/comparison")
+    with patch("app.routes.jobs.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(
+            return_value=httpx.Response(
+                200, json={"url": "http://cms.gov/Measure/CMS124"}, request=httpx.Request("GET", "http://x")
+            )
+        )
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get(f"/jobs/{job.id}/comparison")
+
     assert resp.status_code == 200
     data = resp.json()
     assert data["has_expected"] is False
@@ -1324,3 +1484,36 @@ async def test_create_job_credential_failure_returns_502(client, test_session, m
     measure_present.assert_not_awaited()
     rows = (await test_session.execute(select(Job))).scalars().all()
     assert rows == []
+
+
+async def test_get_comparison_auth_failure_names_credentials(client, test_session):
+    """A 401 from the engine says "rejected", not "could not reach" (issue #397).
+
+    The engine answered — it refused. Calling that unreachable would hand the user
+    another wrong diagnosis, which is the exact failure this endpoint's fix is about.
+    """
+    from app.models.job import Job, JobStatus
+
+    job = Job(
+        measure_id="CMS124",
+        period_start="2019-01-01",
+        period_end="2019-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.complete,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    with patch("app.routes.jobs.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=httpx.Response(401, json={}, request=httpx.Request("GET", "http://x")))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        resp = await client.get(f"/jobs/{job.id}/comparison")
+
+    assert resp.status_code == 502, resp.text
+    diagnostics = resp.json()["detail"]["issue"][0]["diagnostics"]
+    assert "rejected" in diagnostics
+    assert "credentials" in diagnostics

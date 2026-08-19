@@ -249,3 +249,230 @@ async def test_run_factory_reset_sets_failed_on_error(test_session):
     assert op.status == AdminOperationStatus.failed
     assert op.error is not None
     assert op.completed_at is not None
+
+
+# ---------------------------------------------------------------------------
+# MCS scoping + read-only guards on the destructive admin paths (issue #397)
+# ---------------------------------------------------------------------------
+
+
+def _make_op():
+    return AdminOperation(
+        kind=AdminOperationKind.factory_reset,
+        status=AdminOperationStatus.pending,
+        started_at=datetime.now(timezone.utc),
+    )
+
+
+def _steps_by_name(op) -> dict[str, dict]:
+    return {s["step"]: s for s in (op.steps_json or [])}
+
+
+@pytest.mark.asyncio
+async def test_factory_reset_measure_engine_targets_active_mcs_with_credentials(test_session):
+    """The measure-engine branch wipes the ACTIVE MCS, not settings.MEASURE_ENGINE_URL.
+
+    Issue #397: an admin connected to a remote MCS who ran a factory reset wiped
+    Lenny's local container and got a success response, while the server they were
+    looking at kept its data.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.routes.settings import FactoryResetRequest, _run_factory_reset
+
+    op = _make_op()
+    mcs = MCSConfig(
+        name="Remote MCS",
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-mcs"},
+        is_active=True,
+    )
+    test_session.add_all([op, mcs])
+    await test_session.commit()
+    await test_session.refresh(op)
+
+    definitions_seen: dict[str, dict | None] = {}
+    patient_wipe_seen: dict[str, dict | None] = {}
+    polled: list[str] = []
+
+    async def mock_wipe_defs(*, base_url, auth_headers=None):
+        definitions_seen[base_url] = auth_headers
+
+    async def mock_wipe_patients(*, base_url, strict=True, auth_headers=None):
+        patient_wipe_seen[base_url] = auth_headers
+
+    async def mock_poll(base_url, resource_types, step_name, auth_headers=None):
+        polled.append(base_url)
+
+    with (
+        patch("app.routes.settings.async_session", make_session_patcher(test_session)),
+        patch("app.routes.settings.wipe_measure_definitions", side_effect=mock_wipe_defs),
+        patch("app.routes.settings.wipe_patient_data", side_effect=mock_wipe_patients),
+        patch("app.routes.settings._poll_zero_counts", side_effect=mock_poll),
+        patch(
+            "app.routes.settings._build_auth_headers",
+            new_callable=AsyncMock,
+            return_value={"Authorization": "Bearer tok-mcs"},
+        ),
+    ):
+        await _run_factory_reset(
+            op.id,
+            FactoryResetRequest(include_cdr=False, include_measure_engine=True, include_app_db=False),
+        )
+
+    assert definitions_seen == {"https://mcs.example.org/fhir": {"Authorization": "Bearer tok-mcs"}}
+    assert patient_wipe_seen == {"https://mcs.example.org/fhir": {"Authorization": "Bearer tok-mcs"}}
+    assert polled == ["https://mcs.example.org/fhir"]
+
+
+@pytest.mark.asyncio
+async def test_factory_reset_skips_read_only_measure_engine(test_session):
+    """A read-only MCS is skipped with a reason, and the rest of the reset still runs.
+
+    Skipped rather than aborted: factory reset is a multi-step background
+    operation, so raising would leave include_app_db undone and the operation in a
+    failed state, which is a worse outcome than declining one step.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.routes.settings import FactoryResetRequest, _run_factory_reset
+
+    op = _make_op()
+    mcs = MCSConfig(
+        name="Someone Else's MCS",
+        mcs_url="https://shared.example.org/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        is_read_only=True,
+    )
+    test_session.add_all([op, mcs])
+    await test_session.commit()
+    await test_session.refresh(op)
+
+    with (
+        patch("app.routes.settings.async_session", make_session_patcher(test_session)),
+        patch("app.routes.settings.wipe_measure_definitions", new_callable=AsyncMock) as mock_defs,
+        patch("app.routes.settings.wipe_patient_data", new_callable=AsyncMock) as mock_patients,
+        patch("app.routes.settings._poll_zero_counts", new_callable=AsyncMock),
+    ):
+        await _run_factory_reset(
+            op.id,
+            FactoryResetRequest(include_cdr=False, include_measure_engine=True, include_app_db=True),
+        )
+
+    mock_defs.assert_not_awaited()
+    mock_patients.assert_not_awaited()
+
+    await test_session.refresh(op)
+    steps = _steps_by_name(op)
+    assert steps["wipe_measure_engine"]["status"] == "skipped"
+    assert "read-only" in (steps["wipe_measure_engine"]["error"] or "").lower()
+    # The unrelated step still ran, and the operation reached a terminal success.
+    assert steps["wipe_app_db"]["status"] == "succeeded"
+    assert op.status == AdminOperationStatus.succeeded
+
+
+@pytest.mark.asyncio
+async def test_factory_reset_skips_read_only_cdr(test_session):
+    """Same guard on the CDR branch.
+
+    Not in #397's literal scope, but factory reset ignored is_read_only entirely,
+    so guarding only the MCS would leave one branch of the same operation
+    refusing while the other wiped a server the user marked read-only.
+    """
+    from app.models.config import CDRConfig
+    from app.models.connection_base import AuthType
+    from app.routes.settings import FactoryResetRequest, _run_factory_reset
+
+    op = _make_op()
+    cdr = CDRConfig(
+        name="Someone Else's CDR",
+        cdr_url="https://shared-cdr.example.org/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        is_read_only=True,
+    )
+    test_session.add_all([op, cdr])
+    await test_session.commit()
+    await test_session.refresh(op)
+
+    with (
+        patch("app.routes.settings.async_session", make_session_patcher(test_session)),
+        patch("app.routes.settings.wipe_patient_data", new_callable=AsyncMock) as mock_patients,
+        patch("app.routes.settings._poll_zero_counts", new_callable=AsyncMock),
+    ):
+        await _run_factory_reset(
+            op.id,
+            FactoryResetRequest(include_cdr=True, include_measure_engine=False, include_app_db=True),
+        )
+
+    mock_patients.assert_not_awaited()
+
+    await test_session.refresh(op)
+    steps = _steps_by_name(op)
+    assert steps["wipe_cdr"]["status"] == "skipped"
+    assert "read-only" in (steps["wipe_cdr"]["error"] or "").lower()
+    assert steps["wipe_app_db"]["status"] == "succeeded"
+    assert op.status == AdminOperationStatus.succeeded
+
+
+@pytest.mark.asyncio
+async def test_wipe_measure_engine_route_targets_active_mcs(client, test_session):
+    """POST /settings/admin/wipe-measure-engine follows the active MCS connection."""
+    from sqlalchemy import update as sa_update
+
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    await test_session.execute(sa_update(MCSConfig).values(is_active=False))
+    mcs = MCSConfig(
+        name="Remote MCS",
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+    )
+    test_session.add(mcs)
+    await test_session.commit()
+
+    seen: dict[str, dict | None] = {}
+
+    async def mock_wipe_defs(*, base_url, auth_headers=None):
+        seen[base_url] = auth_headers
+
+    with patch("app.routes.settings.wipe_measure_definitions", side_effect=mock_wipe_defs):
+        resp = await client.post("/settings/admin/wipe-measure-engine")
+
+    assert resp.status_code == 200, resp.text
+    assert "https://mcs.example.org/fhir" in seen
+
+
+@pytest.mark.asyncio
+async def test_wipe_measure_engine_route_refuses_read_only_mcs(client, test_session):
+    """A read-only MCS gets 403 and no delete is issued.
+
+    The route has a caller waiting, so it refuses outright rather than skipping.
+    """
+    from sqlalchemy import update as sa_update
+
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    await test_session.execute(sa_update(MCSConfig).values(is_active=False))
+    mcs = MCSConfig(
+        name="Someone Else's MCS",
+        mcs_url="https://shared.example.org/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        is_read_only=True,
+    )
+    test_session.add(mcs)
+    await test_session.commit()
+
+    with patch("app.routes.settings.wipe_measure_definitions", new_callable=AsyncMock) as mock_defs:
+        resp = await client.post("/settings/admin/wipe-measure-engine")
+
+    assert resp.status_code == 403, resp.text
+    mock_defs.assert_not_awaited()
+    body = resp.json()
+    assert body["detail"]["resourceType"] == "OperationOutcome"

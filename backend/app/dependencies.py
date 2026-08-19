@@ -25,6 +25,53 @@ from app.models.connection_base import ConnectionKind
 from app.models.mcs_config import MCSConfig
 
 
+async def resolve_job_mcs_auth_headers(session: AsyncSession, job_id: int) -> dict[str, str]:
+    """Resolve a job's MCS credentials from the live config, using a caller's session.
+
+    Extracted from `orchestrator._get_mcs_auth_headers` (issue #397) so a request
+    handler can resolve a job's credentials on the request's own session instead of
+    opening a second one. The orchestrator wrapper now delegates here, keeping ONE
+    implementation of the URL-drift guard below — duplicating a check that decides
+    whether to hand credentials to a host is exactly the kind of thing that rots
+    apart.
+
+    `Job.mcs_id` is ON DELETE SET NULL, so `mcs_id is None` means EITHER "this job
+    never had an MCS config" OR "the config was deleted after creation". The
+    snapshotted `mcs_auth_type` is what tells them apart: without that check, a job
+    whose connection was deleted would silently run unauthenticated against the
+    still-snapshotted `mcs_url`.
+    """
+    # Imported here rather than at module scope: app.models.job imports nothing from
+    # this module today, but dependencies.py is imported by nearly every route, and
+    # keeping its import surface narrow is what stops a future cycle.
+    from app.models.job import Job
+    from app.services.fhir_client import _build_auth_headers
+
+    job = await session.get(Job, job_id)
+    if job is None:
+        return {}
+    if job.mcs_id is None:
+        if not job.mcs_auth_type or job.mcs_auth_type == "none":
+            return {}
+        raise RuntimeError(
+            f"Job {job_id} has no mcs_id — MCS config was deleted after job creation. Cannot fetch auth credentials."
+        )
+    cfg = await session.get(MCSConfig, job.mcs_id)
+    if cfg is None:
+        # Defensive: unreachable under the ON DELETE SET NULL FK, but a database
+        # without the constraint enforced would land here.
+        raise RuntimeError(f"MCS config {job.mcs_id} referenced by job {job_id} no longer exists.")
+    if job.mcs_url and cfg.mcs_url != job.mcs_url:
+        # The URL comes from the job snapshot but credentials are read live, so a
+        # config repointed at a different host after job creation would hand the new
+        # host's token to the old one.
+        raise RuntimeError(
+            f"MCS config {job.mcs_id} now points at a different server than job {job_id} "
+            "was created against. Refusing to send its credentials to the snapshotted URL."
+        )
+    return await _build_auth_headers(cfg.auth_type, cfg.auth_credentials)
+
+
 @dataclass
 class ConnectionContext:
     """Active-connection snapshot loaded by `get_active_<kind>` dependencies.

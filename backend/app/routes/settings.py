@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import async_session, get_session
+from app.dependencies import ConnectionContext, get_active_mcs
 from app.models.admin_operation import AdminOperation, AdminOperationKind, AdminOperationStatus
 from app.models.app_setting import AppSetting
 from app.models.config import CDRConfig
@@ -298,15 +299,45 @@ async def update_admin_settings(
 
 
 @router.post("/admin/wipe-measure-engine", status_code=200)
-async def wipe_measure_engine() -> dict:
+async def wipe_measure_engine(mcs: ConnectionContext = Depends(get_active_mcs)) -> dict:
     """Delete all measure-definition resources (Library, Measure, ValueSet, CodeSystem, ConceptMap)
-    from the HAPI measure engine.
+    from the active MCS connection's measure engine.
 
     Recovers from JVM/H2 state corruption that causes CQL compilation failures (issue #238).
     The engine is automatically re-seeded on the next job run via bundle_loader.
+
+    Targets the active MCS rather than `settings.MEASURE_ENGINE_URL` (issue #397):
+    an admin connected to a remote MCS used to wipe Lenny's local container and get
+    a success response, while the server they were looking at was untouched.
+    Refuses on a read-only connection — this is the most destructive control in the
+    admin UI, and the fix that pointed it at the active MCS is what made a guard
+    necessary.
     """
+    if mcs.is_read_only:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "forbidden",
+                        "diagnostics": (
+                            f"The active measure engine connection '{mcs.name}' is read-only. "
+                            "Wiping measure definitions would delete data on a server Lenny "
+                            "does not own. Switch to a writable connection first."
+                        ),
+                    }
+                ],
+            },
+        )
+
     try:
-        await wipe_measure_definitions()
+        # Inside the try: resolving credentials can fail on its own (a SMART token
+        # endpoint being unreachable, for instance). Outside, that surfaced as an
+        # unsanitized 500 instead of the 502 OperationOutcome below.
+        auth_headers = await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
+        await wipe_measure_definitions(base_url=mcs.mcs_url, auth_headers=auth_headers)
     except Exception as exc:
         logger.error("Measure engine wipe failed", extra={"error": sanitize_error(exc)})
         raise HTTPException(
@@ -368,6 +399,18 @@ async def _poll_zero_counts(
                 logger.warning("Poll-zero timeout for %s on %s (%s)", rt, base_url, step_name)
 
 
+# Recorded as the step's `error` when a read-only connection is skipped (issue #397).
+# Skipping rather than raising is deliberate: factory reset is a multi-step
+# background operation, so aborting would leave the remaining steps (notably
+# include_app_db) undone and strand the operation in `failed` — a worse outcome
+# than declining the one step whose target Lenny does not own.
+_READ_ONLY_SKIP = (
+    "Skipped: the active {kind} connection '{name}' is read-only. "
+    "Lenny will not delete data on a server it does not own. "
+    "Switch to a writable connection and re-run if this was intended."
+)
+
+
 async def _run_factory_reset(operation_id: int, request: FactoryResetRequest) -> None:
     """Background task: execute factory reset steps and update the AdminOperation row."""
     steps: list[dict] = []
@@ -393,6 +436,7 @@ async def _run_factory_reset(operation_id: int, request: FactoryResetRequest) ->
                 result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
                 active_cdr = result.scalar_one_or_none()
                 active_cdr_url = active_cdr.cdr_url if active_cdr else settings.DEFAULT_CDR_URL
+                cdr_read_only = bool(active_cdr.is_read_only) if active_cdr else False
                 # The active CDR is routinely a remote authenticated connection.
                 # Without credentials the wipe 401s, and wipe_patient_data now
                 # refuses to report success on an unauthorized wipe.
@@ -400,15 +444,44 @@ async def _run_factory_reset(operation_id: int, request: FactoryResetRequest) ->
                     await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials) if active_cdr else {}
                 )
 
-            await wipe_patient_data(base_url=active_cdr_url, strict=False, auth_headers=cdr_auth_headers)
-            await _poll_zero_counts(active_cdr_url, ["Patient", "Encounter"], "cdr_wipe", cdr_auth_headers)
-            await _record("wipe_cdr", "succeeded")
+            if cdr_read_only:
+                await _record(
+                    "wipe_cdr",
+                    "skipped",
+                    # `name` is nullable on the connection mixin, so fall back to a
+                    # label rather than rendering "connection 'None' is read-only".
+                    _READ_ONLY_SKIP.format(kind="CDR", name=active_cdr.name or "the active CDR"),
+                )
+            else:
+                await wipe_patient_data(base_url=active_cdr_url, strict=False, auth_headers=cdr_auth_headers)
+                await _poll_zero_counts(active_cdr_url, ["Patient", "Encounter"], "cdr_wipe", cdr_auth_headers)
+                await _record("wipe_cdr", "succeeded")
 
         if request.include_measure_engine:
-            await wipe_measure_definitions()
-            await wipe_patient_data(base_url=settings.MEASURE_ENGINE_URL, strict=False)
-            await _poll_zero_counts(settings.MEASURE_ENGINE_URL, ["Patient", "Measure"], "me_wipe")
-            await _record("wipe_measure_engine", "succeeded")
+            # Resolve the active MCS the same way the CDR block above does. A
+            # background task cannot use Depends(get_active_mcs), and reading
+            # settings.MEASURE_ENGINE_URL here wiped Lenny's local container while
+            # the admin was looking at a remote server (issue #397).
+            async with async_session() as session:
+                mcs_result = await session.execute(select(MCSConfig).where(MCSConfig.is_active.is_(True)).limit(1))
+                active_mcs = mcs_result.scalar_one_or_none()
+                active_mcs_url = active_mcs.mcs_url if active_mcs else settings.MEASURE_ENGINE_URL
+                mcs_read_only = bool(active_mcs.is_read_only) if active_mcs else False
+                mcs_auth_headers = (
+                    await _build_auth_headers(active_mcs.auth_type, active_mcs.auth_credentials) if active_mcs else {}
+                )
+
+            if mcs_read_only:
+                await _record(
+                    "wipe_measure_engine",
+                    "skipped",
+                    _READ_ONLY_SKIP.format(kind="measure engine", name=active_mcs.name or "the active measure engine"),
+                )
+            else:
+                await wipe_measure_definitions(base_url=active_mcs_url, auth_headers=mcs_auth_headers)
+                await wipe_patient_data(base_url=active_mcs_url, strict=False, auth_headers=mcs_auth_headers)
+                await _poll_zero_counts(active_mcs_url, ["Patient", "Measure"], "me_wipe", mcs_auth_headers)
+                await _record("wipe_measure_engine", "succeeded")
 
         if request.include_app_db:
             async with async_session() as db_session:
