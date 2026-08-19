@@ -132,6 +132,39 @@ async def _run_schema_migrations(conn) -> None:
             """)
         )
 
+        # Issue #392: wipe_before_job gates the destructive full wipe at job start.
+        # DEFAULT FALSE is the safe direction for existing rows — an attendee who
+        # already added a shared connectathon MCS stops nuking it on the next job
+        # without touching their config. The seeded local engine is restored to
+        # TRUE so local behavior is unchanged.
+        #
+        # Both statements are inside a column-absence guard rather than using
+        # ADD COLUMN IF NOT EXISTS, so the backfill runs EXACTLY ONCE. With an
+        # unguarded UPDATE, every restart would re-assert TRUE on the default row
+        # and silently undo a user who had turned the full wipe off.
+        await conn.execute(
+            text("""
+            DO $$
+            BEGIN
+                IF EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'mcs_configs')
+                   AND NOT EXISTS (
+                       SELECT FROM information_schema.columns
+                       WHERE table_name = 'mcs_configs' AND column_name = 'wipe_before_job'
+                   ) THEN
+                    -- IF NOT EXISTS on the ALTER as well as the guard: the guard
+                    -- makes the BACKFILL one-shot, and this keeps the ALTER itself
+                    -- idempotent if two processes ever pass the guard concurrently
+                    -- (the loser would otherwise abort startup on "column already
+                    -- exists").
+                    ALTER TABLE mcs_configs
+                        ADD COLUMN IF NOT EXISTS wipe_before_job BOOLEAN NOT NULL DEFAULT FALSE;
+                    UPDATE mcs_configs SET wipe_before_job = TRUE WHERE is_default = TRUE;
+                END IF;
+            END
+            $$;
+            """)
+        )
+
         # Normalize legacy CDR rows before adding unique indexes. Production may
         # already contain duplicate names or multiple active/default rows created
         # before these constraints existed.
@@ -203,6 +236,8 @@ async def _run_schema_migrations(conn) -> None:
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_url VARCHAR(1024)",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_name VARCHAR(512)",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_auth_type VARCHAR(32)",
+            # Issue #392. FALSE on existing rows = scoped wipe, the safe default.
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_wipe_before_job BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE validation_runs ADD COLUMN IF NOT EXISTS delete_requested BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ",
         ]:
@@ -392,7 +427,10 @@ async def seed_default_connections() -> None:
     # extra kwargs the model accepts).
     _KIND_SEEDS = [
         (CDRConfig, "Local CDR", "cdr_url", app_config.DEFAULT_CDR_URL, {"is_read_only": False}),
-        (MCSConfig, "Local Measure Engine", "mcs_url", app_config.MEASURE_ENGINE_URL, {}),
+        # wipe_before_job=True: the seeded row is Lenny's own measure-engine
+        # container, the one place a full wipe between jobs is correct (#392).
+        # Every user-created MCS defaults to the scoped wipe instead.
+        (MCSConfig, "Local Measure Engine", "mcs_url", app_config.MEASURE_ENGINE_URL, {"wipe_before_job": True}),
     ]
 
     async with AsyncSession(engine) as session:
