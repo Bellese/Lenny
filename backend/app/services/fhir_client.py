@@ -330,8 +330,22 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
     returns an empty list or raises any exception.
     """
 
-    def __init__(self, measure_id: str) -> None:
+    def __init__(
+        self,
+        measure_id: str,
+        mcs_url: str,
+        mcs_auth_headers: dict[str, str] | None = None,
+    ) -> None:
+        """`mcs_url` is REQUIRED — it names the engine to ask for data requirements.
+
+        It previously read `settings.MEASURE_ENGINE_URL`, so a job against a remote
+        MCS asked the LOCAL engine what data its measure needs (issue #397). The
+        answer was either wrong or a 401, and the strategy then quietly fell back to
+        `$everything` — a silent downgrade with no error surfaced.
+        """
         self._measure_id = measure_id
+        self._mcs_url = mcs_url
+        self._mcs_auth_headers = mcs_auth_headers or {}
         self._fallback = BatchQueryStrategy()
 
     async def gather_patients(
@@ -376,9 +390,9 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
 
     async def _get_data_requirements(self) -> list[dict[str, Any]]:
         """Call $data-requirements on MCS and return the dataRequirement entries."""
-        url = f"{settings.MEASURE_ENGINE_URL}/Measure/{self._measure_id}/$data-requirements"
+        url = f"{self._mcs_url}/Measure/{self._measure_id}/$data-requirements"
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=self._mcs_auth_headers)
             resp.raise_for_status()
             library = resp.json()
             return library.get("dataRequirement", [])
@@ -1210,25 +1224,48 @@ async def wipe_patients_by_id(
     )
 
 
-async def wipe_measure_definitions() -> None:
-    """Delete all measure-definition resources from the measure engine.
+async def wipe_measure_definitions(*, base_url: str, auth_headers: dict[str, str] | None = None) -> None:
+    """Delete all measure-definition resources from the measure engine at `base_url`.
 
     Removes Library, Measure, ValueSet, CodeSystem, and ConceptMap.
     Does NOT touch clinical resources (Patient, Encounter, etc.).
     Called from the admin UI to recover from JVM/H2 state corruption (issue #238).
     After this call the bundle_loader must re-seed the engine before the next job.
+
+    `base_url` is REQUIRED and keyword-only — it identifies the MCS the caller
+    actually means. It previously read `settings.MEASURE_ENGINE_URL`, so an admin
+    connected to a remote MCS wiped Lenny's local container and got a success
+    response while the server they were looking at kept its data (issue #397).
+
+    Callers own the read-only guard: this function will wipe whatever server it is
+    pointed at, and pointing it at a shared MCS is exactly the hazard that made
+    #397 worth fixing carefully rather than quickly.
     """
     definition_types = ["Library", "Measure", "ValueSet", "CodeSystem", "ConceptMap"]
-    base_url = settings.MEASURE_ENGINE_URL
+    logger.warning(
+        "Wiping measure definitions",
+        extra={"target": sanitize_url(base_url), "resource_types": definition_types},
+    )
     async with httpx.AsyncClient(timeout=300.0) as client:
         for rt in definition_types:
             try:
                 delete_url = f"{base_url}/{rt}?_lastUpdated=gt1900-01-01"
-                resp = await client.delete(delete_url)
+                resp = await client.delete(delete_url, headers=auth_headers or {})
                 if resp.status_code < 300:
                     logger.info("Wiped measure definition type", extra={"resourceType": rt})
+                elif resp.status_code in (401, 403):
+                    # Explicit, matching wipe_patient_data and wipe_patients_by_id.
+                    # A 401 would otherwise fall through to the fallback sweep and
+                    # surface as "not authorized to enumerate" — which does fail
+                    # loudly, but names the wrong operation. All three wipes should
+                    # report an auth failure the same way.
+                    raise RuntimeError(
+                        f"Not authorized to wipe {rt} definitions at the target server "
+                        f"(HTTP {resp.status_code}). Check the connection's credentials. "
+                        "Refusing to report a successful wipe."
+                    )
                 else:
-                    await _delete_all_of_type(client, rt, base_url)
+                    await _delete_all_of_type(client, rt, base_url, auth_headers)
             except httpx.HTTPError:
                 logger.warning("Failed to wipe measure definition type", extra={"resourceType": rt})
 
@@ -1301,15 +1338,17 @@ async def _delete_all_of_type(
 
 async def resolve_evaluated_resource(
     reference: str,
-    base_url: str | None = None,
+    base_url: str,
     auth_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Resolve an evaluatedResource reference from the measure engine.
+    """Resolve an evaluatedResource reference from the measure engine at `base_url`.
 
-    `base_url`/`auth_headers` target the job's MCS. They default to the env-var
-    engine with no credentials, which only works for a local unauthenticated HAPI.
+    `base_url` is REQUIRED. It used to default to `settings.MEASURE_ENGINE_URL` with
+    no credentials, which only ever worked for a local unauthenticated HAPI: against
+    an authenticated remote MCS the resolve 401'd, and against any remote MCS it
+    asked the wrong server entirely (issue #397).
     """
-    url = f"{base_url or settings.MEASURE_ENGINE_URL}/{reference}"
+    url = f"{base_url}/{reference}"
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.get(url, headers=auth_headers or {})
         resp.raise_for_status()

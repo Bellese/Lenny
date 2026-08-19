@@ -444,6 +444,17 @@
 .stepOk { color: var(--success, #16a34a); }
 .stepFailed { color: var(--err); }
 .stepRunning { color: var(--text-muted); font-style: italic; }
+/* Issue #397: a step Lenny declined to run. Warn rather than success styling —
+   rendering "skipped" in green told the admin their target was wiped when it
+   wasn't. Warn rather than error, because declining is correct behavior. */
+.stepSkipped { color: var(--warn); }
+.stepReason {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+  margin: 2px 0 4px 0;
+  max-width: 52ch;
+}
 
 /* Toggle switch */
 .toggle {

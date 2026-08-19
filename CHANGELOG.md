@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.21.0] - 2026-08-19
+
+### Fixed
+- **Admin controls now act on the measure engine you are actually connected to.** "Wipe measure engine" and the measure-engine half of Factory Reset both targeted Lenny's own local container regardless of which MCS connection was active. Connected to a remote server, you got a success message while the server in front of you kept all its data — and the local one silently lost its measure definitions. Both now follow the active connection and send its credentials. (#397)
+- **Comparison view says what actually went wrong.** When Lenny could not resolve a job's measure on the measure engine, the Results comparison returned an empty result, which read as "No expected results available for this measure and period. Load a connectathon bundle via Settings" — advice that sends you to load data you already have. It now reports the real problem, and distinguishes an unreachable server from one that rejected the request for credentials. A measure that genuinely is not on the server still shows the empty state, because that is not an error. (#397)
+- **A job's comparison and evaluated-resource views resolve against the server that job ran on.** Both read the environment default, so for a job that ran against a remote MCS they queried the wrong server and returned nothing useful. (#397)
+- **`$data-requirements` asks the job's own measure engine.** It asked the local engine what a remote job's measure needed, then quietly fell back to fetching everything when the answer was wrong or the call was rejected. Only affects installs running `PATIENT_DATA_STRATEGY=data_requirements`. (#397)
+
+### Added
+- **Read-only connections are now respected by destructive admin operations.** Marking a connection read-only previously did nothing for these paths: "Wipe measure engine" would wipe a server you had flagged, and Factory Reset ignored the flag on both the CDR and the measure engine. The admin wipe now refuses outright, and Factory Reset skips that step, names the reason on screen, and still completes its other steps. (#397)
+
 ## [0.0.20.0] - 2026-08-19
 
 ### Fixed

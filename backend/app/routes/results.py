@@ -6,7 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.db import get_session
+from app.dependencies import resolve_job_mcs_auth_headers
 from app.models.job import MeasureResult
 from app.services.fhir_client import resolve_evaluated_resource
 from app.services.validation import sanitize_error
@@ -220,12 +222,31 @@ async def get_evaluated_resources(
             "source": "snapshot",
         }
 
-    # Legacy rows (pre-snapshot feature): fall back to live resolution.
+    # Legacy rows (pre-snapshot feature): fall back to live resolution against the
+    # MCS this result's job ran on, with that job's credentials (issue #397).
+    # resolve_evaluated_resource used to default to settings.MEASURE_ENGINE_URL with
+    # no auth, so for a job that ran on a remote MCS it queried the wrong server.
+    from app.models.job import Job
+
+    job = await session.get(Job, mr.job_id)
+    mcs_url = (job.mcs_url if job else None) or settings.MEASURE_ENGINE_URL
+    try:
+        mcs_auth_headers = await resolve_job_mcs_auth_headers(session, mr.job_id)
+    except Exception as exc:
+        # Credentials unresolvable (config deleted, or its URL changed since the
+        # job ran). Report it per-reference rather than failing the whole view —
+        # the snapshot path above is what modern rows use anyway.
+        logger.warning(
+            "Could not resolve MCS credentials for legacy evaluated-resource lookup",
+            extra={"result_id": result_id, "job_id": mr.job_id, "error": sanitize_error(exc)},
+        )
+        mcs_auth_headers = {}
+
     resources: list[dict] = []
     errors: list[dict] = []
     for ref in evaluated_refs:
         try:
-            resource = await resolve_evaluated_resource(ref)
+            resource = await resolve_evaluated_resource(ref, mcs_url, mcs_auth_headers)
             resources.append(resource)
         except Exception as exc:
             logger.warning(

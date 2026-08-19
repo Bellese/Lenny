@@ -20,6 +20,7 @@ from app.services.fhir_client import (
     resolve_evaluated_resource,
     upload_measure_bundle,
     wait_for_valueset_expansion,
+    wipe_measure_definitions,
     wipe_patient_data,
     wipe_patients_by_id,
 )
@@ -773,7 +774,7 @@ async def test_gather_result_partial_failure_surfaced():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
 
     assert isinstance(gather_result, GatherResult)
@@ -1238,6 +1239,90 @@ class TestWipePatientsById:
 
 
 # ---------------------------------------------------------------------------
+# wipe_measure_definitions (issue #397)
+# ---------------------------------------------------------------------------
+
+
+class TestWipeMeasureDefinitions:
+    """The admin 'wipe measure engine' primitive, scoped to a caller-supplied server.
+
+    Issue #397: this read `settings.MEASURE_ENGINE_URL` directly, so an admin
+    connected to a remote MCS who clicked the control wiped Lenny's LOCAL engine
+    and got a success response, while the server they were looking at was
+    untouched. The inverse is the real hazard — a naive fix makes it capable of
+    wiping a shared remote server — so `base_url` is required and the callers own
+    the read-only guard.
+    """
+
+    def _mock_client(self, mock_httpx, response=None):
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=response or _make_response(200, {}))
+        mock_ctx.get = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle", "entry": []}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        return mock_ctx
+
+    async def test_base_url_is_required(self):
+        """No env-var default. A default is how this bug class stayed invisible."""
+        with pytest.raises(TypeError):
+            await wipe_measure_definitions()  # type: ignore[call-arg]
+
+    async def test_targets_the_given_server(self):
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_measure_definitions(base_url="https://mcs.example.org/fhir")
+
+        urls = [call.args[0] for call in mock_ctx.delete.await_args_list]
+        assert urls, "no deletes issued"
+        for url in urls:
+            assert url.startswith("https://mcs.example.org/fhir/"), f"wrong server: {url}"
+
+    async def test_covers_the_definition_types_and_not_clinical_data(self):
+        """Definitions only — this control must not delete patients."""
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_measure_definitions(base_url="https://mcs.example.org/fhir")
+
+        urls = [call.args[0] for call in mock_ctx.delete.await_args_list]
+        for rt in ("Library", "Measure", "ValueSet", "CodeSystem", "ConceptMap"):
+            assert any(f"/{rt}?" in u for u in urls), f"{rt} not wiped"
+        for rt in ("Patient", "Encounter", "Condition", "Observation"):
+            assert not any(f"/{rt}?" in u for u in urls), f"{rt} must not be touched by a definitions wipe"
+
+    async def test_carries_auth_headers(self):
+        """A remote MCS rejects every DELETE without credentials."""
+        headers = {"Authorization": "Bearer tok-1"}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_measure_definitions(base_url="https://mcs.example.org/fhir", auth_headers=headers)
+
+        for call in mock_ctx.delete.await_args_list:
+            assert call.kwargs.get("headers") == headers, "definitions delete went out unauthenticated"
+
+    async def test_raises_on_unauthorized(self):
+        """A 401 must abort, naming the wipe — same rule as the other two wipes.
+
+        Without the explicit check this still failed, but via the fallback sweep's
+        "not authorized to enumerate" error, which names the wrong operation.
+        """
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._mock_client(mock_httpx, response=_make_response(401, {}))
+            with pytest.raises(RuntimeError, match="Not authorized to wipe"):
+                await wipe_measure_definitions(base_url="https://mcs.example.org/fhir")
+
+    async def test_fallback_sweep_carries_auth_headers(self):
+        """When conditional delete is unsupported, the per-resource sweep stays authenticated."""
+        headers = {"Authorization": "Bearer tok-1"}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx, response=_make_response(405, {}))
+            await wipe_measure_definitions(base_url="https://mcs.example.org/fhir", auth_headers=headers)
+
+        assert mock_ctx.get.await_count > 0, "fallback sweep never ran"
+        for call in mock_ctx.get.await_args_list:
+            assert call.kwargs.get("headers") == headers, "fallback GET went out unauthenticated"
+
+
+# ---------------------------------------------------------------------------
 # test_connection
 # ---------------------------------------------------------------------------
 
@@ -1341,9 +1426,42 @@ async def test_resolve_evaluated_resource():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        result = await resolve_evaluated_resource("Patient/p1")
+        result = await resolve_evaluated_resource("Patient/p1", "http://mcs/fhir")
 
     assert result == resource
+
+
+async def test_resolve_evaluated_resource_requires_base_url():
+    """The env-var fallback is gone (issue #397).
+
+    It defaulted to settings.MEASURE_ENGINE_URL with no credentials, which only
+    ever worked for a local unauthenticated HAPI. Every caller now names the server.
+    """
+    with pytest.raises(TypeError):
+        await resolve_evaluated_resource("Patient/p1")  # type: ignore[call-arg]
+
+
+async def test_resolve_evaluated_resource_targets_the_given_server():
+    resource = {"resourceType": "Patient", "id": "p1"}
+    seen: dict[str, object] = {}
+
+    async def _get(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return _make_response(200, resource)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await resolve_evaluated_resource(
+            "Patient/p1", "https://mcs.example.org/fhir", {"Authorization": "Bearer tok-r"}
+        )
+
+    assert seen["url"] == "https://mcs.example.org/fhir/Patient/p1"
+    assert seen["headers"] == {"Authorization": "Bearer tok-r"}
 
 
 # ---------------------------------------------------------------------------
@@ -1906,13 +2024,52 @@ async def test_data_requirements_strategy_uses_requirements():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
     assert len(resources) == 2
     types = {r["resourceType"] for r in resources}
     assert types == {"Patient", "Observation"}
+
+
+async def test_data_requirements_targets_the_jobs_mcs_with_credentials():
+    """$data-requirements goes to the job's MCS, authenticated (issue #397).
+
+    It previously read settings.MEASURE_ENGINE_URL with no credentials, so a job
+    against a remote MCS asked the LOCAL engine what data the measure needs — and
+    silently fell back to $everything when that answer was wrong or the call 401'd.
+    """
+    seen: dict[str, object] = {}
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            seen["url"] = url
+            seen["headers"] = kwargs.get("headers")
+            return _make_response(200, {"resourceType": "Library", "dataRequirement": [{"type": "Patient"}]})
+        return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy(
+            "m1",
+            mcs_url="https://mcs.example.org/fhir",
+            mcs_auth_headers={"Authorization": "Bearer tok-dr"},
+        )
+        await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    assert seen["url"] == "https://mcs.example.org/fhir/Measure/m1/$data-requirements"
+    assert seen["headers"] == {"Authorization": "Bearer tok-dr"}
+
+
+async def test_data_requirements_requires_an_mcs_url():
+    """No env-var default — the caller must say which engine to ask."""
+    with pytest.raises(TypeError):
+        DataRequirementsStrategy("m1")  # type: ignore[call-arg]
 
 
 async def test_data_requirements_strategy_falls_back_on_empty():
@@ -1939,7 +2096,7 @@ async def test_data_requirements_strategy_falls_back_on_empty():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -1970,7 +2127,7 @@ async def test_data_requirements_strategy_falls_back_on_error():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -2007,7 +2164,7 @@ async def test_data_requirements_strategy_fetch_fails_falls_back_to_everything()
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -2043,7 +2200,7 @@ async def test_data_requirements_strategy_dedup_skips_duplicate_types():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -2071,7 +2228,7 @@ async def test_data_requirements_strategy_non_200_patient_not_appended():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -2101,7 +2258,7 @@ async def test_data_requirements_strategy_non_200_resource_entries_skipped():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -2144,7 +2301,7 @@ async def test_fetch_by_requirements_code_filter_appends_code_in():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -2182,7 +2339,7 @@ async def test_fetch_by_requirements_date_filter_does_not_add_params():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
 
     obs_url = next((u for u in captured_urls if "Observation" in u), None)
@@ -2217,7 +2374,7 @@ async def test_fetch_by_requirements_no_filter_type_only():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -2258,7 +2415,7 @@ async def test_fetch_by_requirements_one_type_fails_partial_result_no_fallback()
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -2284,7 +2441,7 @@ async def test_data_requirements_strategy_gather_patients_delegates_to_batch():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         patients = await strategy.gather_patients("http://cdr/fhir", {})
 
     assert len(patients) == 1

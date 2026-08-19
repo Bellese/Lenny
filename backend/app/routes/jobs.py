@@ -15,10 +15,17 @@ from sqlalchemy.orm import noload
 
 from app.config import settings
 from app.db import get_session
-from app.dependencies import CDRContext, ConnectionContext, get_active_cdr, get_active_mcs
+from app.dependencies import (
+    CDRContext,
+    ConnectionContext,
+    get_active_cdr,
+    get_active_mcs,
+    resolve_job_mcs_auth_headers,
+)
 from app.models.job import BatchStatus, Job, JobStatus, MeasureResult
 from app.models.validation import ExpectedResult
 from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups, measure_exists
+from app.services.fhir_errors import sanitize_url
 from app.services.validation import _extract_population_counts, compare_populations, sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -508,14 +515,69 @@ async def get_job_comparison(
             },
         )
 
+    # Resolve the measure against the MCS this job actually ran on, with that job's
+    # credentials (issue #397). Reading settings.MEASURE_ENGINE_URL asked the local
+    # container about a job that ran elsewhere, and sending no credentials meant an
+    # authenticated remote MCS 401'd — which the bare `except` then swallowed.
+    mcs_url = job.mcs_url or settings.MEASURE_ENGINE_URL
     measure_url = ""
     try:
+        # Raises if the linked config now points at a different host than the job
+        # snapshotted — refusing to send its credentials to the new one. Runs on the
+        # request's session rather than opening its own.
+        mcs_auth_headers = await resolve_job_mcs_auth_headers(session, job_id)
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"{settings.MEASURE_ENGINE_URL}/Measure/{job.measure_id}")
-            if resp.status_code == 200:
-                measure_url = resp.json().get("url", "")
-    except Exception:
-        logger.warning("Could not resolve measure URL for comparison", extra={"measure_id": job.measure_id})
+            resp = await client.get(f"{mcs_url}/Measure/{job.measure_id}", headers=mcs_auth_headers)
+        if resp.status_code == 200:
+            measure_url = resp.json().get("url", "")
+        elif resp.status_code == 404:
+            # The engine answered and the measure is not there. That is a real
+            # empty result, not an outage — see the 502 branch below.
+            logger.info(
+                "Measure not found on the job's MCS; comparison has no expected results",
+                extra={"job_id": job_id, "measure_id": job.measure_id, "mcs_url": sanitize_url(mcs_url)},
+            )
+            return _empty_comparison_response()
+        elif resp.status_code in (401, 403):
+            # "Could not reach" would be wrong here — the engine answered and
+            # refused. Naming credentials is the difference between a useful
+            # message and another wrong diagnosis.
+            raise RuntimeError(
+                f"the measure engine rejected the request (HTTP {resp.status_code}). "
+                "Check the credentials on the MCS connection this job ran against"
+            )
+        else:
+            raise RuntimeError(f"measure lookup returned HTTP {resp.status_code}")
+    except Exception as exc:
+        # Distinguishing "could not ask" from "asked, nothing there" is the point.
+        # This used to return 200 + empty, which the UI renders as "No expected
+        # results available — load a connectathon bundle", sending the user to load
+        # data they already have when the real fault was auth or connectivity.
+        logger.warning(
+            "Could not resolve measure URL for comparison",
+            extra={
+                "job_id": job_id,
+                "measure_id": job.measure_id,
+                "mcs_url": sanitize_url(mcs_url),
+                "error": sanitize_error(exc),
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "diagnostics": (
+                            f"Could not resolve measure '{job.measure_id}' on the measure engine "
+                            f"this job ran against, so comparison is unavailable: {sanitize_error(exc)}"
+                        ),
+                    }
+                ],
+            },
+        )
 
     if not measure_url:
         return _empty_comparison_response()

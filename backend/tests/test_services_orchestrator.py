@@ -1080,7 +1080,10 @@ async def test_process_batch_uses_data_requirements_strategy_when_configured(
             mcs_url="http://mcs/fhir",
         )
 
-    mock_strategy_cls.assert_called_once_with("CMS999")
+    # Issue #397: the strategy is told which MCS to ask for $data-requirements.
+    # It previously read settings.MEASURE_ENGINE_URL, so a job on a remote MCS asked
+    # the local engine what data its measure needs.
+    mock_strategy_cls.assert_called_once_with("CMS999", "http://mcs/fhir", None)
 
 
 # ---------------------------------------------------------------------------
@@ -1338,7 +1341,7 @@ async def test_get_mcs_auth_headers_builds_from_linked_config(test_session, sess
     with (
         patch("app.services.orchestrator.async_session", session_factory),
         patch(
-            "app.services.orchestrator._build_auth_headers",
+            "app.services.fhir_client._build_auth_headers",
             new_callable=AsyncMock,
             return_value={"Authorization": "Bearer tok-123"},
         ) as mock_auth,

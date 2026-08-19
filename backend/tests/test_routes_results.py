@@ -173,7 +173,7 @@ async def test_get_evaluated_resources_success(client, test_session):
     patient_resource = {"resourceType": "Patient", "id": "patient-0"}
     condition_resource = {"resourceType": "Condition", "id": "cond-0"}
 
-    async def mock_resolve(reference):
+    async def mock_resolve(reference, base_url=None, auth_headers=None):
         if "Patient" in reference:
             return patient_resource
         return condition_resource
@@ -204,7 +204,7 @@ async def test_get_evaluated_resources_partial_failure(client, test_session):
 
     call_count = 0
 
-    async def mock_resolve(reference):
+    async def mock_resolve(reference, base_url=None, auth_headers=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
@@ -297,7 +297,7 @@ async def test_get_evaluated_resources_falls_back_to_live_for_legacy_rows(client
     patient_resource = {"resourceType": "Patient", "id": "patient-0"}
     condition_resource = {"resourceType": "Condition", "id": "cond-0"}
 
-    async def mock_resolve(reference):
+    async def mock_resolve(reference, base_url=None, auth_headers=None):
         return patient_resource if "Patient" in reference else condition_resource
 
     with patch(

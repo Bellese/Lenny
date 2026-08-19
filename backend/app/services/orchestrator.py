@@ -16,9 +16,9 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import async_session
+from app.dependencies import resolve_job_mcs_auth_headers
 from app.models.config import CDRConfig
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
-from app.models.mcs_config import MCSConfig
 from app.services.fhir_client import (
     BatchQueryStrategy,
     DataRequirementsStrategy,
@@ -132,10 +132,15 @@ def _error_measure_report(
     }
 
 
-def _patient_data_strategy(measure_id: str):
-    """Create the configured patient data acquisition strategy."""
+def _patient_data_strategy(measure_id: str, mcs_url: str, mcs_auth_headers: dict[str, str] | None = None):
+    """Create the configured patient data acquisition strategy.
+
+    `mcs_url`/`mcs_auth_headers` are threaded through to DataRequirementsStrategy so
+    `$data-requirements` asks the job's own measure engine rather than the env-var
+    default (issue #397). BatchQueryStrategy ignores them — it only talks to the CDR.
+    """
     if settings.PATIENT_DATA_STRATEGY == "data_requirements":
-        return DataRequirementsStrategy(measure_id)
+        return DataRequirementsStrategy(measure_id, mcs_url, mcs_auth_headers)
     return BatchQueryStrategy()
 
 
@@ -374,44 +379,13 @@ async def _get_mcs_auth_headers(job_id: int) -> dict[str, str]:
     read from the live config rather than duplicated onto the job row, so secrets
     live in exactly one place.
 
-    `Job.mcs_id` is ON DELETE SET NULL, so deleting the config nulls the id rather
-    than leaving it dangling. `mcs_id is None` therefore means EITHER "this job
-    never had an MCS config" OR "the config was deleted after creation" — the
-    snapshotted `mcs_auth_type` is what tells them apart. Without that check a job
-    whose connection was deleted would silently run unauthenticated against the
-    still-snapshotted `mcs_url`, reintroducing the 401 storm this module fixes.
+    The logic lives in `dependencies.resolve_job_mcs_auth_headers` so request
+    handlers can run it on the request's own session (issue #397). This wrapper is
+    the background-task entry point: it owns the session, the shared helper owns the
+    rules.
     """
     async with async_session() as session:
-        job = await session.get(Job, job_id)
-        if job is None:
-            return {}
-        if job.mcs_id is None:
-            # No MCS config linked — either the job was created without one
-            # (unauthenticated env-var engine) or the config was deleted after
-            # creation. If the snapshotted auth type is "none"/unset no
-            # credentials are needed; for auth-bearing types they are
-            # unrecoverable and running on would leak an unauthenticated wipe
-            # and evaluation at the remote server.
-            if not job.mcs_auth_type or job.mcs_auth_type == "none":
-                return {}
-            raise RuntimeError(
-                f"Job {job_id} has no mcs_id — MCS config was deleted after job creation. "
-                "Cannot fetch auth credentials."
-            )
-        cfg = await session.get(MCSConfig, job.mcs_id)
-        if cfg is None:
-            # Defensive: unreachable under the ON DELETE SET NULL FK, but a
-            # database without the constraint enforced would land here.
-            raise RuntimeError(f"MCS config {job.mcs_id} referenced by job {job_id} no longer exists.")
-        if job.mcs_url and cfg.mcs_url != job.mcs_url:
-            # The URL is read from the job snapshot but credentials are read
-            # live, so a config repointed at a different host after job creation
-            # would hand the new host's token to the old one.
-            raise RuntimeError(
-                f"MCS config {job.mcs_id} now points at a different server than job {job_id} "
-                "was created against. Refusing to send its credentials to the snapshotted URL."
-            )
-        return await _build_auth_headers(cfg.auth_type, cfg.auth_credentials)
+        return await resolve_job_mcs_auth_headers(session, job_id)
 
 
 async def _wipe_prior_run_data(
@@ -526,7 +500,7 @@ async def _process_single_batch(
                 period_start = job.period_start
                 period_end = job.period_end
 
-            strategy = _patient_data_strategy(measure_id)
+            strategy = _patient_data_strategy(measure_id, mcs_url, mcs_auth_headers)
             logger.info(
                 "Using patient data strategy",
                 extra={"strategy": settings.PATIENT_DATA_STRATEGY, "job_id": job_id, "batch_id": batch_id},
