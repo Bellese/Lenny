@@ -454,6 +454,7 @@ async def truncate_tables(integration_session_factory):
             "batches",
             "jobs",
             "cdr_configs",
+            "mcs_configs",
         ):
             await session.execute(text(f"TRUNCATE TABLE {table} CASCADE"))
         await session.commit()

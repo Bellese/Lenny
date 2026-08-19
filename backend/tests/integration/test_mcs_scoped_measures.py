@@ -38,7 +38,7 @@ async def _activate(client, connection_id: int) -> None:
     assert resp.status_code == 200, resp.text
 
 
-async def test_measures_follow_the_active_mcs(integration_client, measure_url, cdr_url):
+async def test_measures_follow_the_active_mcs(integration_client, measure_url, cdr_url, truncate_tables):
     """Activating a different MCS changes the measure list.
 
     This is the regression guard for #396. Before the fix, `GET /measures` read
@@ -66,14 +66,14 @@ async def test_measures_follow_the_active_mcs(integration_client, measure_url, c
 
     assert body["mcs"]["id"] == cdr_as_mcs_id
     assert body["mcs"]["name"] == "CDR As MCS"
-    assert body["measures"] != engine_measures, (
-        "measure list did not change when the active MCS changed — "
-        "GET /measures is still reading settings.MEASURE_ENGINE_URL"
+    assert body["measures"] == [], (
+        "the CDR holds no Measure resources — GET /measures should return an empty "
+        "list; anything else means it is still reading settings.MEASURE_ENGINE_URL"
     )
     assert body["total"] == len(body["measures"])
 
 
-async def test_measures_response_does_not_leak_the_mcs_url(integration_client, measure_url):
+async def test_measures_response_does_not_leak_the_mcs_url(integration_client, measure_url, truncate_tables):
     """The success payload names the MCS but never publishes its URL.
 
     The 502 path runs upstream errors through `sanitize_error`, which strips
@@ -89,7 +89,7 @@ async def test_measures_response_does_not_leak_the_mcs_url(integration_client, m
     assert measure_url not in resp.text
 
 
-async def test_read_only_mcs_rejects_upload_and_delete(integration_client, measure_url):
+async def test_read_only_mcs_rejects_upload_and_delete(integration_client, measure_url, truncate_tables):
     """A read-only MCS refuses writes with 403 and never reaches the server."""
     read_only_id = await _create_mcs(integration_client, "Read Only Engine", measure_url, read_only=True)
     await _activate(integration_client, read_only_id)
@@ -108,9 +108,12 @@ async def test_read_only_mcs_rejects_upload_and_delete(integration_client, measu
 
     resp = await integration_client.delete("/measures/any-measure-id")
     assert resp.status_code == 403, resp.text
+    assert resp.json()["detail"]["resourceType"] == "OperationOutcome"
 
 
-async def test_job_creation_rejects_a_measure_absent_from_the_active_mcs(integration_client, measure_url, cdr_url):
+async def test_job_creation_rejects_a_measure_absent_from_the_active_mcs(
+    integration_client, measure_url, cdr_url, truncate_tables
+):
     """POST /jobs 400s for a measure the active MCS does not have.
 
     Without the pre-flight check this returned 201 and the mismatch only surfaced
@@ -151,7 +154,7 @@ async def test_job_creation_rejects_a_measure_absent_from_the_active_mcs(integra
     assert "Job Guard CDR" in diagnostics
 
 
-async def test_health_reports_the_active_mcs_identity(integration_client, measure_url):
+async def test_health_reports_the_active_mcs_identity(integration_client, measure_url, truncate_tables):
     """/health carries the active MCS id, which the frontend keys change detection on."""
     engine_id = await _create_mcs(integration_client, "Health Engine", measure_url)
     await _activate(integration_client, engine_id)

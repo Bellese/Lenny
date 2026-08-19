@@ -15,7 +15,6 @@ function Probe() {
       <span data-testid="mcs-name">{mcs.name}</span>
       <span data-testid="mcs-state">{mcs.state}</span>
       <span data-testid="mcs-readonly">{String(mcs.isReadOnly)}</span>
-      <span data-testid="cdr-id">{cdr.id}</span>
       <span data-testid="cdr-name">{cdr.name}</span>
       <button onClick={refresh}>refresh</button>
     </div>
@@ -44,7 +43,6 @@ describe('ConnectionContext — provider exposes mcs/cdr identity from health (#
     expect(screen.getByTestId('mcs-name')).toHaveTextContent('Alphora Sandbox');
     expect(screen.getByTestId('mcs-state')).toHaveTextContent('healthy');
     expect(screen.getByTestId('mcs-readonly')).toHaveTextContent('true');
-    expect(screen.getByTestId('cdr-id')).toHaveTextContent('cdr-1');
     expect(screen.getByTestId('cdr-name')).toHaveTextContent('Local CDR');
   });
 

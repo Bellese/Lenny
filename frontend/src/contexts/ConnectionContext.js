@@ -13,7 +13,9 @@ const HEALTH_KINDS = [
 const FAILURE_DEBOUNCE = 2;
 
 const DEFAULT_VALUE = {
-  cdr: { id: null, name: '', state: 'pending', errorDetails: null },
+  // No `id` here: /health's cdr block carries no connection id today (only
+  // measure_engine does) — omit rather than ship a field that is always null.
+  cdr: { name: '', state: 'pending', isReadOnly: false, errorDetails: null },
   mcs: { id: null, name: '', state: 'pending', isReadOnly: false, errorDetails: null },
   refresh: () => {},
 };
@@ -31,7 +33,7 @@ export function ConnectionProvider({ children }) {
   // everything downstream consumers (HealthChipGroup, MeasuresPage,
   // JobsPage, App's sidebar) need: state, name, id, isReadOnly, errorDetails.
   const [chips, setChips] = useState({
-    cdr: { state: 'pending', name: '', id: null, errorDetails: null },
+    cdr: { state: 'pending', name: '', isReadOnly: false, errorDetails: null },
     mcs: { state: 'pending', name: '', id: null, isReadOnly: false, errorDetails: null },
   });
   const failureCounts = useRef({ cdr: 0, mcs: 0 });
@@ -55,9 +57,10 @@ export function ConnectionProvider({ children }) {
           next[kind] = {
             state: nextState,
             name: '',
-            id: null,
             isReadOnly: prev[kind]?.isReadOnly ?? false,
             errorDetails: null,
+            // cdr carries no id — see DEFAULT_VALUE.cdr.
+            ...(kind === 'mcs' ? { id: null } : {}),
           };
         }
         return { ...prev, ...next };
@@ -77,14 +80,16 @@ export function ConnectionProvider({ children }) {
         const section = rawSection || {};
         const ok = section.status === 'connected' || section.status === 'healthy';
         const isReadOnly = hasSection ? !!section.is_read_only : (prev[kind]?.isReadOnly ?? false);
+        // cdr carries no id — see DEFAULT_VALUE.cdr.
+        const idField = kind === 'mcs' ? { id: section.id ?? null } : {};
         if (ok) {
           failureCounts.current[kind] = 0;
           next[kind] = {
             state: 'healthy',
             name: section.name || '',
-            id: section.id ?? null,
             isReadOnly,
             errorDetails: null,
+            ...idField,
           };
         } else {
           failureCounts.current[kind] = failureCounts.current[kind] + 1;
@@ -92,9 +97,9 @@ export function ConnectionProvider({ children }) {
           next[kind] = {
             state: debounced ? 'unreachable' : 'pending',
             name: section.name || '',
-            id: section.id ?? null,
             isReadOnly,
             errorDetails: section.error_details || null,
+            ...idField,
           };
         }
       }
