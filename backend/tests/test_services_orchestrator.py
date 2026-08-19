@@ -1,6 +1,7 @@
 """Tests for the orchestrator service (run_job and helpers)."""
 
-from unittest.mock import AsyncMock, patch
+import contextlib
+from unittest.mock import DEFAULT, AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -182,6 +183,7 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped_wipe,
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch(
             "app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr.example.com/fhir"
@@ -241,7 +243,11 @@ async def test_run_job_happy_path(test_session, session_factory, mock_measure_re
         ]
 
     # Job has no mcs_url, so the wipe falls back to the env-var engine with no credentials.
-    mock_wipe.assert_awaited_once_with(base_url=settings.MEASURE_ENGINE_URL, strict=False, auth_headers={})
+    # Issue #392: a job whose snapshot has no explicit opt-in (here, a legacy row
+    # with mcs_wipe_before_job unset) takes the scoped wipe. The full wipe is
+    # reserved for connections that asked for it.
+    mock_wipe.assert_not_awaited()
+    mock_scoped_wipe.assert_awaited_once_with(base_url=settings.MEASURE_ENGINE_URL, patient_ids=["p1"], auth_headers={})
 
 
 async def test_run_job_stores_empty_list_when_snapshot_helper_returns_none(
@@ -258,6 +264,7 @@ async def test_run_job_stores_empty_list_when_snapshot_helper_returns_none(
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -306,6 +313,7 @@ async def test_run_job_stores_none_when_snapshot_helper_raises(test_session, ses
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -349,7 +357,8 @@ async def test_run_job_no_patients(test_session, session_factory):
 
     with (
         _make_session_factory_patch(session_factory),
-        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped_wipe,
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -366,15 +375,36 @@ async def test_run_job_no_patients(test_session, session_factory):
         assert job.status == JobStatus.complete
         assert job.total_patients == 0
 
+    # Issue #392 moved the wipe after the gather, so a zero-patient job returns
+    # before wiping anything. Asserted rather than left implicit: it is the one
+    # user-visible behavior change of the move, and the safe direction — a job
+    # that evaluates nothing must not delete anything either.
+    mock_wipe.assert_not_awaited()
+    mock_scoped_wipe.assert_not_awaited()
+
 
 async def test_run_job_wipe_failure(test_session, session_factory):
-    """run_job: wipe failure at start fails the job."""
+    """run_job: a failing wipe fails the job rather than evaluating stale data.
+
+    Issue #392 moved the wipe from step 1 to just after the patient gather, so
+    this test has to get past the gather before the wipe can fail. It patches the
+    scoped wipe because that is now the default mode; the full-wipe equivalent is
+    covered by test_run_job_full_wipe_failure_fails_the_job.
+    """
     job_id = await _setup_job(test_session)
+    patients = [{"resourceType": "Patient", "id": "p1", "name": [{"given": ["A"], "family": "B"}]}]
 
     with (
         _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch(
-            "app.services.orchestrator.wipe_patient_data",
+            "app.services.orchestrator._get_cdr_url",
+            new_callable=AsyncMock,
+            return_value="http://cdr.example.com/fhir",
+        ),
+        patch.object(BatchQueryStrategy, "gather_patients", new_callable=AsyncMock, return_value=patients),
+        patch(
+            "app.services.orchestrator.wipe_patients_by_id",
             new_callable=AsyncMock,
             side_effect=Exception("Measure engine down"),
         ),
@@ -387,6 +417,188 @@ async def test_run_job_wipe_failure(test_session, session_factory):
         assert "Measure engine down" in job.error_message
 
 
+async def test_run_job_full_wipe_failure_fails_the_job(test_session, session_factory):
+    """The opt-in full-wipe path must fail the job just as loudly."""
+    cfg = MCSConfig(
+        name="Dedicated MCS",
+        mcs_url="https://dedicated.example.org/fhir",
+        auth_type=AuthType.none,
+        wipe_before_job=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    job = Job(
+        measure_id="m-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr.example.com/fhir",
+        status=JobStatus.queued,
+        mcs_url=cfg.mcs_url,
+        mcs_id=cfg.id,
+        mcs_wipe_before_job=True,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    patients = [{"resourceType": "Patient", "id": "p1", "name": [{"given": ["A"], "family": "B"}]}]
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch(
+            "app.services.orchestrator._get_cdr_url",
+            new_callable=AsyncMock,
+            return_value="http://cdr.example.com/fhir",
+        ),
+        patch.object(BatchQueryStrategy, "gather_patients", new_callable=AsyncMock, return_value=patients),
+        patch(
+            "app.services.orchestrator.wipe_patient_data",
+            new_callable=AsyncMock,
+            side_effect=Exception("Measure engine down"),
+        ),
+    ):
+        await run_job(job.id)
+
+    async with session_factory() as session:
+        refreshed = await session.get(Job, job.id)
+        assert refreshed.status == JobStatus.failed
+        assert "Measure engine down" in refreshed.error_message
+
+
+# ---------------------------------------------------------------------------
+# Wipe mode selection (issue #392)
+# ---------------------------------------------------------------------------
+
+
+async def _setup_job_with_wipe_mode(session, *, wipe_before_job: bool) -> int:
+    cfg = MCSConfig(
+        name=f"MCS wipe={wipe_before_job}",
+        mcs_url="https://mcs-392.example.org/fhir",
+        auth_type=AuthType.none,
+        wipe_before_job=wipe_before_job,
+    )
+    session.add(cfg)
+    await session.commit()
+    await session.refresh(cfg)
+
+    job = Job(
+        measure_id="m-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr.example.com/fhir",
+        status=JobStatus.queued,
+        mcs_url=cfg.mcs_url,
+        mcs_id=cfg.id,
+        mcs_wipe_before_job=wipe_before_job,
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+    return job.id
+
+
+def _wipe_mode_patches(session_factory, patients, mock_measure_report):
+    return (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
+        patch("app.services.orchestrator.push_resources", new_callable=AsyncMock),
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch(
+            "app.services.orchestrator._get_cdr_url",
+            new_callable=AsyncMock,
+            return_value="http://cdr.example.com/fhir",
+        ),
+        patch.object(BatchQueryStrategy, "gather_patients", new_callable=AsyncMock, return_value=patients),
+        patch.object(
+            BatchQueryStrategy,
+            "gather_patient_data",
+            new_callable=AsyncMock,
+            return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]),
+        ),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value=mock_measure_report,
+        ),
+    )
+
+
+async def test_scoped_wipe_is_used_when_connection_did_not_opt_in(test_session, session_factory, mock_measure_report):
+    """The default path: only the gathered patients are deleted.
+
+    This is the acceptance criterion for #392 — a job against a shared MCS must
+    not touch unrelated patient data.
+    """
+    job_id = await _setup_job_with_wipe_mode(test_session, wipe_before_job=False)
+    patients = [
+        {"resourceType": "Patient", "id": "p1", "name": [{"given": ["A"], "family": "B"}]},
+        {"resourceType": "Patient", "id": "p2", "name": [{"given": ["C"], "family": "D"}]},
+    ]
+
+    with contextlib.ExitStack() as stack:
+        mocks = [stack.enter_context(p) for p in _wipe_mode_patches(session_factory, patients, mock_measure_report)]
+        full_wipe, scoped_wipe = mocks[1], mocks[2]
+        await run_job(job_id)
+
+    full_wipe.assert_not_awaited()
+    scoped_wipe.assert_awaited_once_with(
+        base_url="https://mcs-392.example.org/fhir",
+        patient_ids=["p1", "p2"],
+        auth_headers={},
+    )
+
+
+async def test_full_wipe_is_used_when_connection_opted_in(test_session, session_factory, mock_measure_report):
+    """The explicit opt-in restores the historical destructive behavior."""
+    job_id = await _setup_job_with_wipe_mode(test_session, wipe_before_job=True)
+    patients = [{"resourceType": "Patient", "id": "p1", "name": [{"given": ["A"], "family": "B"}]}]
+
+    with contextlib.ExitStack() as stack:
+        mocks = [stack.enter_context(p) for p in _wipe_mode_patches(session_factory, patients, mock_measure_report)]
+        full_wipe, scoped_wipe = mocks[1], mocks[2]
+        await run_job(job_id)
+
+    scoped_wipe.assert_not_awaited()
+    full_wipe.assert_awaited_once_with(base_url="https://mcs-392.example.org/fhir", strict=False, auth_headers={})
+
+
+async def test_wipe_happens_before_the_push(test_session, session_factory, mock_measure_report):
+    """Ordering guard: wiping after the push would delete this job's own data.
+
+    The scoped wipe has to run after the gather (it needs the patient IDs) but
+    before the push. Getting that backwards makes every job evaluate an empty
+    server, which is why this is asserted explicitly rather than left to review.
+    """
+    job_id = await _setup_job_with_wipe_mode(test_session, wipe_before_job=False)
+    patients = [{"resourceType": "Patient", "id": "p1", "name": [{"given": ["A"], "family": "B"}]}]
+
+    call_order: list[str] = []
+
+    with contextlib.ExitStack() as stack:
+        mocks = [stack.enter_context(p) for p in _wipe_mode_patches(session_factory, patients, mock_measure_report)]
+        scoped_wipe, push = mocks[2], mocks[3]
+
+        # Return DEFAULT so the mocks still hand back their normal return_value —
+        # push_resources' result is consumed downstream, and returning None from
+        # the side effect would break it.
+        def _record(name):
+            def _side_effect(*args, **kwargs):
+                call_order.append(name)
+                return DEFAULT
+
+            return _side_effect
+
+        scoped_wipe.side_effect = _record("wipe")
+        push.side_effect = _record("push")
+        await run_job(job_id)
+
+    assert call_order[:2] == ["wipe", "push"], f"wipe must precede push, got {call_order}"
+
+
 async def test_run_job_cdr_unreachable(test_session, session_factory):
     """run_job: CDR unreachable when gathering patients fails the job."""
     job_id = await _setup_job(test_session)
@@ -394,6 +606,7 @@ async def test_run_job_cdr_unreachable(test_session, session_factory):
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -435,6 +648,7 @@ async def test_run_job_partial_patient_failure(test_session, session_factory, mo
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -487,6 +701,7 @@ async def test_run_job_all_patient_failures_marks_job_failed(test_session, sessi
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -582,6 +797,7 @@ async def test_run_job_all_hapi_2788_produces_valueset_job_message(test_session,
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -773,6 +989,7 @@ async def test_process_batch_uses_everything_strategy(test_session, session_fact
             },
         ),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
     ):
         mock_strategy = MagicMock()
         mock_strategy.gather_patient_data = AsyncMock(
@@ -884,6 +1101,7 @@ async def test_run_job_gather_failure_prevents_evaluate_call(test_session, sessi
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -933,6 +1151,7 @@ async def test_run_job_partial_gather_continues_to_evaluate(test_session, sessio
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -995,6 +1214,7 @@ async def test_run_job_evaluate_failure_persists_error_details_and_back_compat(
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
         patch.object(
@@ -1045,6 +1265,7 @@ async def test_run_job_sets_started_at_on_transition_to_running(test_session, se
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch(
             "app.services.orchestrator._get_cdr_url",
@@ -1296,6 +1517,7 @@ async def test_run_job_targets_job_mcs_with_credentials(test_session, session_fa
     with (
         _make_session_factory_patch(session_factory),
         patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped_wipe,
         patch("app.services.orchestrator.push_resources", new_callable=AsyncMock) as mock_push,
         patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
         patch(
@@ -1319,8 +1541,13 @@ async def test_run_job_targets_job_mcs_with_credentials(test_session, session_fa
         await run_job(job_id)
 
     # Wipe cleans the MCS this job will actually use — not the env-var engine.
-    mock_wipe.assert_awaited_once_with(
-        base_url="https://mcs.example.org/fhir", strict=False, auth_headers=expected_auth
+    # Since issue #392 a user-created connection defaults to the scoped wipe, so
+    # the assertion moved from wipe_patient_data to wipe_patients_by_id. The
+    # property under guard is unchanged: the wipe targets the job's MCS, with the
+    # job's credentials.
+    mock_wipe.assert_not_awaited()
+    mock_scoped_wipe.assert_awaited_once_with(
+        base_url="https://mcs.example.org/fhir", patient_ids=["p1"], auth_headers=expected_auth
     )
     # Patient data is pushed to that same MCS, authenticated.
     assert mock_push.await_args.kwargs["target_url"] == "https://mcs.example.org/fhir"

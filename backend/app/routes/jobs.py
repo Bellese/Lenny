@@ -284,6 +284,7 @@ async def create_job(
         mcs_name=mcs.name,
         mcs_id=mcs.id if mcs.id else None,
         mcs_auth_type=mcs.auth_type.value if mcs.auth_type else None,
+        mcs_wipe_before_job=mcs.wipe_before_job,
     )
     session.add(job)
     await session.commit()
