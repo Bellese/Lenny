@@ -1,22 +1,23 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Routes, Route, NavLink, Navigate, useLocation, useNavigate } from 'react-router-dom';
 import styles from './App.module.css';
 import { ROUTES } from './routes';
-import { getHealth, getAdminSettings } from './api/client';
+import { getAdminSettings } from './api/client';
 import {
   SettingsIcon, SearchIcon, XIcon, SunIcon, MoonIcon, GithubIcon,
 } from './components/Icons';
 import HealthChipGroup from './components/HealthChipGroup';
 import SearchContext from './contexts/SearchContext';
+import { ConnectionProvider, useConnection } from './contexts/ConnectionContext';
 import pkg from '../package.json';
 
+// UI-only kind ordering/routing for the health chips — where each chip's
+// "settings" click should land. The health-poll's own kind mapping lives in
+// ConnectionContext.
 const HEALTH_KINDS = [
-  { kind: 'cdr', healthKey: 'cdr', settingsHash: '#cdr-connections' },
-  { kind: 'mcs', healthKey: 'measure_engine', settingsHash: '#mcs-connections' },
+  { kind: 'cdr', settingsHash: '#cdr-connections' },
+  { kind: 'mcs', settingsHash: '#mcs-connections' },
 ];
-
-// Debounce: only flip to 'unreachable' after this many consecutive failed probes.
-const FAILURE_DEBOUNCE = 2;
 
 function MenuIcon() {
   return (
@@ -26,16 +27,11 @@ function MenuIcon() {
   );
 }
 
-export default function App() {
+function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const [navOpen, setNavOpen] = useState(false);
-  // Per-kind chip state: { cdr: {...}, mcs: {...} }. Each entry: { state, name, errorDetails }.
-  const [chips, setChips] = useState({
-    cdr: { state: 'pending', name: '', errorDetails: null },
-    mcs: { state: 'pending', name: '', errorDetails: null },
-  });
-  const failureCounts = useRef({ cdr: 0, mcs: 0 });
+  const { cdr } = useConnection();
   const [theme, setTheme] = useState(() => {
     const current = localStorage.getItem('lenny-theme');
     if (current) return current;
@@ -61,66 +57,8 @@ export default function App() {
     setNavOpen(false);
   }, [location.pathname]);
 
-  // Multi-kind health probe
-  const checkHealth = useCallback(async () => {
-    let health;
-    try {
-      health = await getHealth();
-    } catch {
-      // Network error — bump failure counts for both kinds.
-      const next = {};
-      for (const { kind } of HEALTH_KINDS) {
-        failureCounts.current[kind] = failureCounts.current[kind] + 1;
-        const nextState = failureCounts.current[kind] >= FAILURE_DEBOUNCE ? 'unreachable' : 'pending';
-        next[kind] = { state: nextState, name: '', errorDetails: null };
-      }
-      setChips(prev => ({ ...prev, ...next }));
-      return;
-    }
-
-    const next = {};
-    for (const { kind, healthKey } of HEALTH_KINDS) {
-      const section = health?.[healthKey] || {};
-      const ok = section.status === 'connected' || section.status === 'healthy';
-      if (ok) {
-        failureCounts.current[kind] = 0;
-        next[kind] = { state: 'healthy', name: section.name || '', errorDetails: null };
-      } else {
-        failureCounts.current[kind] = failureCounts.current[kind] + 1;
-        const debounced = failureCounts.current[kind] >= FAILURE_DEBOUNCE;
-        next[kind] = {
-          state: debounced ? 'unreachable' : 'pending',
-          name: section.name || '',
-          errorDetails: section.error_details || null,
-        };
-      }
-    }
-    setChips(prev => ({ ...prev, ...next }));
-  }, []);
-
-  useEffect(() => {
-    let interval = null;
-    const start = () => {
-      if (interval !== null) return;
-      checkHealth();
-      interval = setInterval(checkHealth, 30000);
-    };
-    const stop = () => {
-      if (interval === null) return;
-      clearInterval(interval);
-      interval = null;
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === 'visible') start();
-      else stop();
-    };
-    if (document.visibilityState === 'visible') start();
-    document.addEventListener('visibilitychange', onVisibilityChange);
-    return () => {
-      stop();
-      document.removeEventListener('visibilitychange', onVisibilityChange);
-    };
-  }, [checkHealth]);
+  // Health-poll logic (chips, failure debounce, visibility-aware interval)
+  // lives in ConnectionProvider — see contexts/ConnectionContext.js (#396).
 
   useEffect(() => {
     getAdminSettings()
@@ -175,7 +113,7 @@ export default function App() {
   const activeRoute = ROUTES.find(r => r.path === basePath);
   const pageTitle = activeRoute?.title || 'Lenny';
   const searchPlaceholder = activeRoute?.searchPlaceholder || 'Search…';
-  const cdrChip = chips.cdr;
+  const cdrChip = cdr;
   const cdrOk = cdrChip.state === 'healthy';
 
   return (
@@ -208,7 +146,6 @@ export default function App() {
           <div className={styles.spacer} />
           <div className={styles.topbarRight}>
             <HealthChipGroup
-              chips={chips}
               kinds={HEALTH_KINDS}
               onChipClick={(hash) => navigate(`/settings${hash}`)}
             />
@@ -314,5 +251,17 @@ export default function App() {
         </main>
       </div>
     </SearchContext.Provider>
+  );
+}
+
+// Split from AppShell because a component can't consume a value from a
+// Provider it renders itself — AppShell needs `cdr` (sidebar, status
+// footer), so ConnectionProvider has to sit one level above it. Do not
+// collapse this back into a single component.
+export default function App() {
+  return (
+    <ConnectionProvider>
+      <AppShell />
+    </ConnectionProvider>
   );
 }

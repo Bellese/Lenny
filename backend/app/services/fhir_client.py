@@ -862,7 +862,10 @@ async def evaluate_measure(
 
 
 async def _remap_valueset_ids_for_hapi(
-    entries: list[dict[str, Any]], client: httpx.AsyncClient
+    entries: list[dict[str, Any]],
+    client: httpx.AsyncClient,
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Rewrite ValueSet resource IDs to match existing HAPI resources.
 
@@ -870,6 +873,10 @@ async def _remap_valueset_ids_for_hapi(
     with a bare OID id (e.g. "…1014") but HAPI already holds the same url+version
     under a versioned id (e.g. "…1014-20240112"), the POST fails with HAPI-0902.
     Querying by URL and remapping the id turns the create into an in-place update.
+
+    `base_url` must be the same MCS the bundle is about to be POSTed to —
+    remapping against a different server would rewrite ids to values that don't
+    exist on the upload target.
     """
     for entry in entries:
         resource = entry.get("resource", {})
@@ -877,8 +884,9 @@ async def _remap_valueset_ids_for_hapi(
             continue
         try:
             resp = await client.get(
-                f"{settings.MEASURE_ENGINE_URL}/ValueSet",
+                f"{base_url}/ValueSet",
                 params={"url": resource["url"], "_count": "1"},
+                headers=auth_headers or {},
                 timeout=10,
             )
             if resp.status_code == 200:
@@ -897,29 +905,76 @@ async def _remap_valueset_ids_for_hapi(
     return entries
 
 
-async def upload_measure_bundle(bundle_json: dict[str, Any]) -> dict[str, Any]:
-    """POST a Measure bundle to the measure engine."""
-    async with httpx.AsyncClient(timeout=60.0) as client:
+async def upload_measure_bundle(
+    bundle_json: dict[str, Any],
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """POST a Measure bundle to the measure engine.
+
+    `base_url` is REQUIRED — it identifies the active MCS connection. It is
+    deliberately not defaulted to `settings.MEASURE_ENGINE_URL`: a default is
+    exactly how issue #396 (measure management ignoring the connected MCS)
+    stayed invisible.
+    """
+    async with httpx.AsyncClient(timeout=timeout) as client:
         # Remap ValueSet IDs to avoid HAPI-0902 url+version conflicts with
         # resources already loaded by seed or prior uploads.
         entries = list(bundle_json.get("entry", []))
-        entries = await _remap_valueset_ids_for_hapi(entries, client)
+        entries = await _remap_valueset_ids_for_hapi(entries, client, base_url, auth_headers)
         bundle = {**bundle_json, "entry": entries}
         resp = await client.post(
-            settings.MEASURE_ENGINE_URL,
+            base_url,
             json=bundle,
-            headers={"Content-Type": "application/fhir+json"},
+            headers={**(auth_headers or {}), "Content-Type": "application/fhir+json"},
         )
         resp.raise_for_status()
         return resp.json()
 
 
-async def delete_measure(measure_id: str) -> None:
-    """Delete a Measure resource from the measure engine."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.delete(f"{settings.MEASURE_ENGINE_URL}/Measure/{measure_id}")
+async def delete_measure(
+    measure_id: str,
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> None:
+    """Delete a Measure resource from the measure engine.
+
+    `base_url` is REQUIRED — see `upload_measure_bundle` for why.
+    """
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.delete(f"{base_url}/Measure/{measure_id}", headers=auth_headers or {})
         if resp.status_code not in (200, 202, 204):
             resp.raise_for_status()
+
+
+async def measure_exists(
+    measure_id: str,
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> bool:
+    """Return True when `measure_id` exists on the MCS at `base_url`.
+
+    Uses `Measure?_id=…&_summary=count` so the MCS returns a bare count bundle
+    rather than the full resource.
+
+    Transport failures (connect errors, timeouts, non-2xx) propagate to the
+    caller. Swallowing them into `False` would make "the MCS is unreachable"
+    indistinguishable from "the measure isn't there", and `POST /jobs` needs to
+    answer 502 for one and 400 for the other.
+    """
+    url = f"{base_url}/Measure"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(
+            url,
+            params={"_id": measure_id, "_summary": "count"},
+            headers=auth_headers or {},
+        )
+        resp.raise_for_status()
+        bundle = resp.json()
+    return bundle.get("total", 0) > 0
 
 
 async def wipe_patient_data(*, base_url: str, strict: bool = True, auth_headers: dict[str, str] | None = None) -> None:
@@ -1430,11 +1485,18 @@ async def get_group_members(
     return patients
 
 
-async def list_measures() -> dict[str, Any]:
-    """List all Measure resources on the measure engine."""
-    url = f"{settings.MEASURE_ENGINE_URL}/Measure?_count=100"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url)
+async def list_measures(
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """List all Measure resources on the measure engine at `base_url`.
+
+    `base_url` is REQUIRED — see `upload_measure_bundle` for why.
+    """
+    url = f"{base_url}/Measure?_count=100"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, headers=auth_headers or {})
         resp.raise_for_status()
         return resp.json()
 

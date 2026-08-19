@@ -4,9 +4,10 @@ Mirrors `CDRConfig` via the shared `ConnectionConfigMixin`. MCS-specific
 shape:
 - `mcs_url` is the FHIR base URL of the measure-calculation server (e.g.,
   HAPI's `$evaluate-measure` endpoint).
-- No `is_read_only` flag — Lenny only POSTs `$evaluate-measure` and
-  `$data-requirements` to the MCS, so the read/write distinction that
-  matters for CDR doesn't apply here.
+- `is_read_only` comes from `ConnectionConfigMixin` (issue #396). Lenny's
+  measure-management surface (upload / delete of Measure bundles) targets the
+  active MCS, so an attendee pointing at someone else's server needs the same
+  write guard the CDR has.
 
 Like `CDRConfig`, the partial unique index `idx_one_active_mcs` is declared
 in `__table_args__` so `Base.metadata.create_all` generates it for both

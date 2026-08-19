@@ -1,25 +1,96 @@
-"""Measure management endpoints — proxy to the measure engine."""
+"""Measure management endpoints — proxy to the active MCS connection.
+
+Every route here resolves the MCS from `get_active_mcs` rather than from
+`settings.MEASURE_ENGINE_URL`. Reading the env var meant the measure list never
+reflected the server the user had actually connected to (issue #396).
+"""
 
 import json
 import logging
 
 import httpx
-from fastapi import APIRouter, File, HTTPException, Request, Response, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile
 
 from app.config import MAX_UPLOAD_SIZE
+from app.dependencies import ConnectionContext, get_active_mcs
 from app.limiter import limiter
-from app.services.fhir_client import delete_measure, list_measures, upload_measure_bundle
+from app.services.fhir_client import _build_auth_headers, delete_measure, list_measures, upload_measure_bundle
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/measures", tags=["measures"])
 
 
-@router.get("")
-async def get_measures() -> dict:
-    """List all Measure resources from the measure engine."""
+async def _resolve_auth(mcs: ConnectionContext) -> dict[str, str]:
+    """Resolve MCS credentials, converting failures into a 502 OperationOutcome.
+
+    SMART auth makes a token-endpoint round trip, so `_build_auth_headers` can
+    fail exactly like any other upstream call (`ValueError` on malformed
+    credentials, `HTTPStatusError` from the token endpoint). Left unguarded it
+    escapes as a bare 500 with no OperationOutcome body — the one MCS failure
+    mode on this surface that wouldn't name the server.
+
+    Deliberately a wrapper rather than moving the call inside each handler's
+    existing `try`: `delete_measure_route` catches `httpx.HTTPStatusError` and
+    maps 404 to "measure not found", which would mis-report a 404 from a SMART
+    token endpoint as a missing measure.
+    """
     try:
-        bundle = await list_measures()
+        return await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
+    except Exception as exc:
+        logger.exception(
+            "Failed to resolve MCS credentials",
+            extra={"mcs_id": mcs.id, "mcs_name": mcs.name},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "diagnostics": (f"Cannot authenticate to measure engine '{mcs.name}': {sanitize_error(exc)}"),
+                    }
+                ],
+            },
+        ) from exc
+
+
+def _read_only_outcome(mcs: ConnectionContext, action: str) -> HTTPException:
+    """403 OperationOutcome for a write attempt against a read-only MCS."""
+    return HTTPException(
+        status_code=403,
+        detail={
+            "resourceType": "OperationOutcome",
+            "issue": [
+                {
+                    "severity": "error",
+                    "code": "forbidden",
+                    "diagnostics": (
+                        f"The active measure calculation server '{mcs.name}' is marked read-only. "
+                        f"Cannot {action}. Switch to a writable MCS connection in Settings."
+                    ),
+                }
+            ],
+        },
+    )
+
+
+@router.get("")
+async def get_measures(mcs: ConnectionContext = Depends(get_active_mcs)) -> dict:
+    """List all Measure resources from the active MCS.
+
+    No fallback to the local engine: if the connected MCS is unreachable the
+    caller gets a 502 naming it, not a silently different measure list.
+    """
+    auth_headers = await _resolve_auth(mcs)
+    try:
+        bundle = await list_measures(
+            mcs.mcs_url,
+            auth_headers=auth_headers,
+            timeout=float(mcs.request_timeout_seconds),
+        )
         # Simplify response for the frontend
         measures = []
         for entry in bundle.get("entry", []):
@@ -36,9 +107,17 @@ async def get_measures() -> dict:
                         "description": resource.get("description"),
                     }
                 )
-        return {"measures": measures, "total": len(measures)}
+        # Identity only — deliberately no `url`. The 502 path below sanitizes
+        # internal hostnames out of its diagnostics; publishing mcs_url on the
+        # 200 path would undo that for no benefit. Consumers that need the URL
+        # read it from GET /settings/mcs-connections.
+        return {
+            "measures": measures,
+            "total": len(measures),
+            "mcs": {"id": mcs.id, "name": mcs.name},
+        }
     except Exception as exc:
-        logger.exception("Failed to fetch measures from engine")
+        logger.exception("Failed to fetch measures from engine", extra={"mcs_id": mcs.id, "mcs_name": mcs.name})
         raise HTTPException(
             status_code=502,
             detail={
@@ -47,7 +126,7 @@ async def get_measures() -> dict:
                     {
                         "severity": "error",
                         "code": "exception",
-                        "diagnostics": f"Cannot reach measure engine: {sanitize_error(exc)}",
+                        "diagnostics": (f"Cannot reach measure engine '{mcs.name}': {sanitize_error(exc)}"),
                     }
                 ],
             },
@@ -56,12 +135,26 @@ async def get_measures() -> dict:
 
 @router.post("/upload")
 @limiter.limit("10/minute")
-async def upload_measure(request: Request, file: UploadFile = File(...)) -> dict:
-    """Upload a FHIR Measure bundle (JSON) to the measure engine.
+async def upload_measure(
+    request: Request,
+    file: UploadFile = File(...),
+    mcs: ConnectionContext = Depends(get_active_mcs),
+) -> dict:
+    """Upload a FHIR Measure bundle (JSON) to the active MCS.
 
     Accepts a JSON file containing a FHIR Bundle with Measure and Library
-    resources. POSTs it to the measure engine as a transaction Bundle.
+    resources. POSTs it to the active MCS as a transaction Bundle.
     """
+    # Checked before `file.read()` and before any upstream call, so a read-only
+    # MCS costs no memory and no network round trip.
+    #
+    # NOT a guard against transferring the bytes: Starlette has already parsed
+    # the multipart body into `file` (spooling to disk past its threshold)
+    # before this handler is entered. Rejecting the transfer itself would have
+    # to happen at the ASGI/proxy layer, which this is not.
+    if mcs.is_read_only:
+        raise _read_only_outcome(mcs, "upload measure bundles")
+
     if not file.filename or not file.filename.lower().endswith(".json"):
         raise HTTPException(
             status_code=400,
@@ -124,16 +217,26 @@ async def upload_measure(request: Request, file: UploadFile = File(...)) -> dict
             },
         )
 
+    auth_headers = await _resolve_auth(mcs)
     try:
-        result = await upload_measure_bundle(bundle_json)
-        logger.info("Measure bundle uploaded: %s", file.filename)
+        result = await upload_measure_bundle(
+            bundle_json,
+            mcs.mcs_url,
+            auth_headers=auth_headers,
+            timeout=float(mcs.request_timeout_seconds),
+        )
+        logger.info(
+            "Measure bundle uploaded: %s",
+            file.filename,
+            extra={"mcs_id": mcs.id, "mcs_name": mcs.name},
+        )
         return {
             "status": "success",
             "message": "Measure bundle uploaded successfully",
             "result": result,
         }
     except Exception as exc:
-        logger.exception("Failed to upload measure bundle")
+        logger.exception("Failed to upload measure bundle", extra={"mcs_id": mcs.id, "mcs_name": mcs.name})
         raise HTTPException(
             status_code=502,
             detail={
@@ -142,7 +245,7 @@ async def upload_measure(request: Request, file: UploadFile = File(...)) -> dict
                     {
                         "severity": "error",
                         "code": "exception",
-                        "diagnostics": f"Measure engine rejected bundle: {sanitize_error(exc)}",
+                        "diagnostics": (f"Measure engine '{mcs.name}' rejected bundle: {sanitize_error(exc)}"),
                     }
                 ],
             },
@@ -150,10 +253,22 @@ async def upload_measure(request: Request, file: UploadFile = File(...)) -> dict
 
 
 @router.delete("/{measure_id}", status_code=204)
-async def delete_measure_route(measure_id: str) -> Response:
-    """Delete a Measure resource from the measure engine."""
+async def delete_measure_route(
+    measure_id: str,
+    mcs: ConnectionContext = Depends(get_active_mcs),
+) -> Response:
+    """Delete a Measure resource from the active MCS."""
+    if mcs.is_read_only:
+        raise _read_only_outcome(mcs, "delete measures")
+
+    auth_headers = await _resolve_auth(mcs)
     try:
-        await delete_measure(measure_id)
+        await delete_measure(
+            measure_id,
+            mcs.mcs_url,
+            auth_headers=auth_headers,
+            timeout=float(mcs.request_timeout_seconds),
+        )
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             raise HTTPException(
@@ -169,7 +284,10 @@ async def delete_measure_route(measure_id: str) -> Response:
                     ],
                 },
             ) from exc
-        logger.exception("Measure engine rejected measure delete", extra={"measure_id": measure_id})
+        logger.exception(
+            "Measure engine rejected measure delete",
+            extra={"measure_id": measure_id, "mcs_id": mcs.id, "mcs_name": mcs.name},
+        )
         raise HTTPException(
             status_code=502,
             detail={
@@ -178,13 +296,16 @@ async def delete_measure_route(measure_id: str) -> Response:
                     {
                         "severity": "error",
                         "code": "exception",
-                        "diagnostics": f"Measure engine rejected delete: {sanitize_error(exc)}",
+                        "diagnostics": (f"Measure engine '{mcs.name}' rejected delete: {sanitize_error(exc)}"),
                     }
                 ],
             },
         ) from exc
     except Exception as exc:
-        logger.exception("Failed to delete measure", extra={"measure_id": measure_id})
+        logger.exception(
+            "Failed to delete measure",
+            extra={"measure_id": measure_id, "mcs_id": mcs.id, "mcs_name": mcs.name},
+        )
         raise HTTPException(
             status_code=502,
             detail={
@@ -193,11 +314,11 @@ async def delete_measure_route(measure_id: str) -> Response:
                     {
                         "severity": "error",
                         "code": "exception",
-                        "diagnostics": f"Cannot reach measure engine: {sanitize_error(exc)}",
+                        "diagnostics": (f"Cannot reach measure engine '{mcs.name}': {sanitize_error(exc)}"),
                     }
                 ],
             },
         ) from exc
 
-    logger.info("Measure deleted", extra={"measure_id": measure_id})
+    logger.info("Measure deleted", extra={"measure_id": measure_id, "mcs_id": mcs.id, "mcs_name": mcs.name})
     return Response(status_code=204)

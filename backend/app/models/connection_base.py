@@ -2,8 +2,13 @@
 
 Connection kinds (CDR, MCS, future TS/MR/MRR) all share a common shape:
 identity, optional unique name, auth type + encrypted credentials, active flag,
-default flag, timestamps. Each kind keeps its own table and adds kind-specific
-fields (CDR has `is_read_only`; future kinds will add their own).
+default flag, read-only flag, timestamps. Each kind keeps its own table and adds
+kind-specific fields (CDR adds `cdr_url` + `max_bundle_entries`, MCS adds
+`mcs_url`; future kinds will add their own).
+
+`is_read_only` lives here rather than on `CDRConfig` because it applies to every
+connection kind: an MCS the attendee doesn't own must not receive measure-bundle
+uploads or deletes either.
 
 The `auth_credentials` column is wrapped in `@declared_attr` because it holds
 a `MutableDict.as_mutable(EncryptedJSON)` instance — a stateful TypeDecorator.
@@ -56,6 +61,7 @@ class ConnectionConfigMixin:
 
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    is_read_only: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     request_timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=30, server_default="30")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True, onupdate=func.now())
