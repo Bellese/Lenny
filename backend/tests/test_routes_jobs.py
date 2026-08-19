@@ -1147,6 +1147,55 @@ async def test_create_job_checks_measure_against_active_mcs(client, test_session
     assert measure_present.await_args.args[1] == "https://attendee-mcs.example.com/fhir"
 
 
+async def test_create_job_snapshots_wipe_before_job_from_active_mcs(client, test_session, measure_present):
+    """POST /jobs records the active MCS's wipe mode on the job (issue #392).
+
+    Without this assertion the snapshot could be dropped from the route and
+    nothing would fail: every job would silently fall back to the scoped wipe,
+    including against a connection whose owner deliberately opted into the full
+    wipe. The orchestrator tests build Job rows directly, so they cannot catch it.
+    """
+    from sqlalchemy import select as sa_select
+    from sqlalchemy import update as sa_update
+
+    from app.models.connection_base import AuthType
+    from app.models.job import Job
+    from app.models.mcs_config import MCSConfig
+
+    await test_session.execute(sa_update(MCSConfig).values(is_active=False))
+    cfg = MCSConfig(
+        name="Dedicated Engine",
+        mcs_url="https://dedicated.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        is_default=False,
+        wipe_before_job=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+
+    resp = await client.post("/jobs", json=_JOB_PAYLOAD)
+    assert resp.status_code == 201
+
+    job = (await test_session.execute(sa_select(Job).where(Job.id == resp.json()["id"]))).scalar_one()
+    assert job.mcs_wipe_before_job is True
+
+
+async def test_create_job_defaults_wipe_before_job_to_scoped(client, test_session, measure_present):
+    """A job against a connection that did not opt in snapshots the safe mode."""
+    from sqlalchemy import select as sa_select
+
+    from app.models.job import Job
+
+    await _make_active_mcs(test_session)  # created without wipe_before_job
+
+    resp = await client.post("/jobs", json=_JOB_PAYLOAD)
+    assert resp.status_code == 201
+
+    job = (await test_session.execute(sa_select(Job).where(Job.id == resp.json()["id"]))).scalar_one()
+    assert job.mcs_wipe_before_job is False
+
+
 async def test_create_job_preflight_timeout_is_bounded(client, test_session, measure_present):
     """The pre-flight is capped at 10s regardless of the connection's timeout.
 

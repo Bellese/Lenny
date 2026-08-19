@@ -188,3 +188,82 @@ def test_is_read_only_is_shared_by_the_mixin():
     assert "is_read_only" in ConnectionConfigMixin.__dict__
     assert "is_read_only" in CDRConfig.__table__.columns
     assert "is_read_only" in MCSConfig.__table__.columns
+
+
+# ---------------------------------------------------------------------------
+# get_active_mcs: wipe_before_job (issue #392)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_get_active_mcs_fallback_keeps_full_wipe(test_session):
+    """No active MCS row → the built-in local engine, which DOES full-wipe.
+
+    The seeded local engine is Lenny's own container; wiping it between jobs is
+    correct and keeps the dataset from growing without bound. Issue #392 only
+    makes the full wipe unsafe for servers Lenny does not own.
+    """
+    from app.dependencies import get_active_mcs
+
+    ctx = await get_active_mcs(session=test_session)
+    assert ctx.wipe_before_job is True
+
+
+@pytest.mark.asyncio
+async def test_get_active_mcs_defaults_user_created_rows_to_scoped_wipe(test_session):
+    """A connection a user created defaults to the safe, scoped wipe.
+
+    This is the core of #392: pointing Lenny at a shared connectathon server must
+    not delete other participants' patients on the first job.
+    """
+    from app.dependencies import get_active_mcs
+    from app.models.mcs_config import MCSConfig
+
+    cfg = MCSConfig(
+        mcs_url="https://shared-mcs.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        name="Shared MCS",
+        is_default=False,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+
+    ctx = await get_active_mcs(session=test_session)
+    assert ctx.wipe_before_job is False
+
+
+@pytest.mark.asyncio
+async def test_get_active_mcs_populates_wipe_before_job(test_session):
+    """An explicit opt-in on the row carries through to the context."""
+    from app.dependencies import get_active_mcs
+    from app.models.mcs_config import MCSConfig
+
+    cfg = MCSConfig(
+        mcs_url="https://my-own-mcs.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        name="My Own MCS",
+        is_default=False,
+        wipe_before_job=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+
+    ctx = await get_active_mcs(session=test_session)
+    assert ctx.wipe_before_job is True
+
+
+def test_wipe_before_job_is_mcs_only():
+    """wipe_before_job belongs to MCSConfig, NOT the shared mixin.
+
+    Unlike is_read_only — which is meaningful for any connection Lenny can write
+    to — only the measure engine is wiped before a job. The CDR is read from and
+    wiped only by an explicit factory reset. Putting this on the mixin would give
+    CDRConfig a column with no meaning.
+    """
+    from app.models.mcs_config import MCSConfig
+
+    assert "wipe_before_job" in MCSConfig.__table__.columns
+    assert "wipe_before_job" not in ConnectionConfigMixin.__dict__
+    assert "wipe_before_job" not in CDRConfig.__table__.columns

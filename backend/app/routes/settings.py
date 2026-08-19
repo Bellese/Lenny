@@ -97,6 +97,7 @@ class MCSConnectionResponse(BaseModel):
     is_active: bool
     is_default: bool
     is_read_only: bool
+    wipe_before_job: bool
     request_timeout_seconds: int
 
     model_config = {"from_attributes": True}
@@ -108,6 +109,9 @@ class MCSConnectionCreate(BaseModel):
     auth_type: str = "none"
     auth_credentials: dict | None = None
     is_read_only: bool = False
+    # Issue #392: defaults to False so adding a shared server and running a job
+    # cannot delete other people's patients. Opting in is a deliberate act.
+    wipe_before_job: bool = False
     request_timeout_seconds: int = Field(default=30, ge=1, le=_MAX_REQUEST_TIMEOUT_SECONDS)
 
 

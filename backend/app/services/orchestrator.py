@@ -29,6 +29,7 @@ from app.services.fhir_client import (
     push_resources,
     snapshot_evaluated_resources,
     wipe_patient_data,
+    wipe_patients_by_id,
 )
 from app.services.fhir_errors import redact_outcome, sanitize_url
 from app.services.validation import sanitize_error
@@ -179,12 +180,6 @@ async def run_job(job_id: int) -> None:
         mcs_url = await _get_mcs_url(job_id)
         mcs_auth_headers = await _get_mcs_auth_headers(job_id)
 
-        # Step 1: Wipe patient data from measure engine (cleanup from prior job)
-        logger.info("Wiping prior patient data from measure engine", extra={"job_id": job_id})
-        await wipe_patient_data(base_url=mcs_url, strict=False, auth_headers=mcs_auth_headers)
-        if await _stop_or_delete_job(job_id):
-            return
-
         # Step 2: Resolve CDR connection settings
         auth_headers = await _get_cdr_auth_headers(job_id)
         cdr_url = await _get_cdr_url(job_id)
@@ -222,6 +217,25 @@ async def run_job(job_id: int) -> None:
         patient_ids = list(patient_map.keys())
         batch_size = settings.BATCH_SIZE
 
+        # Step 4a: Clear the prior run's data off the MCS (issue #392).
+        #
+        # This sits after the gather and before the push, not at the top of the
+        # job, because the scoped wipe needs the patient IDs to scope to. Running
+        # it after the push would delete the data this job just pushed.
+        #
+        # Consequence of the move: a job that gathers zero patients returns above
+        # without wiping at all. Nothing is evaluated in that case either, so no
+        # result is affected — but it does mean an empty job no longer doubles as
+        # a way to clear the local engine.
+        await _wipe_prior_run_data(
+            job_id=job_id,
+            mcs_url=mcs_url,
+            mcs_auth_headers=mcs_auth_headers,
+            patient_ids=patient_ids,
+        )
+
+        # The cancellation check that already guarded the batch-creation block
+        # below now also covers the wipe above — no second check needed.
         if await _stop_or_delete_job(job_id):
             return
         async with async_session() as session:
@@ -398,6 +412,55 @@ async def _get_mcs_auth_headers(job_id: int) -> dict[str, str]:
                 "was created against. Refusing to send its credentials to the snapshotted URL."
             )
         return await _build_auth_headers(cfg.auth_type, cfg.auth_credentials)
+
+
+async def _wipe_prior_run_data(
+    *,
+    job_id: int,
+    mcs_url: str,
+    mcs_auth_headers: dict[str, str],
+    patient_ids: list[str],
+) -> None:
+    """Clear the previous run's data off the MCS before this job pushes (issue #392).
+
+    Two modes, chosen by the job's `mcs_wipe_before_job` snapshot:
+
+    - False (default for every user-created connection): delete only the patients
+      this job is about to push. Safe on a shared server, and equivalent for
+      correctness because evaluation is per-subject.
+    - True (the seeded local engine, or an explicit opt-in): the historical
+      unfiltered wipe of every patient on the target.
+
+    The full-wipe branch logs at WARNING with the target URL. It is a destructive
+    operation against a server Lenny may not own, and issue #392 was filed partly
+    because the only trace it left was a routine INFO line.
+    """
+    async with async_session() as session:
+        job = await session.get(Job, job_id)
+        full_wipe = bool(job.mcs_wipe_before_job) if job else False
+
+    if full_wipe:
+        logger.warning(
+            "Full patient-data wipe starting — deletes ALL patients on the target MCS",
+            extra={
+                "job_id": job_id,
+                "mcs_url": sanitize_url(mcs_url),
+                "scope": "all-patients",
+            },
+        )
+        await wipe_patient_data(base_url=mcs_url, strict=False, auth_headers=mcs_auth_headers)
+        return
+
+    logger.info(
+        "Scoped patient-data wipe starting — deletes only this job's patients",
+        extra={
+            "job_id": job_id,
+            "mcs_url": sanitize_url(mcs_url),
+            "scope": "job-patients",
+            "patient_count": len(patient_ids),
+        },
+    )
+    await wipe_patients_by_id(base_url=mcs_url, patient_ids=patient_ids, auth_headers=mcs_auth_headers)
 
 
 async def _get_mcs_url(job_id: int) -> str:

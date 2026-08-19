@@ -31,6 +31,9 @@ const KIND_API = {
     addLabel: 'Add MCS connection',
     urlField: 'mcs_url',
     showReadOnlyBadge: true,
+    // Issue #392: surface the destructive opt-in on the row, so a full-wipe
+    // connection is visible without opening the edit modal.
+    showWipeBadge: true,
     list: getMcsConnections,
     activate: activateMcsConnection,
     remove: deleteMcsConnection,
@@ -165,6 +168,14 @@ export default function ConnectionSection({ kind, onChange }) {
                       <span className={styles.connBadge}>{AUTH_LABEL[conn.auth_type] || conn.auth_type || 'No Auth'}</span>
                       {api.showReadOnlyBadge && conn.is_read_only && (
                         <span className={`${styles.connBadge} ${styles.connBadgeReadOnly}`}>read-only</span>
+                      )}
+                      {api.showWipeBadge && conn.wipe_before_job && (
+                        <span
+                          className={`${styles.connBadge} ${styles.connBadgeFullWipe}`}
+                          title="Every job deletes ALL patient data on this server before running"
+                        >
+                          full wipe
+                        </span>
                       )}
                     </div>
                     <div className={styles.connActions}>

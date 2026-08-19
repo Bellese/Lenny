@@ -46,6 +46,10 @@ class ConnectionContext:
     cdr_url: str = ""
     mcs_url: str = ""
     is_read_only: bool = False  # Shared across kinds (issue #396) — blocks writes
+    # MCS-only (issue #392). True = a job full-wipes the target before running;
+    # False = it wipes only the patients it is about to push. Always False for a
+    # CDR context, which is never wiped as part of a job.
+    wipe_before_job: bool = False
     request_timeout_seconds: int = 30
     kind: ConnectionKind = ConnectionKind.cdr
 
@@ -115,6 +119,12 @@ async def get_active_mcs(session: AsyncSession = Depends(get_session)) -> Connec
             # The built-in local measure engine is writable — uploading and
             # deleting measure bundles against it is the whole point.
             is_read_only=False,
+            # ...and it is Lenny's own container, so the historical full wipe is
+            # correct here (issue #392). This fallback fires on a stock install
+            # before the seed has run; defaulting it to False would silently
+            # change local behavior for exactly the users who never configured
+            # anything.
+            wipe_before_job=True,
             request_timeout_seconds=30,
             kind=ConnectionKind.mcs,
         )
@@ -126,6 +136,7 @@ async def get_active_mcs(session: AsyncSession = Depends(get_session)) -> Connec
         is_default=cfg.is_default,
         mcs_url=cfg.mcs_url,
         is_read_only=cfg.is_read_only,
+        wipe_before_job=cfg.wipe_before_job,
         request_timeout_seconds=cfg.request_timeout_seconds,
         kind=ConnectionKind.mcs,
     )

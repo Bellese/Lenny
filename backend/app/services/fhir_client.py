@@ -29,6 +29,12 @@ from app.services.fhir_errors import (
 
 logger = logging.getLogger(__name__)
 
+# Consecutive transport failures that abort a wipe. Shared by `wipe_patient_data`
+# and `wipe_patients_by_id`: a timed-out DELETE leaves HAPI's server-side
+# operation running, and pushing new data over it lets the in-flight DELETE wipe
+# the freshly-pushed resources.
+_MAX_CONSECUTIVE_FAILURES = 3
+
 
 @dataclass
 class FailedResourceFetch:
@@ -1021,7 +1027,6 @@ async def wipe_patient_data(*, base_url: str, strict: bool = True, auth_headers:
         "Organization",
         "Patient",
     ]
-    _MAX_CONSECUTIVE_FAILURES = 3
     consecutive_failures = 0
     async with httpx.AsyncClient(timeout=300.0) as client:
         for rt in resource_types:
@@ -1061,6 +1066,150 @@ async def wipe_patient_data(*, base_url: str, strict: bool = True, auth_headers:
                     )
 
 
+# Patient-scoped wipe (issue #392) ------------------------------------------
+#
+# Resource type -> the search parameter that scopes it to a patient. Values were
+# verified empirically against `hapiproject/hapi:v8.8.0-1` by issuing
+# `GET /{Type}?{param}=Patient/x&_summary=count` and checking for 200 vs 400 —
+# not read off the R4 spec, because the two disagree in one place: AdverseEvent
+# answers `subject` and 400s on `patient`.
+#
+# Ordered clinical-resources-before-Patient for the same reason as the full
+# wipe: HAPI 409s on deleting a Patient that is still referenced.
+_PATIENT_SCOPED_TYPES: list[tuple[str, str]] = [
+    ("MeasureReport", "patient"),
+    ("Condition", "patient"),
+    ("Observation", "patient"),
+    ("Encounter", "patient"),
+    ("Procedure", "patient"),
+    ("MedicationRequest", "patient"),
+    ("MedicationAdministration", "patient"),
+    ("Immunization", "patient"),
+    ("DiagnosticReport", "patient"),
+    ("AllergyIntolerance", "patient"),
+    ("AdverseEvent", "subject"),
+    ("CarePlan", "patient"),
+    ("CareTeam", "patient"),
+    ("Goal", "patient"),
+    ("ServiceRequest", "patient"),
+    ("DeviceRequest", "patient"),
+    ("Task", "patient"),
+    ("Coverage", "patient"),
+    ("Claim", "patient"),
+    # Patient is scoped by its own id, not by a reference param — HAPI 400s on
+    # both `patient=` and `subject=` here. It MUST stay last: HAPI returns 409
+    # when a Patient is still referenced by a Condition/Encounter/etc., so every
+    # clinical type above has to be cleared first.
+    ("Patient", "_id"),
+]
+
+# Deliberately absent from `_PATIENT_SCOPED_TYPES`: Medication, Location,
+# Practitioner, Organization. HAPI 400s on both `patient=` and `subject=` for
+# all four, so there is no way to scope a delete to them — and no need. They are
+# shared infrastructure on a multi-tenant server (deleting another participant's
+# Practitioner is exactly the harm #392 is about), and `push_resources` PUTs them
+# back by ID on every job, so a stale copy is overwritten rather than orphaned.
+_PATIENT_UNSCOPABLE_TYPES = ("Medication", "Location", "Practitioner", "Organization")
+
+# Max patient IDs per conditional-delete URL. 50 x ~40-char FHIR ids keeps the
+# request line under ~2KB, well inside the 8KB default header limit on HAPI's
+# embedded Tomcat. A 460-patient job becomes ~10 requests per type instead of 460.
+_WIPE_ID_CHUNK_SIZE = 50
+
+
+async def wipe_patients_by_id(
+    *,
+    base_url: str,
+    patient_ids: list[str],
+    auth_headers: dict[str, str] | None = None,
+) -> None:
+    """Delete only the given patients' data from a FHIR server (issue #392).
+
+    The safe alternative to `wipe_patient_data` when the target is a shared MCS.
+    `wipe_patient_data` issues unfiltered conditional deletes, which remove every
+    patient on the server — including other participants' data at a connectathon.
+
+    This is not a correctness compromise. `evaluate_measure` calls
+    `$evaluate-measure?...&subject=Patient/<id>` per patient and the job
+    aggregates only over the patients it gathered, so resources belonging to
+    patients this job never evaluates cannot affect its populations. The stale
+    data that *can* affect them — a resource attached to a patient this job is
+    about to push, left over from a prior run and absent from this push — is
+    exactly what this deletes.
+
+    No-ops on an empty `patient_ids`: falling through to an unscoped sweep is the
+    bug this function exists to prevent.
+
+    Raises RuntimeError on 401/403 (same fail-loud rule as `wipe_patient_data`:
+    a wipe that reports success while deleting nothing corrupts the next
+    evaluation silently) and after 3 consecutive transport failures.
+    """
+    if not patient_ids:
+        logger.info("Scoped wipe: no patients to wipe", extra={"target": sanitize_url(base_url)})
+        return
+
+    chunks = [patient_ids[i : i + _WIPE_ID_CHUNK_SIZE] for i in range(0, len(patient_ids), _WIPE_ID_CHUNK_SIZE)]
+    logger.info(
+        "Scoped wipe starting",
+        extra={
+            "target": sanitize_url(base_url),
+            "patient_count": len(patient_ids),
+            "resource_types": len(_PATIENT_SCOPED_TYPES),
+            "requests": len(_PATIENT_SCOPED_TYPES) * len(chunks),
+            "skipped_types": list(_PATIENT_UNSCOPABLE_TYPES),
+        },
+    )
+
+    consecutive_failures = 0
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        for rt, param in _PATIENT_SCOPED_TYPES:
+            for chunk in chunks:
+                # Comma-joined values are a FHIR OR match, so one request covers
+                # the whole chunk. Unqualified ids (not "Patient/x") match the
+                # reference search param and keep the URL short.
+                search_filter = f"{param}={','.join(chunk)}"
+                delete_url = f"{base_url}/{rt}?{search_filter}"
+                try:
+                    resp = await client.delete(delete_url, headers=auth_headers or {})
+                    if resp.status_code in (401, 403):
+                        raise RuntimeError(
+                            f"Not authorized to wipe {rt} at the target server (HTTP {resp.status_code}). "
+                            "Check the connection's credentials. Job aborted rather than "
+                            "evaluating against stale data."
+                        )
+                    if resp.status_code >= 400 and resp.status_code != 404:
+                        # 404 = the server doesn't stock this type; nothing to do.
+                        # Anything else means the conditional delete itself was
+                        # refused — most often HAPI's 412 when the search matches
+                        # multiple resources and `allow_multiple_delete` is false.
+                        # Our own containers enable it, but a shared remote MCS
+                        # (the case this function exists for) may not, so fall back
+                        # to a scoped search-and-delete rather than logging and
+                        # moving on with nothing deleted.
+                        logger.info(
+                            "Scoped wipe: conditional delete refused, falling back to per-resource delete",
+                            extra={"resourceType": rt, "status_code": resp.status_code},
+                        )
+                        await _delete_all_of_type(client, rt, base_url, auth_headers, search_filter=search_filter)
+                    consecutive_failures = 0
+                except httpx.HTTPError:
+                    consecutive_failures += 1
+                    logger.warning(
+                        "Scoped wipe: request failed",
+                        extra={"resourceType": rt, "consecutive_failures": consecutive_failures},
+                    )
+                    if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                        raise RuntimeError(
+                            f"FHIR server unreachable: {consecutive_failures} consecutive "
+                            "timeouts during scoped wipe. Job aborted."
+                        )
+
+    logger.info(
+        "Scoped wipe complete",
+        extra={"target": sanitize_url(base_url), "patient_count": len(patient_ids)},
+    )
+
+
 async def wipe_measure_definitions() -> None:
     """Delete all measure-definition resources from the measure engine.
 
@@ -1089,16 +1238,25 @@ async def _delete_all_of_type(
     resource_type: str,
     base_url: str,
     auth_headers: dict[str, str] | None = None,
+    search_filter: str | None = None,
 ) -> None:
-    """Delete all resources of a given type one by one from the given FHIR server.
+    """Delete resources of a given type one by one from the given FHIR server.
 
     `auth_headers` MUST be threaded through from the caller. This is the fallback
     path taken when conditional delete is unsupported, and the target may be an
     authenticated remote MCS — an unauthenticated sweep here 401s on the first
     GET and returns silently, making the whole wipe a no-op that reports success.
+
+    `search_filter` narrows the sweep to matching resources (e.g.
+    `"patient=p1,p2"`). Without it every resource of the type is deleted, which is
+    what `wipe_patient_data` wants; `wipe_patients_by_id` passes a filter so the
+    fallback stays as scoped as the conditional delete it is standing in for.
+    Passing an unscoped fallback there would turn a shared-server safety feature
+    into the exact full wipe it exists to prevent (issue #392).
     """
     headers = auth_headers or {}
-    url: Optional[str] = f"{base_url}/{resource_type}?_count=100"
+    query = f"_count=100&{search_filter}" if search_filter else "_count=100"
+    url: Optional[str] = f"{base_url}/{resource_type}?{query}"
     while url:
         resp = await client.get(url, headers=headers)
         if resp.status_code in (401, 403):

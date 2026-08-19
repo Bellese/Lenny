@@ -120,8 +120,28 @@ This log records significant technical and process choices with their rationale.
 
 **Why the wipe moved above MCS resolution in `run_job`:** the wipe must clear the same server the job will push to and evaluate against. Wiping a different server leaves the real target's prior-run patients in place, and those inflate the next evaluation's populations — a silent wrong answer rather than a visible failure.
 
-**Consequence — the wipe is now destructive against shared infrastructure.** Pointing the wipe at the job's MCS means Lenny deletes all patient data on a remote MCS at job start. Correct for a dedicated engine, dangerous for a shared connectathon server. Tracked in #392; a scoped wipe (delete only the IDs this job pushes) is the likely resolution.
+**Consequence — the wipe was destructive against shared infrastructure.** Pointing the wipe at the job's MCS meant Lenny deleted all patient data on a remote MCS at job start. Correct for a dedicated engine, dangerous for a shared connectathon server. Tracked in #392 and **resolved in ADR-012** — the scoped wipe anticipated here is what shipped.
 
 **Alternatives considered:** (a) Snapshot credentials onto `Job` — rejected, secret sprawl. (b) Add `mcs_auth_type` mirroring `cdr_auth_type` — unnecessary: `mcs_id` alone distinguishes "no MCS linked" from "config deleted", so no migration was needed. (c) Fix only the 401 and leave push targeting the local engine — rejected, would have produced clean `200`s with every population at zero.
 
 **Status:** Verified against the CMS connectathon server — 401s went 122 → 0, all responses 200, and patient data reached the remote MCS (0 → 56 Patients). Remaining failures there are server-side (`HSEARCH800001`, Hibernate Search not initialized), not client-side.
+
+---
+
+## ADR-012: The pre-job wipe is patient-scoped by default; full wipe is per-connection opt-in (2026-08-19)
+
+**Decision:** `run_job` no longer deletes every patient on the target measure engine. It deletes only the patients the job is about to push, via a new `fhir_client.wipe_patients_by_id()`. The historical full wipe survives behind a per-connection `MCSConfig.wipe_before_job` flag, snapshotted onto `Job.mcs_wipe_before_job` at creation. The flag is `false` for every connection a user creates and `true` only for the seeded "Local Measure Engine".
+
+**Root cause (issue #392):** ADR-011 correctly pointed the wipe at the job's MCS, which made a previously-safe operation destructive: an attendee pointing Lenny at a shared connectathon server deleted every other participant's test data at job start, with no prompt, no warning-level log, and no undo.
+
+**Why scoping is not a correctness compromise.** `evaluate_measure()` calls `$evaluate-measure?...&subject=Patient/<id>` per patient, and the job aggregates only over the patients it gathered. Resources belonging to patients the job never evaluates cannot affect its populations — so the stale data the full wipe existed to remove is exactly the patient-scoped subset the new wipe removes. Verified empirically: the same measure run in scoped mode and full-wipe mode against the same engine produced identical counts (initial-population 135, denominator 135, numerator 8, denominator-exclusion 41). Note this reasoning is load-bearing on per-subject evaluation: if a future change adds a population-level `reportType=summary` evaluation (issue #273), scoping alone would no longer be sufficient and this ADR must be revisited.
+
+**Why the flag defaults to false, and why locality is not inferred.** The seeded local engine's URL is `http://hapi-fhir-measure:8080/fhir`, so an "is this localhost?" predicate would misclassify Lenny's own container. The flag is set explicitly at seed time instead, and the migration backfill is wrapped in a column-absence guard so it runs exactly once — an unguarded `UPDATE` would re-enable the destructive mode on every restart for a user who had turned it off.
+
+**Why the wipe moved after the patient gather.** The scoped wipe needs the patient IDs. One user-visible consequence: a job that gathers zero patients no longer wipes at all, so an empty job is no longer a way to clear the local engine.
+
+**Search parameters were probed, not read off the spec.** HAPI answers `patient=` for most clinical types, `subject=` for `AdverseEvent` (which 400s on `patient=`), and `_id=` for `Patient` itself. `Medication`, `Location`, `Practitioner`, and `Organization` reject all of them and are therefore skipped — they are shared infrastructure on a multi-tenant server and are re-`PUT` by ID on every push. `Patient` must be deleted last or HAPI 409s while clinical resources still reference it.
+
+**Alternatives considered:** (a) Flag-only, keeping the full wipe as the sole mechanism (issue #392's stated minimum) — rejected: a remote user wanting correctness would still have to nuke a shared server. (b) Scoped wipe only, no flag — rejected: the local engine would accumulate prior jobs' patients indefinitely, growing the dataset and slowing factory reset (#399). (c) Inferring locality from the URL — rejected, see above.
+
+**Known limitation:** the abort threshold counts *consecutive* transport failures, so a server that fails intermittently can defeat it and the wipe reports success with some deletes unapplied. This predates #392 in `wipe_patient_data`, but chunking makes it more reachable (19 types × ceil(N/50) requests instead of 23). Tightening it was deliberately deferred — failing every job against a merely-flaky remote is a worse default.

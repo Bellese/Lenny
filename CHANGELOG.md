@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.20.0] - 2026-08-19
+
+### Fixed
+- **Running a job against a shared measure server no longer deletes other people's patient data.** Every job used to begin by deleting all patients from the target measure engine — correct for Lenny's own container, destructive once you point Lenny at a connectathon or shared server, where it silently removed every other participant's test data with no prompt and no way to undo. Jobs now delete only the patients they are about to evaluate. Measure results are unchanged: evaluation is per-patient, so patients a job never evaluates could never have affected its numbers. (#392)
+- **Wiping now works against measure servers that reject bulk deletes.** When a server refuses a conditional delete that matches multiple resources (`allow_multiple_delete` disabled, which Lenny's own containers enable but a shared server may not), Lenny falls back to deleting each resource individually instead of reporting success having deleted nothing. (#392)
+
+### Added
+- **"Delete all patient data before each job" setting on each measure engine connection.** Off for every connection you create, so a shared server is safe by default. Ticking it shows a warning naming exactly what it will do, and any connection with it enabled carries a "full wipe" badge in the connections list. The built-in Local Measure Engine keeps its existing full-wipe behavior with no action needed from you. (#392)
+
+### Changed
+- **The pre-job cleanup now runs after Lenny gathers patients, instead of at job start.** It needs to know which patients to clean. One visible consequence: a job that finds zero patients no longer clears the local measure engine as a side effect. (#392)
+
 ## [0.0.19.3] - 2026-06-09
 
 ### Fixed
