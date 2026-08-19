@@ -111,7 +111,7 @@ async def test_run_factory_reset_wipes_cdr_then_measure_engine(test_session):
     me_url = "http://hapi-fhir-measure:8080/fhir"
     wipe_calls = []
 
-    async def mock_wipe(*, base_url, strict=True):
+    async def mock_wipe(*, base_url, strict=True, auth_headers=None):
         wipe_calls.append(base_url)
 
     with (
@@ -132,6 +132,59 @@ async def test_run_factory_reset_wipes_cdr_then_measure_engine(test_session):
     assert cdr_url in wipe_calls, "CDR wipe must target CDR URL"
     assert me_url in wipe_calls, "Measure engine wipe must target measure engine URL"
     assert wipe_calls.index(cdr_url) < wipe_calls.index(me_url), "CDR wipe must precede ME wipe"
+
+
+@pytest.mark.asyncio
+async def test_run_factory_reset_sends_cdr_credentials(test_session):
+    """The CDR wipe carries the active connection's credentials.
+
+    The active CDR is routinely a remote authenticated connection. Without
+    credentials the conditional delete 401s, and wipe_patient_data now refuses to
+    report success on an unauthorized wipe — so an unauthenticated factory reset
+    would hard-fail instead of quietly deleting nothing.
+    """
+    from app.models.config import CDRConfig
+    from app.models.connection_base import AuthType
+    from app.routes.settings import FactoryResetRequest, _run_factory_reset
+
+    op = AdminOperation(
+        kind=AdminOperationKind.factory_reset,
+        status=AdminOperationStatus.pending,
+        started_at=datetime.now(timezone.utc),
+    )
+    cfg = CDRConfig(
+        name="Remote CDR",
+        cdr_url="https://cdr.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-cdr"},
+        is_active=True,
+    )
+    test_session.add_all([op, cfg])
+    await test_session.commit()
+    await test_session.refresh(op)
+
+    seen: dict[str, dict | None] = {}
+
+    async def mock_wipe(*, base_url, strict=True, auth_headers=None):
+        seen[base_url] = auth_headers
+
+    with (
+        patch("app.routes.settings.async_session", make_session_patcher(test_session)),
+        patch("app.routes.settings.wipe_patient_data", side_effect=mock_wipe),
+        patch("app.routes.settings.wipe_measure_definitions", new_callable=AsyncMock),
+        patch("app.routes.settings._poll_zero_counts", new_callable=AsyncMock),
+        patch(
+            "app.routes.settings._build_auth_headers",
+            new_callable=AsyncMock,
+            return_value={"Authorization": "Bearer tok-cdr"},
+        ),
+    ):
+        await _run_factory_reset(
+            op.id,
+            FactoryResetRequest(include_cdr=True, include_measure_engine=False, include_app_db=False),
+        )
+
+    assert seen["https://cdr.example.org/fhir"] == {"Authorization": "Bearer tok-cdr"}
 
 
 @pytest.mark.asyncio

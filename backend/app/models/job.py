@@ -69,6 +69,12 @@ class Job(Base):
     )
     mcs_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     mcs_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    # Snapshot of the MCS auth type, mirroring cdr_auth_type. Required because
+    # mcs_id is ON DELETE SET NULL: once the config is deleted the id is gone,
+    # so mcs_id alone cannot distinguish "this job never had MCS auth" from
+    # "the credentials are unrecoverable". Without it a job whose connection was
+    # deleted would silently run unauthenticated against the snapshotted mcs_url.
+    mcs_auth_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     batches: Mapped[list["Batch"]] = relationship(
         "Batch", back_populates="job", cascade="all, delete-orphan", lazy="selectin"

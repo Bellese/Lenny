@@ -976,9 +976,22 @@ async def wipe_patient_data(*, base_url: str, strict: bool = True, auth_headers:
                 resp = await client.delete(delete_url, headers=auth_headers or {})
                 if resp.status_code < 300:
                     logger.info("Wiped resource type", extra={"resourceType": rt})
+                elif resp.status_code in (401, 403):
+                    # Credentials are wrong or missing for this server. Falling
+                    # back would sweep unauthenticated, fail silently, and let
+                    # wipe_patient_data report success while deleting nothing —
+                    # the prior job's resources then inflate the next job's
+                    # populations with no error signal. Fail loudly instead.
+                    raise RuntimeError(
+                        f"Not authorized to wipe {rt} at the target server (HTTP {resp.status_code}). "
+                        "Check the connection's credentials. Job aborted rather than "
+                        "evaluating against stale data."
+                    )
                 else:
-                    # Fall back to individual delete via search-and-delete
-                    await _delete_all_of_type(client, rt, base_url)
+                    # Conditional delete unsupported (e.g. HAPI without
+                    # allow_multiple_delete) — fall back to search-and-delete,
+                    # carrying the same credentials.
+                    await _delete_all_of_type(client, rt, base_url, auth_headers)
                 consecutive_failures = 0
             except httpx.HTTPError:
                 consecutive_failures += 1
@@ -1016,11 +1029,28 @@ async def wipe_measure_definitions() -> None:
                 logger.warning("Failed to wipe measure definition type", extra={"resourceType": rt})
 
 
-async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str, base_url: str) -> None:
-    """Delete all resources of a given type one by one from the given FHIR server."""
+async def _delete_all_of_type(
+    client: httpx.AsyncClient,
+    resource_type: str,
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+) -> None:
+    """Delete all resources of a given type one by one from the given FHIR server.
+
+    `auth_headers` MUST be threaded through from the caller. This is the fallback
+    path taken when conditional delete is unsupported, and the target may be an
+    authenticated remote MCS — an unauthenticated sweep here 401s on the first
+    GET and returns silently, making the whole wipe a no-op that reports success.
+    """
+    headers = auth_headers or {}
     url: Optional[str] = f"{base_url}/{resource_type}?_count=100"
     while url:
-        resp = await client.get(url)
+        resp = await client.get(url, headers=headers)
+        if resp.status_code in (401, 403):
+            raise RuntimeError(
+                f"Not authorized to enumerate {resource_type} at the target server "
+                f"(HTTP {resp.status_code}). Refusing to report a successful wipe."
+            )
         if resp.status_code != 200:
             break
         bundle = resp.json()
@@ -1030,17 +1060,29 @@ async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str, bas
         for entry in entries:
             res = entry.get("resource", {})
             res_id = res.get("id")
-            if res_id:
+            # Reject ids that would escape the resource-type path. The bundle is
+            # server-supplied, so "../../Measure/CMS130" would otherwise be
+            # normalised into a DELETE against an arbitrary path.
+            if res_id and "/" not in res_id and ".." not in res_id:
                 del_url = f"{base_url}/{resource_type}/{res_id}"
                 try:
-                    await client.delete(del_url)
+                    await client.delete(del_url, headers=headers)
                 except httpx.HTTPError:
                     pass
-        # Re-check if more remain
+        # Re-check if more remain. Only follow a same-origin next link — a
+        # hostile or misconfigured server could otherwise steer this loop at
+        # an arbitrary host.
         url = None
         for link in bundle.get("link", []):
             if link.get("relation") == "next":
-                url = link.get("url")
+                next_url = link.get("url")
+                if next_url and _same_origin(base_url, next_url):
+                    url = next_url
+                elif next_url:
+                    logger.warning(
+                        "SSRF: wipe pagination next link rejected (origin mismatch)",
+                        extra={"url": sanitize_url(next_url)},
+                    )
                 break
 
 

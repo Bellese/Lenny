@@ -360,18 +360,43 @@ async def _get_mcs_auth_headers(job_id: int) -> dict[str, str]:
     read from the live config rather than duplicated onto the job row, so secrets
     live in exactly one place.
 
-    A job with no `mcs_id` predates MCS connections or targets the env-var engine —
-    unauthenticated, so no headers. A job whose linked config has been deleted has
-    unrecoverable credentials and raises rather than silently evaluating without
-    auth, which a remote MCS would reject with 401 on every patient.
+    `Job.mcs_id` is ON DELETE SET NULL, so deleting the config nulls the id rather
+    than leaving it dangling. `mcs_id is None` therefore means EITHER "this job
+    never had an MCS config" OR "the config was deleted after creation" — the
+    snapshotted `mcs_auth_type` is what tells them apart. Without that check a job
+    whose connection was deleted would silently run unauthenticated against the
+    still-snapshotted `mcs_url`, reintroducing the 401 storm this module fixes.
     """
     async with async_session() as session:
         job = await session.get(Job, job_id)
-        if job is None or job.mcs_id is None:
+        if job is None:
             return {}
+        if job.mcs_id is None:
+            # No MCS config linked — either the job was created without one
+            # (unauthenticated env-var engine) or the config was deleted after
+            # creation. If the snapshotted auth type is "none"/unset no
+            # credentials are needed; for auth-bearing types they are
+            # unrecoverable and running on would leak an unauthenticated wipe
+            # and evaluation at the remote server.
+            if not job.mcs_auth_type or job.mcs_auth_type == "none":
+                return {}
+            raise RuntimeError(
+                f"Job {job_id} has no mcs_id — MCS config was deleted after job creation. "
+                "Cannot fetch auth credentials."
+            )
         cfg = await session.get(MCSConfig, job.mcs_id)
         if cfg is None:
+            # Defensive: unreachable under the ON DELETE SET NULL FK, but a
+            # database without the constraint enforced would land here.
             raise RuntimeError(f"MCS config {job.mcs_id} referenced by job {job_id} no longer exists.")
+        if job.mcs_url and cfg.mcs_url != job.mcs_url:
+            # The URL is read from the job snapshot but credentials are read
+            # live, so a config repointed at a different host after job creation
+            # would hand the new host's token to the old one.
+            raise RuntimeError(
+                f"MCS config {job.mcs_id} now points at a different server than job {job_id} "
+                "was created against. Refusing to send its credentials to the snapshotted URL."
+            )
         return await _build_auth_headers(cfg.auth_type, cfg.auth_credentials)
 
 

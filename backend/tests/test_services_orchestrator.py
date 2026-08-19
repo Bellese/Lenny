@@ -1147,22 +1147,115 @@ async def test_get_mcs_auth_headers_empty_when_no_mcs_linked(test_session, sessi
 
 
 async def test_get_mcs_auth_headers_raises_when_config_deleted(test_session, session_factory):
-    """Credentials are unrecoverable if the MCS config was deleted — fail loudly, not silently."""
+    """Deleting the MCS config must fail the job loudly, not run it unauthenticated.
+
+    `Job.mcs_id` is ON DELETE SET NULL, so a deleted config leaves mcs_id NULL —
+    never dangling. The snapshotted `mcs_auth_type` is the only thing that
+    distinguishes this from a job that never had MCS auth. Without it the job
+    would silently wipe and evaluate against the still-snapshotted remote
+    `mcs_url` with no credentials.
+    """
+    cfg = MCSConfig(
+        name="Doomed MCS",
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-123"},
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
     job = Job(
         measure_id="m-orphan",
         period_start="2024-01-01",
         period_end="2024-12-31",
         cdr_url="http://cdr.example.com/fhir",
         status=JobStatus.queued,
-        mcs_url="https://mcs.example.org/fhir",
-        mcs_id=99999,  # points at a config that does not exist
+        mcs_url=cfg.mcs_url,
+        mcs_id=cfg.id,
+        mcs_auth_type="bearer",
     )
     test_session.add(job)
     await test_session.commit()
     await test_session.refresh(job)
 
+    await test_session.delete(cfg)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    # The FK nulled the id rather than leaving it dangling — this is the state
+    # production actually reaches, and the one the old test never exercised.
+    assert job.mcs_id is None
+    assert job.mcs_url == "https://mcs.example.org/fhir"
+
     with patch("app.services.orchestrator.async_session", session_factory):
-        with pytest.raises(RuntimeError, match="no longer exists"):
+        with pytest.raises(RuntimeError, match="deleted after job creation"):
+            await _get_mcs_auth_headers(job.id)
+
+
+async def test_get_mcs_auth_headers_empty_when_deleted_config_had_no_auth(test_session, session_factory):
+    """A deleted config that never needed credentials is not an error."""
+    cfg = MCSConfig(name="Local", mcs_url="http://local:8080/fhir", auth_type=AuthType.none)
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    job = Job(
+        measure_id="m-local",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr.example.com/fhir",
+        status=JobStatus.queued,
+        mcs_url=cfg.mcs_url,
+        mcs_id=cfg.id,
+        mcs_auth_type="none",
+    )
+    test_session.add(job)
+    await test_session.commit()
+
+    await test_session.delete(cfg)
+    await test_session.commit()
+
+    with patch("app.services.orchestrator.async_session", session_factory):
+        assert await _get_mcs_auth_headers(job.id) == {}
+
+
+async def test_get_mcs_auth_headers_raises_when_config_repointed(test_session, session_factory):
+    """Repointing a config must not send the new server's token to the old one.
+
+    `mcs_url` is read from the frozen job snapshot but credentials are read live,
+    so without this guard a config edited to a new host would hand that host's
+    bearer token to the host the job was created against.
+    """
+    cfg = MCSConfig(
+        name="Vendor A",
+        mcs_url="https://vendor-a.example/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "token-a"},
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    job = Job(
+        measure_id="m-1",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+        cdr_url="http://cdr.example.com/fhir",
+        status=JobStatus.queued,
+        mcs_url="https://vendor-a.example/fhir",
+        mcs_id=cfg.id,
+        mcs_auth_type="bearer",
+    )
+    test_session.add(job)
+    await test_session.commit()
+
+    cfg.mcs_url = "https://vendor-b.example/fhir"
+    cfg.auth_credentials = {"token": "token-b"}
+    await test_session.commit()
+
+    with patch("app.services.orchestrator.async_session", session_factory):
+        with pytest.raises(RuntimeError, match="different server"):
             await _get_mcs_auth_headers(job.id)
 
 

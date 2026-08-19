@@ -25,7 +25,12 @@ from app.models.job import Job, JobStatus
 from app.models.mcs_config import MCSConfig
 from app.routes.connection_factory import make_connection_router
 from app.services.bundle_loader import load_connectathon_bundles
-from app.services.fhir_client import probe_mcs_data_requirements, wipe_measure_definitions, wipe_patient_data
+from app.services.fhir_client import (
+    _build_auth_headers,
+    probe_mcs_data_requirements,
+    wipe_measure_definitions,
+    wipe_patient_data,
+)
 from app.services.fhir_errors import (
     HINT_BY_STATUS,
     FhirOperationError,
@@ -144,8 +149,10 @@ router.include_router(
         kind=ConnectionKind.mcs,
         url_field="mcs_url",
         default_name="Local Measure Engine",
-        # Job FK to MCS lands in PR #4 alongside the fhir_client wiring.
-        job_fk_column=None,
+        # Blocks deleting an MCS connection while a job still references it.
+        # Without this, ON DELETE SET NULL nulls the queued job's mcs_id and the
+        # job runs unauthenticated against its snapshotted mcs_url.
+        job_fk_column=Job.mcs_id,
         audit_logger=logger,
     )
 )
@@ -329,7 +336,12 @@ class AdminOperationResponse(BaseModel):
     completed_at: datetime | None = None
 
 
-async def _poll_zero_counts(base_url: str, resource_types: list[str], step_name: str) -> None:
+async def _poll_zero_counts(
+    base_url: str,
+    resource_types: list[str],
+    step_name: str,
+    auth_headers: dict[str, str] | None = None,
+) -> None:
     """Poll until all given resource types return total=0 (or timeout after 60s)."""
     import httpx as _httpx
 
@@ -338,7 +350,7 @@ async def _poll_zero_counts(base_url: str, resource_types: list[str], step_name:
         for rt in resource_types:
             while asyncio.get_event_loop().time() < deadline:
                 try:
-                    resp = await client.get(f"{base_url}/{rt}?_summary=count")
+                    resp = await client.get(f"{base_url}/{rt}?_summary=count", headers=auth_headers or {})
                     if resp.status_code == 200:
                         total = resp.json().get("total", 1)
                         if total == 0:
@@ -372,11 +384,18 @@ async def _run_factory_reset(operation_id: int, request: FactoryResetRequest) ->
         if request.include_cdr:
             # Resolve active CDR URL from cdr_configs.is_active=True
             async with async_session() as session:
-                result = await session.execute(select(CDRConfig.cdr_url).where(CDRConfig.is_active.is_(True)).limit(1))
-                active_cdr_url = result.scalar_one_or_none() or settings.DEFAULT_CDR_URL
+                result = await session.execute(select(CDRConfig).where(CDRConfig.is_active.is_(True)).limit(1))
+                active_cdr = result.scalar_one_or_none()
+                active_cdr_url = active_cdr.cdr_url if active_cdr else settings.DEFAULT_CDR_URL
+                # The active CDR is routinely a remote authenticated connection.
+                # Without credentials the wipe 401s, and wipe_patient_data now
+                # refuses to report success on an unauthorized wipe.
+                cdr_auth_headers = (
+                    await _build_auth_headers(active_cdr.auth_type, active_cdr.auth_credentials) if active_cdr else {}
+                )
 
-            await wipe_patient_data(base_url=active_cdr_url, strict=False)
-            await _poll_zero_counts(active_cdr_url, ["Patient", "Encounter"], "cdr_wipe")
+            await wipe_patient_data(base_url=active_cdr_url, strict=False, auth_headers=cdr_auth_headers)
+            await _poll_zero_counts(active_cdr_url, ["Patient", "Encounter"], "cdr_wipe", cdr_auth_headers)
             await _record("wipe_cdr", "succeeded")
 
         if request.include_measure_engine:

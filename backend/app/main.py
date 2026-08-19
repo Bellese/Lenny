@@ -185,6 +185,7 @@ async def _run_schema_migrations(conn) -> None:
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_id INTEGER REFERENCES mcs_configs(id) ON DELETE SET NULL",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_url VARCHAR(1024)",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_name VARCHAR(512)",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_auth_type VARCHAR(32)",
             "ALTER TABLE validation_runs ADD COLUMN IF NOT EXISTS delete_requested BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ",
         ]:

@@ -803,6 +803,98 @@ async def test_wipe_patient_data():
     assert mock_ctx.delete.call_count >= 10  # At least 10 resource types
 
 
+async def test_wipe_patient_data_raises_on_unauthorized_instead_of_silent_noop():
+    """A 401 on the conditional delete must abort, not degrade to a silent no-op.
+
+    Regression guard. `httpx` does not raise on status codes and the wipe never
+    called `raise_for_status()`, so a 401 fell through to the search-and-delete
+    fallback — which was unauthenticated, 401'd on its own GET, `break`ed, and
+    let wipe_patient_data return success having deleted nothing. The prior job's
+    resources then inflated the next job's populations with no error signal.
+    """
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=_make_response(401, {}))
+        mock_ctx.get = AsyncMock(return_value=_make_response(401, {}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(RuntimeError, match="Not authorized to wipe"):
+            await wipe_patient_data(base_url="https://mcs.example.org/fhir", auth_headers={"Authorization": "Bearer x"})
+
+
+async def test_wipe_patient_data_fallback_carries_credentials():
+    """When conditional delete is unsupported, the fallback sweep stays authenticated."""
+    headers = {"Authorization": "Bearer tok-1"}
+    empty_bundle = _make_response(200, {"resourceType": "Bundle", "entry": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        # 405 = conditional delete unsupported, the legitimate fallback trigger.
+        mock_ctx.delete = AsyncMock(return_value=_make_response(405, {}))
+        mock_ctx.get = AsyncMock(return_value=empty_bundle)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await wipe_patient_data(base_url="https://mcs.example.org/fhir", auth_headers=headers)
+
+    assert mock_ctx.get.await_count > 0, "fallback sweep never ran"
+    for call in mock_ctx.get.await_args_list:
+        assert call.kwargs.get("headers") == headers, "fallback GET went out unauthenticated"
+
+
+async def test_wipe_patient_data_fallback_rejects_cross_origin_next_link():
+    """A hostile next link must not steer the fallback sweep at another host."""
+    hostile = _make_response(
+        200,
+        {
+            "resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
+            "link": [{"relation": "next", "url": "http://169.254.169.254/latest/meta-data/"}],
+        },
+    )
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=_make_response(405, {}))
+        mock_ctx.get = AsyncMock(return_value=hostile)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await wipe_patient_data(base_url="https://mcs.example.org/fhir", auth_headers={})
+
+    for call in mock_ctx.get.await_args_list:
+        requested = call.args[0] if call.args else ""
+        assert "169.254.169.254" not in requested, "followed a cross-origin next link"
+
+
+async def test_wipe_patient_data_fallback_rejects_traversal_ids():
+    """Server-supplied ids containing path separators must not become DELETE paths."""
+    malicious = _make_response(
+        200,
+        {
+            "resourceType": "Bundle",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "../../Measure/CMS130"}},
+                {"resource": {"resourceType": "Patient", "id": "safe-1"}},
+            ],
+        },
+    )
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=_make_response(405, {}))
+        mock_ctx.get = AsyncMock(return_value=malicious)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await wipe_patient_data(base_url="https://mcs.example.org/fhir", auth_headers={})
+
+    for call in mock_ctx.delete.await_args_list:
+        requested = call.args[0] if call.args else ""
+        assert "Measure/CMS130" not in requested, "traversal id became a DELETE path"
+
+
 async def test_wipe_patient_data_includes_qi_core_types():
     """wipe_patient_data includes QI-Core clinical types added for STU6 bundles."""
     mock_response = _make_response(200, {})
