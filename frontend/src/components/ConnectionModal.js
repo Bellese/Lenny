@@ -20,6 +20,9 @@ const KIND_SPECS = {
     urlPlaceholder: 'http://localhost:8080/fhir',
     showReadOnly: true,
     showBundleChunking: true,
+    // Only the measure engine is wiped as part of a job (issue #392). The CDR is
+    // read from, and wiped only by an explicit factory reset.
+    showWipeBeforeJob: false,
     api: { create: createConnection, update: updateConnection, test: testConnection },
   },
   mcs: {
@@ -30,6 +33,7 @@ const KIND_SPECS = {
     urlPlaceholder: 'http://localhost:8081/fhir',
     showReadOnly: true,
     showBundleChunking: false,
+    showWipeBeforeJob: true,
     api: { create: createMcsConnection, update: updateMcsConnection, test: testMcsConnection },
   },
 };
@@ -48,6 +52,7 @@ export default function ConnectionModal({ kind = 'cdr', connection, onClose, onS
     client_secret: '',
     token_endpoint: '',
     is_read_only: false,
+    wipe_before_job: false,
     max_bundle_entries: '',
   });
   const [saving, setSaving] = useState(false);
@@ -63,6 +68,7 @@ export default function ConnectionModal({ kind = 'cdr', connection, onClose, onS
         [spec.urlField]: connection[spec.urlField] || '',
         auth_type: connection.auth_type || 'none',
         is_read_only: connection.is_read_only || false,
+        wipe_before_job: connection.wipe_before_job || false,
         max_bundle_entries:
           connection.max_bundle_entries == null ? '' : String(connection.max_bundle_entries),
       }));
@@ -129,6 +135,9 @@ export default function ConnectionModal({ kind = 'cdr', connection, onClose, onS
     };
     if (spec.showReadOnly) {
       payload.is_read_only = form.is_read_only;
+    }
+    if (spec.showWipeBeforeJob) {
+      payload.wipe_before_job = form.wipe_before_job;
     }
     if (spec.showBundleChunking) {
       const trimmed = String(form.max_bundle_entries).trim();
@@ -225,6 +234,26 @@ export default function ConnectionModal({ kind = 'cdr', connection, onClose, onS
                 <input type="checkbox" checked={form.is_read_only} onChange={handleChange('is_read_only')} className={styles.checkbox} />
                 Read-only (never write to this {spec.label})
               </label>
+            </div>
+          )}
+
+          {spec.showWipeBeforeJob && (
+            <div className={styles.formGroup}>
+              <label className={styles.checkboxLabel}>
+                <input type="checkbox" checked={form.wipe_before_job} onChange={handleChange('wipe_before_job')} className={styles.checkbox} />
+                Delete all patient data before each job
+              </label>
+              <span className={styles.helperText}>
+                Off (recommended): each job removes only the patients it is about to
+                evaluate, leaving anything else on the server untouched.
+              </span>
+              {form.wipe_before_job && (
+                <div className={styles.warningBanner} role="alert">
+                  Every job will delete <strong>all</strong> patient data on this server,
+                  including records Lenny did not create. Only enable this for a measure
+                  engine you own — never for a shared or connectathon server.
+                </div>
+              )}
             </div>
           )}
 

@@ -213,6 +213,15 @@
   border-color: var(--warn-wash);
 }
 
+/* Issue #392. Error tokens rather than the read-only badge's warn tokens: this
+   marks a live setting that destroys data on every job, which is a step more
+   severe than "writes are blocked". Both token pairs have dark-theme variants. */
+.connBadgeFullWipe {
+  background: var(--err-wash);
+  color: var(--err);
+  border-color: var(--err-wash);
+}
+
 .connActions {
   display: flex;
   gap: 4px;
