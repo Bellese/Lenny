@@ -40,16 +40,12 @@ async def resolve_mcs_auth_headers(
     mcs_url: str | None,
     mcs_auth_type: str | None,
     owner_label: str,
-    deleted_config_phrase: str = "creation",
 ) -> dict[str, str]:
     """Resolve MCS credentials from the live config for any snapshot-carrying row.
 
     Takes the three snapshot FIELDS rather than a row id, so both `Job` and
     `ValidationRun` use one implementation (issue #397 slice 3). `owner_label`
     (e.g. "job 12", "validation run 4") only shapes the error messages.
-    `deleted_config_phrase` only tunes the "config was deleted after ___" wording
-    (default "creation"); `resolve_job_mcs_auth_headers` passes "job creation" so
-    its callers see the exact historical message.
 
     `mcs_id` is ON DELETE SET NULL on both tables, so a NULL id means EITHER "this
     row never had an MCS config" OR "the config was deleted after creation". The
@@ -63,8 +59,7 @@ async def resolve_mcs_auth_headers(
         if not mcs_auth_type or mcs_auth_type == "none":
             return {}
         raise RuntimeError(
-            f"{owner_label} has no mcs_id — MCS config was deleted after {deleted_config_phrase}. "
-            "Cannot fetch auth credentials."
+            f"{owner_label} has no mcs_id — MCS config was deleted after creation. Cannot fetch auth credentials."
         )
     cfg = await session.get(MCSConfig, mcs_id)
     if cfg is None:
@@ -98,7 +93,6 @@ async def resolve_job_mcs_auth_headers(session: AsyncSession, job_id: int) -> di
         mcs_url=job.mcs_url,
         mcs_auth_type=job.mcs_auth_type,
         owner_label=f"Job {job_id}",
-        deleted_config_phrase="job creation",
     )
 
 
