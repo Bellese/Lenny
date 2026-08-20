@@ -654,7 +654,17 @@ Then update the four call sites inside it:
 ```bash
 cd backend && python3 -m pytest tests/test_services_validation.py -q
 ```
-Expected: PASS. Pre-existing tests that call `_prepare_measure_support_resources` will now fail with a missing `mcs` — update each to pass `mcs=_mcs()`. Do NOT add a default to make them pass.
+Expected: the four NEW tests PASS. Pre-existing tests that call
+`_prepare_measure_support_resources` DIRECTLY will fail with a missing `mcs` — update
+each to pass `mcs=_mcs()`.
+
+EXPECTED INTERIM BREAKAGE, do not "fix" it here: tests that reach that helper
+INDIRECTLY through `triage_test_bundle` (the `TestTriageTestBundle` group, ~11 tests)
+will also fail, because `triage_test_bundle` does not thread `mcs` until Task 5.
+Leave them red. Adding a default to the signature, or constructing a stopgap
+`McsTarget` inside `triage_test_bundle`, would reintroduce the exact env-var-default
+bug class this change removes — and would collide with Task 5's edits to those same
+lines. The suite goes green at Task 8 Step 5.
 
 - [ ] **Step 6: Update the inventory guard**
 
