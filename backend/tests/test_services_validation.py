@@ -1127,9 +1127,15 @@ class TestRunValidation:
         def make_ctx():
             return self._make_session_ctx(test_session)
 
+        # Captured, not asserted inside the closure: validation.py wraps
+        # _resolve_measure_id in `except Exception -> unresolved_errors[...]`, so an
+        # AssertionError raised here would surface as an "error" result rather than a
+        # test failure pointing at the wrong target. Asserted after the run returns.
+        resolve_targets: list[str] = []
+
         async def resolve_measure_side_effect(measure_url, *, mcs):
             # `mcs` is required (#397): run_validation must name the server it resolves against.
-            assert mcs.url == settings.MEASURE_ENGINE_URL
+            resolve_targets.append(mcs.url)
             if measure_url.endswith("/resolved"):
                 return "measure-1"
             return None
@@ -1183,6 +1189,8 @@ class TestRunValidation:
             .all()
         )
 
+        assert resolve_targets, "_resolve_measure_id was never called"
+        assert set(resolve_targets) == {settings.MEASURE_ENGINE_URL}, resolve_targets
         assert run.status == ValidationStatus.complete
         assert run.measures_tested == 2
         assert run.patients_tested == 2
@@ -1257,9 +1265,13 @@ class TestRunValidation:
         def make_ctx():
             return self._make_session_ctx(test_session)
 
+        # See the sibling test: assertions inside this closure would be swallowed by
+        # run_validation's `except Exception -> unresolved_errors[...]`.
+        resolve_targets: list[str] = []
+
         async def resolve_measure_side_effect(measure_url, *, mcs):
             # `mcs` is required (#397): run_validation must name the server it resolves against.
-            assert mcs.url == "http://measure/fhir"
+            resolve_targets.append(mcs.url)
             if "CMS124" in measure_url:
                 return "measure-1"
             if "CMS816" in measure_url:
@@ -1309,6 +1321,9 @@ class TestRunValidation:
                                         await run_validation(run.id)
 
         await test_session.refresh(run)
+
+        assert resolve_targets, "_resolve_measure_id was never called"
+        assert set(resolve_targets) == {"http://measure/fhir"}, resolve_targets
 
         # Verify 5 total evaluate_measure calls:
         # - 2 warmup calls (one per measure)
@@ -2473,10 +2488,14 @@ async def test_run_validation_targets_the_snapshotted_mcs(test_session, session_
     from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
     from app.services.validation import run_validation
 
+    # Bearer, not none: `auth_headers` is half of what McsTarget carries, and with
+    # AuthType.none every site's headers are `{}` — indistinguishable from a
+    # regression that dropped them and sent unauthenticated requests.
     cfg = MCSConfig(
         name="Remote MCS",
         mcs_url="https://mcs.example.org/fhir",
-        auth_type=AuthType.none,
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok"},
         is_active=True,
     )
     test_session.add(cfg)
@@ -2488,7 +2507,7 @@ async def test_run_validation_targets_the_snapshotted_mcs(test_session, session_
         mcs_id=cfg.id,
         mcs_url=cfg.mcs_url,
         mcs_name=cfg.name,
-        mcs_auth_type="none",
+        mcs_auth_type="bearer",
         mcs_wipe_before_job=False,
     )
     test_session.add(run)
@@ -2505,16 +2524,21 @@ async def test_run_validation_targets_the_snapshotted_mcs(test_session, session_
     await test_session.commit()
     await test_session.refresh(run)
 
-    targets: list[str] = []
+    # (site label, target URL, auth headers) per call. Labelled rather than a bare list
+    # of URLs because a count plus a URL set cannot say WHICH sites were observed: a
+    # regression where push stops being called while evaluate is called twice keeps both
+    # of those assertions true and leaves the push site — the divergence this test exists
+    # to catch — unobserved.
+    calls: list[tuple[str, str, dict]] = []
 
     async def _record_push(resources, **kwargs):
-        targets.append(kwargs.get("target_url"))
+        calls.append(("push", kwargs.get("target_url"), kwargs.get("auth_headers")))
         from app.services.fhir_client import BundleUploadResult
 
         return BundleUploadResult()
 
     async def _record_eval(measure_id, patient_id, ps, pe, **kwargs):
-        targets.append(kwargs.get("measure_engine_url"))
+        calls.append(("eval", kwargs.get("measure_engine_url"), kwargs.get("auth_headers")))
         # An evaluatedResource Patient reference is what drives the patient-name
         # lookup, the fourth measure-engine call site this run makes.
         return {
@@ -2524,7 +2548,7 @@ async def test_run_validation_targets_the_snapshotted_mcs(test_session, session_
         }
 
     async def _record_patient_lookup(url, **kwargs):
-        targets.append(url.removesuffix("/Patient/p1"))
+        calls.append(("name_lookup", url.removesuffix("/Patient/p1"), kwargs.get("headers")))
         return httpx.Response(404, request=httpx.Request("GET", url))
 
     # The CDR gather must succeed, or `push_resources` is never reached and the
@@ -2551,11 +2575,17 @@ async def test_run_validation_targets_the_snapshotted_mcs(test_session, session_
     ):
         await run_validation(run.id)
 
-    assert targets, "no measure-engine calls were recorded"
-    # push + warmup evaluate + main evaluate + patient-name lookup. Pinning the
-    # count keeps the assertion below from passing because a site went unexercised.
-    assert len(targets) == 4, targets
-    assert set(targets) == {"https://mcs.example.org/fhir"}, targets
+    assert calls, "no measure-engine calls were recorded"
+    # Every site was observed...
+    assert {label for label, _, _ in calls} == {"push", "eval", "name_lookup"}, calls
+    # ...and every one of them hit the same server. That conjunction is the guard.
+    assert {url for _, url, _ in calls} == {"https://mcs.example.org/fhir"}, calls
+    # Credentials travel with the target: dropping auth_headers at any site would send
+    # unauthenticated requests to a bearer-auth MCS without changing a single URL.
+    for label, _, headers in calls:
+        assert headers == {"Authorization": "Bearer tok"}, (label, headers)
+    # Supplementary: push + warmup evaluate + main evaluate + patient-name lookup.
+    assert len(calls) == 4, calls
 
 
 @pytest.mark.asyncio
