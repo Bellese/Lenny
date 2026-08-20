@@ -759,6 +759,7 @@ async def triage_test_bundle(
     filename: str,
     session: AsyncSession,
     *,
+    mcs: McsTarget,
     progress_fn: Callable[[str, int], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Triage a test bundle: send resources to their correct destinations.
@@ -769,6 +770,15 @@ async def triage_test_bundle(
 
     Returns summary dict with counts.
     """
+    # A test bundle upload writes Measures, Libraries and ValueSets to the measure
+    # engine, so a read-only target cannot work. Refuse up front rather than partway
+    # through, having already written some resources (issue #397). Mirrors the CDR
+    # read-only check further down this same function.
+    if mcs.is_read_only:
+        raise ValueError(
+            "Cannot upload measures: the active measure engine connection is configured "
+            "as read-only. Switch to a writable connection to load test bundles."
+        )
     _warn_unknown_bundle_types(bundle_json)
     measure_defs, clinical, test_cases = _classify_bundle_entries(bundle_json)
     measure_defs = _fix_library_deps_for_hapi(measure_defs)
@@ -782,12 +792,13 @@ async def triage_test_bundle(
         secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
         try:
             # ValueSets/CodeSystems plus ELM-declared missing ValueSet stubs.
-            support_resources = await _prepare_measure_support_resources(secondary, bundle_json)
+            support_resources = await _prepare_measure_support_resources(secondary, bundle_json, mcs=mcs)
             if support_resources:
-                await push_resources(support_resources)
+                await push_resources(support_resources, target_url=mcs.url, auth_headers=mcs.auth_headers)
             if primary:
-                await _assert_no_canonical_url_clash(primary)
-                await push_resources(primary)  # Measure + Library always pushed
+                await _assert_no_canonical_url_clash(primary, mcs=mcs)
+                # Measure + Library always pushed
+                await push_resources(primary, target_url=mcs.url, auth_headers=mcs.auth_headers)
         except Exception as exc:
             raise ValueError(
                 f"Failed to upload measures to HAPI measure engine. "
@@ -886,7 +897,12 @@ async def triage_test_bundle(
 
     valueset_urls = _valueset_urls([*measure_defs, *clinical])
     valueset_urls.extend(_valueset_urls(support_resources))
-    expanded = await asyncio.to_thread(wait_for_valueset_expansion, settings.MEASURE_ENGINE_URL, valueset_urls)
+    # URL only: wait_for_valueset_expansion is a synchronous polling helper with no
+    # auth parameter. Against an authenticated remote MCS its polls will 401 and it
+    # will report "not expanded" rather than failing — acceptable because the caller
+    # treats a non-expansion as a warning, not an error. Threading auth through it is
+    # follow-up work, tracked in the PR body, not silently assumed done.
+    expanded = await asyncio.to_thread(wait_for_valueset_expansion, mcs.url, valueset_urls)
     unique_valueset_count = len({url for url in valueset_urls if url})
     logger.info(
         "ValueSet expansion complete",
@@ -938,7 +954,10 @@ async def process_bundle_upload(upload_id: int) -> None:
                         setattr(u, field, value)
                         await prog_session.commit()
 
-            summary = await triage_test_bundle(bundle_json, upload.filename, session, progress_fn=_on_progress)
+            from app.dependencies import get_active_mcs, mcs_target_from_context
+
+            mcs = await mcs_target_from_context(await get_active_mcs(session=session))
+            summary = await triage_test_bundle(bundle_json, upload.filename, session, mcs=mcs, progress_fn=_on_progress)
 
             upload.measures_loaded = summary["measures_loaded"]
             upload.patients_loaded = summary["patients_loaded"]
@@ -1040,7 +1059,7 @@ async def _resolve_measure_id(measure_url: str, *, mcs: McsTarget) -> str | None
     return None
 
 
-async def _reload_measures_from_seed_bundles() -> dict[str, int]:
+async def _reload_measures_from_seed_bundles(*, mcs: McsTarget) -> dict[str, int]:
     """Reload all Measure/Library resources from seed bundles into HAPI.
 
     Called when validation detects missing measures. Returns counts of loaded resources.
@@ -1066,12 +1085,12 @@ async def _reload_measures_from_seed_bundles() -> dict[str, int]:
             if measure_defs:
                 primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
                 secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
-                support_resources = await _prepare_measure_support_resources(secondary, bundle_json)
+                support_resources = await _prepare_measure_support_resources(secondary, bundle_json, mcs=mcs)
                 if support_resources:
-                    await push_resources(support_resources)
+                    await push_resources(support_resources, target_url=mcs.url, auth_headers=mcs.auth_headers)
                 if primary:
-                    await _assert_no_canonical_url_clash(primary)
-                    await push_resources(primary)
+                    await _assert_no_canonical_url_clash(primary, mcs=mcs)
+                    await push_resources(primary, target_url=mcs.url, auth_headers=mcs.auth_headers)
                     for r in primary:
                         if r.get("resourceType") == "Measure":
                             total_measures += 1

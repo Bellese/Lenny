@@ -46,10 +46,17 @@ import pytest
 #   fhir_client.py       3  of the 5: the _validate_ssrf_url allowlist (must include the
 #                           env-var host), and the target_url/measure_engine_url
 #                           back-compat defaults on push_resources and evaluate_measure.
+#   bundle_loader.py     2  the _wait_for_hapi boot readiness probe (unrelated to MCS
+#                           scoping — it just checks both HAPI containers are up), and
+#                           the explicit McsTarget built for the boot seed path (task 5):
+#                           seeding deliberately targets Lenny's own engine, so building
+#                           that target from settings, with a comment saying why, is the
+#                           legitimate way for the env var to become a connection here.
 #
 # KNOWN-OUTSTANDING DEFECTS — each must drop to 0 as its slice lands:
-#   validation.py        3  the rest of the validation pipeline (task 4 of 6 -> 3). Slice 3.
-#   bundle_loader.py     1  re-seed target. Slice 3.
+#   validation.py        2  the wipe (1269) and the patient-name lookup (1389), cleared
+#                           in tasks 7 and 8. The valueset-expansion call is no longer
+#                           one of these — task 5 scoped it to mcs.url.
 #
 # CLEARED BY SLICE 2 (job-scoped):
 #   fhir_client.py       5 -> 3  $data-requirements now takes the job's MCS from the
@@ -67,9 +74,16 @@ import pytest
 # now take a required McsTarget.
 #
 # CLEARED BY SLICE 3 (task 4): validation.py 6 -> 3. _assert_no_canonical_url_clash
-# and _resolve_measure_id now take a required McsTarget. The remaining 3 are the
-# valueset-expansion call (878), the wipe (1239), and the patient-name lookup (1359),
-# cleared in tasks 7 and 8.
+# and _resolve_measure_id now take a required McsTarget. The remaining 3 were the
+# valueset-expansion call (878), the wipe (1239), and the patient-name lookup (1359).
+#
+# CLEARED BY SLICE 3 (task 5): validation.py 3 -> 2. triage_test_bundle and
+# _reload_measures_from_seed_bundles now take a required McsTarget, and their
+# measure-engine pushes plus the valueset-expansion call use mcs.url explicitly.
+# The remaining 2 (the wipe and the patient-name lookup) clear in tasks 7 and 8.
+# bundle_loader.py 1 -> 2: the boot seed path now builds an explicit McsTarget from
+# settings instead of letting triage_test_bundle's (now-required) mcs default
+# implicitly — a second legitimate read alongside the existing _wait_for_hapi probe.
 #
 # When a slice lands, lower the number here in the same commit. A count that is
 # too HIGH fails just as loudly as one that is too low — a stale expectation is
@@ -81,10 +95,10 @@ EXPECTED_READS: dict[str, int] = {
     "app/routes/jobs.py": 1,
     "app/routes/results.py": 1,
     "app/routes/settings.py": 1,
-    "app/services/bundle_loader.py": 1,
+    "app/services/bundle_loader.py": 2,
     "app/services/fhir_client.py": 3,
     "app/services/orchestrator.py": 1,
-    "app/services/validation.py": 3,
+    "app/services/validation.py": 2,
 }
 
 _APP_ROOT = pathlib.Path(__file__).resolve().parents[1] / "app"

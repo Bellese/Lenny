@@ -515,7 +515,7 @@ class TestTriageTestBundle:
         ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         # Measure + Library = 2 measure defs → push_resources called once for defs
         assert result["measures_loaded"] == 1  # only Measure type counts
@@ -543,7 +543,7 @@ class TestTriageTestBundle:
         with patch(
             "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
         ) as mock_push:
-            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         assert result["patients_loaded"] == 1
         assert result.get("warning_message") is None
@@ -579,7 +579,7 @@ class TestTriageTestBundle:
         # fires before push_resources is called for clinical data.
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             with pytest.raises(ValueError, match="read-only"):
-                await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+                await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
     async def test_external_cdr_with_auth_forwards_headers(self, test_session, mock_test_bundle_with_expected):
         """When an external CDR has basic auth configured, auth headers are forwarded."""
@@ -600,7 +600,7 @@ class TestTriageTestBundle:
         ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         # clinical data pushed with auth headers
         assert result["patients_loaded"] == 1
@@ -614,14 +614,14 @@ class TestTriageTestBundle:
         assert "Authorization" in auth_headers
         assert auth_headers["Authorization"] == "Basic dXNlcjpwYXNz"
 
-        # Measure-def push must NOT carry CDR auth headers
+        # Measure-def push must carry the MCS's own auth headers, not the CDR's
         def_push_calls = [
             call
             for call in mock_push.call_args_list
             if call.kwargs.get("target_url") != "http://external-cdr.example.com/fhir"
         ]
         for def_call in def_push_calls:
-            assert "Authorization" not in (def_call.kwargs.get("auth_headers") or {})
+            assert def_call.kwargs.get("auth_headers") == {"Authorization": "Bearer tok-397"}
 
     async def test_bundle_with_only_measure_defs(self, test_session):
         """Bundle containing only measure defs: no expected results, no clinical push."""
@@ -652,7 +652,7 @@ class TestTriageTestBundle:
         ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                result = await triage_test_bundle(bundle, "defs-only.json", test_session)
+                result = await triage_test_bundle(bundle, "defs-only.json", test_session, mcs=_mcs())
 
         assert result["measures_loaded"] == 1
         assert result["expected_results_loaded"] == 0
@@ -680,10 +680,10 @@ class TestTriageTestBundle:
                 new_callable=AsyncMock,
                 return_value=[stub],
             ) as mock_prepare:
-                result = await triage_test_bundle(bundle, "defs-only.json", test_session)
+                result = await triage_test_bundle(bundle, "defs-only.json", test_session, mcs=_mcs())
 
         assert result["measures_loaded"] == 1
-        mock_prepare.assert_awaited_once_with([], bundle)
+        mock_prepare.assert_awaited_once_with([], bundle, mcs=_mcs())
         assert mock_push.call_count == 2
         assert mock_push.call_args_list[0].args[0] == [stub]
 
@@ -716,7 +716,7 @@ class TestTriageTestBundle:
         await test_session.commit()
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
-            await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+            await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         rows = (
             (
@@ -754,7 +754,7 @@ class TestTriageTestBundle:
         await test_session.commit()
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
-            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         refreshed_count = await test_session.scalar(
             select(func.count()).select_from(ExpectedResult).where(ExpectedResult.source_bundle == "test.json")
@@ -796,7 +796,7 @@ class TestTriageTestBundle:
         await test_session.commit()
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
-            await triage_test_bundle(mock_test_bundle_with_expected, "bundle_v2.json", test_session)
+            await triage_test_bundle(mock_test_bundle_with_expected, "bundle_v2.json", test_session, mcs=_mcs())
 
         all_rows = (
             (await test_session.execute(select(ExpectedResult).order_by(ExpectedResult.patient_ref))).scalars().all()
@@ -823,7 +823,7 @@ class TestTriageTestBundle:
 
         with patch("app.services.validation.push_resources", side_effect=fail_on_clinical):
             with pytest.raises(ValueError, match="CDR unreachable"):
-                await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+                await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         # Roll back the session — this is what process_bundle_upload's `async with async_session()`
         # block does when triage_test_bundle raises.
@@ -843,7 +843,7 @@ class TestTriageTestBundle:
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             await triage_test_bundle(
-                mock_test_bundle_with_expected, "test.json", test_session, progress_fn=record_progress
+                mock_test_bundle_with_expected, "test.json", test_session, progress_fn=record_progress, mcs=_mcs()
             )
 
         fields_called = [c[0] for c in calls]
@@ -861,7 +861,7 @@ class TestTriageTestBundle:
     async def test_progress_fn_none_does_not_raise(self, test_session, mock_test_bundle_with_expected):
         """Omitting progress_fn (None) does not raise and returns correct summary."""
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
-            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         assert result["measures_loaded"] == 1
         assert result["patients_loaded"] == 1
@@ -878,7 +878,70 @@ class TestTriageTestBundle:
                 "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
             ):
                 with pytest.raises(ValueError, match="Failed to upload measures to HAPI measure engine"):
-                    await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+                    await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
+
+
+# ---------------------------------------------------------------------------
+# triage_test_bundle resolves and threads its MCS target (issue #397 slice 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_triage_test_bundle_refuses_a_read_only_mcs(test_session):
+    """A validation upload must write Measures/Libraries/ValueSets, so a read-only
+    target cannot work. Refuse before writing anything rather than partway through."""
+    from app.services.fhir_client import McsTarget
+    from app.services.validation import triage_test_bundle
+
+    read_only = McsTarget(
+        url="https://shared.example.org/fhir", auth_headers={}, is_read_only=True, wipe_before_job=False
+    )
+    bundle = {"resourceType": "Bundle", "entry": []}
+
+    with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+        with pytest.raises(ValueError, match="read-only"):
+            await triage_test_bundle(bundle, "b.json", test_session, mcs=read_only)
+
+    mock_push.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_triage_test_bundle_pushes_measures_to_the_given_mcs(test_session):
+    """Every measure-engine write names its target explicitly.
+
+    These push_resources calls previously passed no target_url and silently used the
+    env-var default — invisible to the AST inventory guard.
+    """
+    from app.services.validation import triage_test_bundle
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [
+            {"resource": {"resourceType": "Measure", "id": "m1", "url": "http://cms.gov/M1"}},
+            {"resource": {"resourceType": "Library", "id": "l1"}},
+        ],
+    }
+
+    with (
+        patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push,
+        patch("app.services.validation._assert_no_canonical_url_clash", new_callable=AsyncMock),
+        patch("app.services.validation._prepare_measure_support_resources", new_callable=AsyncMock, return_value=[]),
+        patch("app.services.validation.wait_for_valueset_expansion", return_value=[]),
+    ):
+        await triage_test_bundle(bundle, "b.json", test_session, mcs=_mcs())
+
+    assert mock_push.await_count >= 1
+    for call in mock_push.await_args_list:
+        assert call.kwargs.get("target_url") == "https://mcs.example.org/fhir", call.kwargs
+        assert call.kwargs.get("auth_headers") == {"Authorization": "Bearer tok-397"}
+
+
+@pytest.mark.asyncio
+async def test_triage_test_bundle_requires_an_mcs(test_session):
+    from app.services.validation import triage_test_bundle
+
+    with pytest.raises(TypeError):
+        await triage_test_bundle({"resourceType": "Bundle", "entry": []}, "b.json", test_session)  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
