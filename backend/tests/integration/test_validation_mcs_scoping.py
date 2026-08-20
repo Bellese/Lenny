@@ -1,11 +1,25 @@
-"""Integration tests for validation-pipeline MCS scoping (issue #397 slice 3).
+"""Integration coverage for the scoped wipe the validation pipeline now calls (#397 slice 3).
 
-The unit tests assert which URLs the pipeline builds. Only a real FHIR server shows
-that a validation run's scoped wipe actually spares another participant's patients —
-the property the whole slice exists for.
+What this file actually covers: that a real FHIR server honours `DELETE {Type}?patient=<ids>`
+as a genuinely scoped delete, exercised through the same `wipe_patients_by_id` the validation
+path now calls instead of the unfiltered delete-every-patient sweep. Patient ids all carry the
+`lenny-397-` prefix, so the test cannot disturb the session-scoped seed data other integration
+tests rely on. The prefix is also the marginal coverage this file adds over its sibling.
 
-Only ever wipes patients prefixed `lenny-397-`, so it cannot disturb the
-session-scoped seed data other integration tests rely on.
+What it does NOT cover: it never drives `run_validation`, `triage_test_bundle`, or any other
+code path this branch changed. It calls `wipe_patients_by_id` directly. So it demonstrates a
+property of the sweep, not a property of a validation run.
+
+`tests/integration/test_scoped_wipe.py:104` asserts the same property on the same function
+with a superset of assertions (it also covers `Encounter` and the `subject=`-scoped
+`AdverseEvent`). That overlap is deliberate, not an oversight: this file keeps the
+validation-path framing and the `lenny-397-` prefix alongside the job-path original.
+
+Known gap — the spec's Testing → Integration section lists two items this branch does not
+deliver, and they are follow-up work:
+  1. "a validation run against a second MCS leaves a bystander patient intact"
+  2. "a validation run's results are attributable to the snapshotted MCS"
+Both need CDR-gather stubbing inside an integration context and are task-sized on their own.
 """
 
 import httpx
@@ -55,7 +69,11 @@ async def _exists(measure_url: str, rtype: str, rid: str) -> bool:
 
 
 async def test_validation_scoped_wipe_spares_other_patients(measure_url):
-    """The acceptance property for slice 3's wipe, against a real server."""
+    """`wipe_patients_by_id` — the sweep validation now calls — spares a bystander.
+
+    This exercises the sweep directly; it does not run a validation run. See the module
+    docstring for what that does and does not establish.
+    """
     await _seed(measure_url)
     assert await _exists(measure_url, "Patient", _RUN_PATIENT), "seed failed"
     assert await _exists(measure_url, "Patient", _BYSTANDER), "seed failed"
@@ -66,7 +84,8 @@ async def test_validation_scoped_wipe_spares_other_patients(measure_url):
         assert not await _exists(measure_url, "Patient", _RUN_PATIENT)
         assert not await _exists(measure_url, "Condition", f"{_RUN_PATIENT}-cond")
         assert await _exists(measure_url, "Patient", _BYSTANDER), (
-            "a validation run deleted a patient it was not evaluating — the #392 hazard on the validation path"
+            "the scoped sweep deleted a patient it was not given — the #392 hazard, "
+            "on the sweep the validation path now calls"
         )
         assert await _exists(measure_url, "Condition", f"{_BYSTANDER}-cond")
     finally:

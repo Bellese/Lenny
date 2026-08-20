@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import async_session
-from app.dependencies import resolve_mcs_auth_headers
+from app.dependencies import get_active_mcs, mcs_target_from_context, resolve_mcs_auth_headers
 from app.models.config import CDRConfig
 from app.models.mcs_config import MCSConfig
 from app.models.validation import (
@@ -957,8 +957,6 @@ async def process_bundle_upload(upload_id: int) -> None:
                         setattr(u, field, value)
                         await prog_session.commit()
 
-            from app.dependencies import get_active_mcs, mcs_target_from_context
-
             mcs = await mcs_target_from_context(await get_active_mcs(session=session))
             summary = await triage_test_bundle(bundle_json, upload.filename, session, mcs=mcs, progress_fn=_on_progress)
 
@@ -1168,7 +1166,7 @@ async def run_validation(validation_run_id: int) -> None:
                     owner_label=f"validation run {validation_run_id}",
                 )
             except RuntimeError as exc:
-                await _fail_validation_run(validation_run_id, str(exc))
+                await _fail_validation_run(validation_run_id, sanitize_error(exc))
                 return
 
             # is_read_only is read LIVE, not from the snapshot: it answers "may I write to

@@ -2592,7 +2592,10 @@ async def test_run_validation_targets_the_snapshotted_mcs(test_session, session_
         await run_validation(run.id)
 
     assert calls, "no measure-engine calls were recorded"
-    # Every site was observed...
+    # Every *evaluation* site was observed. The wipe is a fourth `mcs.url`-targeting call
+    # site, but it is patched out above with a bare AsyncMock, so it sits outside both
+    # conjunctions here by design; its URL and auth_headers are pinned separately in
+    # test_run_validation_scoped_wipe_by_default (see :2896-2900).
     assert {label for label, _, _ in calls} == {"push", "eval", "name_lookup"}, calls
     # ...and every one of them hit the same server. That conjunction is the guard.
     assert {url for _, url, _ in calls} == {"https://mcs.example.org/fhir"}, calls
@@ -2832,14 +2835,34 @@ async def test_run_validation_scoped_wipe_by_default(test_session, session_facto
     #392 scoped run_job's wipe and never touched this path. Re-pointing it at the
     active MCS without scoping would have deleted every participant's data on a
     shared server.
+
+    Configured with bearer auth, not `none`: the wipe is the fourth `mcs.url`-targeting
+    call and the destructive one, and with `AuthType.none` its `auth_headers` would be
+    `{}` — indistinguishable from a regression that dropped them and issued an
+    unauthenticated DELETE.
     """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
     from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
     from app.services.validation import run_validation
 
+    cfg = MCSConfig(
+        name="Remote MCS",
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok"},
+        is_active=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
     run = ValidationRun(
         status=ValidationStatus.queued,
-        mcs_url="https://mcs.example.org/fhir",
-        mcs_auth_type=None,
+        mcs_id=cfg.id,
+        mcs_url=cfg.mcs_url,
+        mcs_name=cfg.name,
+        mcs_auth_type="bearer",
         mcs_wipe_before_job=False,
     )
     test_session.add(run)
@@ -2872,6 +2895,9 @@ async def test_run_validation_scoped_wipe_by_default(test_session, session_facto
     kwargs = mock_scoped.await_args.kwargs
     assert kwargs["base_url"] == "https://mcs.example.org/fhir"
     assert sorted(kwargs["patient_ids"]) == ["p1", "p2"]
+    # Credentials travel with the target here too. The anti-divergence test above patches
+    # this call out, so this is the only place on the branch that pins it.
+    assert kwargs["auth_headers"] == {"Authorization": "Bearer tok"}
 
 
 @pytest.mark.asyncio
@@ -2956,6 +2982,15 @@ async def test_run_validation_with_no_resolved_patients_wipes_nothing(test_sessi
         patch("app.services.validation.push_resources", new_callable=AsyncMock),
         patch("app.services.validation.evaluate_measure", new_callable=AsyncMock, return_value={"group": []}),
         patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value=None),
+        # Unresolved measures send run_validation down the seed-bundle reload path. Left
+        # unpatched, that walks the on-disk connectathon bundles and opens a real
+        # httpx.AsyncClient against https://mcs.example.org/fhir once per bundle. The
+        # assertions below hold either way, but a unit test must not touch the network.
+        patch(
+            "app.services.validation._reload_measures_from_seed_bundles",
+            new_callable=AsyncMock,
+            return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
+        ),
         patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_full,
         patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped,
     ):

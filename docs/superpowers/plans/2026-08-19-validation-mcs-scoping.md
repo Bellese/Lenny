@@ -10,6 +10,14 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-19-validation-mcs-scoping-design.md`
 
+> **Known defect in this plan's code samples — read before copying them.** The four
+> `ExpectedResult(...)` literals below (lines ~1170, ~1362, ~1666, ~1707) omit
+> `source_bundle`. That column is `NOT NULL` with no server default, so each one raises
+> `IntegrityError` on commit. Add `source_bundle="<something>.json"` when you copy them.
+> Three separate tasks hit this independently and fixed it the same way; the literals are
+> left as written because this plan is a historical record of what was planned, not the
+> shipped code.
+
 ## Global Constraints
 
 - Python 3.10+; use `X | None`, never `Optional[X]`, in new code.

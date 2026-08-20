@@ -239,3 +239,12 @@ def test_no_measure_engine_call_relies_on_a_defaulted_target():
         f"Pass the explicit keyword ({', '.join(f'{k}=>{v}' for k, v in _TARGET_KWARG.items())}), "
         "or add the file to EXPECTED_UNSCOPED_CALLS with a reason."
     )
+
+    # The reverse direction, mirroring test_measure_engine_url_reads_match_the_inventory.
+    # Vacuous while EXPECTED_UNSCOPED_CALLS is empty, but the moment an allowed entry is
+    # added, fixing it would leave a stale allowance behind — and a one-directional guard
+    # is exactly how an inventory quietly stops guarding (see the note above).
+    gone = sorted(set(EXPECTED_UNSCOPED_CALLS) - set(actual))
+    assert not gone, (
+        f"File(s) no longer make a defaulted-target call: {gone}. Good — remove them from EXPECTED_UNSCOPED_CALLS."
+    )
