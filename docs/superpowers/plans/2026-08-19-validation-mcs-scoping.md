@@ -184,7 +184,11 @@ async def mcs_target_from_context(ctx: ConnectionContext) -> McsTarget:
     )
 ```
 
-Add the `McsTarget` import to the `TYPE_CHECKING` block if one exists; otherwise the local import above is sufficient. `_build_auth_headers` is imported locally inside `resolve_job_mcs_auth_headers` today — hoist it to a module-level import in `dependencies.py` only if ruff does not flag a cycle; otherwise import it locally here too.
+The local `McsTarget` import above is sufficient — do not add a module-level one.
+Keep `_build_auth_headers` as a LOCAL import inside each function that needs it
+(controller ruling R2): `dependencies` importing `fhir_client` at module scope is
+what the local imports exist to avoid, and consistency between the two functions
+matters more than saving a line.
 
 - [ ] **Step 8: Run tests to verify they pass**
 
@@ -1578,7 +1582,11 @@ Expected: PASS.
 
 - [ ] **Step 6: Update the inventory guard, lint, commit**
 
-`"app/services/validation.py"`: `2` → `1` (only the legacy-NULL fallback remains). Record that reason in the comment block.
+`"app/services/validation.py"`: stays at `2` — this task NETS ZERO. It removes the
+patient-name lookup at 1359 but ADDS one read: the legacy-NULL fallback
+`run_row.mcs_url or settings.MEASURE_ENGINE_URL` in the new resolve block. Record
+that in the comment block, because a count that does not move is exactly where a
+reader assumes nothing happened. Task 8 takes it to 1.
 
 ```bash
 cd backend && python3 -m pytest tests/test_mcs_scoping_inventory.py -q
@@ -1616,7 +1624,7 @@ EOF
 
 **Files:**
 - Modify: `backend/app/services/validation.py:1239`
-- Modify: `backend/tests/test_mcs_scoping_inventory.py` if the count moves
+- Modify: `backend/tests/test_mcs_scoping_inventory.py` (validation.py 2 → 1)
 - Test: `backend/tests/test_services_validation.py`
 
 **Interfaces:**
@@ -1762,6 +1770,11 @@ Import `wipe_patients_by_id` and `sanitize_url` in `validation.py` if not alread
 cd backend && python3 -m pytest tests/test_services_validation.py -q
 ```
 Expected: PASS.
+
+- [ ] **Step 4b: Update the inventory guard**
+
+`"app/services/validation.py"`: `2` → `1`. The only remaining read is the
+legacy-NULL fallback introduced in Task 7. Record that as the reason.
 
 - [ ] **Step 5: Full unit suite — the first end-to-end check of Tasks 3-8**
 
