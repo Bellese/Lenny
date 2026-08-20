@@ -48,7 +48,7 @@ import pytest
 #                           back-compat defaults on push_resources and evaluate_measure.
 #
 # KNOWN-OUTSTANDING DEFECTS — each must drop to 0 as its slice lands:
-#   validation.py        6  the rest of the validation pipeline (task 3 of 9 -> 6). Slice 3.
+#   validation.py        3  the rest of the validation pipeline (task 4 of 6 -> 3). Slice 3.
 #   bundle_loader.py     1  re-seed target. Slice 3.
 #
 # CLEARED BY SLICE 2 (job-scoped):
@@ -66,6 +66,11 @@ import pytest
 # (_find_existing_valueset_id, _find_existing_codesystem_id, _delete_existing_valueset)
 # now take a required McsTarget.
 #
+# CLEARED BY SLICE 3 (task 4): validation.py 6 -> 3. _assert_no_canonical_url_clash
+# and _resolve_measure_id now take a required McsTarget. The remaining 3 are the
+# valueset-expansion call (878), the wipe (1239), and the patient-name lookup (1359),
+# cleared in tasks 7 and 8.
+#
 # When a slice lands, lower the number here in the same commit. A count that is
 # too HIGH fails just as loudly as one that is too low — a stale expectation is
 # how an inventory guard quietly stops guarding.
@@ -79,7 +84,7 @@ EXPECTED_READS: dict[str, int] = {
     "app/services/bundle_loader.py": 1,
     "app/services/fhir_client.py": 3,
     "app/services/orchestrator.py": 1,
-    "app/services/validation.py": 6,
+    "app/services/validation.py": 3,
 }
 
 _APP_ROOT = pathlib.Path(__file__).resolve().parents[1] / "app"

@@ -705,7 +705,7 @@ def _valueset_urls(resources: list[dict[str, Any]]) -> list[str]:
 _CLASH_PROBE_TIMEOUT_SECONDS = 10.0
 
 
-async def _assert_no_canonical_url_clash(measures: list[dict[str, Any]]) -> None:
+async def _assert_no_canonical_url_clash(measures: list[dict[str, Any]], *, mcs: McsTarget) -> None:
     """Raise ValueError if any Measure in *measures* would introduce a canonical-URL clash.
 
     A clash occurs when HAPI already contains a Measure with the same canonical URL
@@ -726,8 +726,9 @@ async def _assert_no_canonical_url_clash(measures: list[dict[str, Any]]) -> None
                 continue
             try:
                 resp = await client.get(
-                    f"{settings.MEASURE_ENGINE_URL}/Measure",
+                    f"{mcs.url}/Measure",
                     params={"url": canonical_url, "_elements": "id,url", "_count": "2"},
+                    headers=mcs.auth_headers,
                 )
             except Exception:
                 # Network errors during the probe are non-fatal; push_resources will
@@ -980,7 +981,7 @@ async def process_bundle_upload(upload_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_measure_id(measure_url: str) -> Optional[str]:
+async def _resolve_measure_id(measure_url: str, *, mcs: McsTarget) -> str | None:
     """Resolve a measure URL or relative reference to a HAPI FHIR resource ID.
 
     Handles two formats:
@@ -995,7 +996,7 @@ async def _resolve_measure_id(measure_url: str) -> Optional[str]:
             # Relative reference like "Measure/measure-EXM130-FHIR4-7.2.000"
             parts = measure_url.split("/", 1)
             if len(parts) == 2 and parts[0] == "Measure":
-                resp = await client.get(f"{settings.MEASURE_ENGINE_URL}/Measure/{parts[1]}")
+                resp = await client.get(f"{mcs.url}/Measure/{parts[1]}", headers=mcs.auth_headers)
                 if resp.status_code == 404:
                     return None
                 resp.raise_for_status()
@@ -1004,13 +1005,13 @@ async def _resolve_measure_id(measure_url: str) -> Optional[str]:
 
         # Canonical URL — search by ?url= parameter
         # Retry up to 3 times with 1s delay to handle search indexing lag
-        headers = {"Cache-Control": "no-cache", "Accept": "application/fhir+json"}
+        headers = {"Cache-Control": "no-cache", "Accept": "application/fhir+json", **mcs.auth_headers}
         params = {"url": measure_url, "_count": 1}
 
         for attempt in range(3):
             try:
                 resp = await client.get(
-                    f"{settings.MEASURE_ENGINE_URL}/Measure",
+                    f"{mcs.url}/Measure",
                     params=params,
                     headers=headers,
                 )

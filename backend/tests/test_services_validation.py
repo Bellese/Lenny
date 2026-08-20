@@ -1468,7 +1468,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("http://example.com/Measure/CMS124")
+            result = await _resolve_measure_id("http://example.com/Measure/CMS124", mcs=_mcs())
 
         assert result == "hapi-measure-123"
 
@@ -1488,7 +1488,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("http://example.com/Measure/CMS124")
+            result = await _resolve_measure_id("http://example.com/Measure/CMS124", mcs=_mcs())
 
         assert result is None
 
@@ -1508,7 +1508,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("http://example.com/Measure/CMS124")
+            result = await _resolve_measure_id("http://example.com/Measure/CMS124", mcs=_mcs())
 
         assert result is None
 
@@ -1534,7 +1534,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000")
+            result = await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000", mcs=_mcs())
 
         assert result == "measure-EXM130-FHIR4-7.2.000"
         # Must fetch by ID path, NOT by ?url= query
@@ -1556,7 +1556,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000")
+            result = await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000", mcs=_mcs())
 
         assert result is None
 
@@ -1568,7 +1568,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("not-a-valid-ref")
+            result = await _resolve_measure_id("not-a-valid-ref", mcs=_mcs())
 
         assert result is None
 
@@ -1590,7 +1590,7 @@ class TestResolveMeasureId:
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             with pytest.raises(httpx.HTTPStatusError):
-                await _resolve_measure_id("http://example.com/Measure/CMS124")
+                await _resolve_measure_id("http://example.com/Measure/CMS124", mcs=_mcs())
 
     async def test_relative_ref_http_error_raises(self):
         """Non-404 errors from HAPI for relative reference lookups propagate as exceptions."""
@@ -1611,7 +1611,7 @@ class TestResolveMeasureId:
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             with pytest.raises(httpx.HTTPStatusError):
-                await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000")
+                await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000", mcs=_mcs())
 
     async def test_resolve_measure_id_retries_on_empty_bundle(self):
         """Verify that _resolve_measure_id retries when HAPI returns an empty bundle (lag/cache)."""
@@ -1641,7 +1641,7 @@ class TestResolveMeasureId:
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             with patch("app.services.validation.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-                result = await _resolve_measure_id("http://example.com/Measure/123")
+                result = await _resolve_measure_id("http://example.com/Measure/123", mcs=_mcs())
 
                 assert result == "hapi-id-123"
                 assert mock_client.get.call_count == 3
@@ -1670,7 +1670,7 @@ class TestResolveMeasureId:
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             with patch("app.services.validation.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-                result = await _resolve_measure_id("http://example.com/Measure/456")
+                result = await _resolve_measure_id("http://example.com/Measure/456", mcs=_mcs())
 
                 assert result == "hapi-id-456"
                 assert mock_client.get.call_count == 2
@@ -2041,7 +2041,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
     async def test_clash_detected_raises(self):
         """HAPI has the abbreviated ID; incoming bundle has the full ID — ValueError raised."""
@@ -2066,7 +2066,7 @@ class TestAssertNoCanonicalUrlClash:
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             with pytest.raises(ValueError, match="Canonical URL clash"):
-                await _assert_no_canonical_url_clash(measures)
+                await _assert_no_canonical_url_clash(measures, mcs=_mcs())
 
     async def test_empty_hapi_response_passes(self):
         """No existing Measure in HAPI — no clash possible."""
@@ -2085,7 +2085,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
     async def test_hapi_error_is_non_fatal(self):
         """Network error during probe is swallowed — upload is not blocked."""
@@ -2103,7 +2103,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
     async def test_non_measure_resources_are_skipped(self):
         """Library resources are not checked — only Measure resources."""
@@ -2118,7 +2118,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(libraries)
+            await _assert_no_canonical_url_clash(libraries, mcs=_mcs())
 
         mock_client.get.assert_not_awaited()
 
@@ -2132,7 +2132,7 @@ class TestAssertNoCanonicalUrlClash:
             {"resourceType": "Measure", "url": "https://madie.cms.gov/Measure/SomeMeasure"},  # missing id
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
         mock_client.get.assert_not_awaited()
 
@@ -2152,7 +2152,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
     async def test_malformed_json_response_is_non_fatal(self):
         """HAPI returning HTTP 200 with non-JSON body is silently ignored."""
@@ -2171,7 +2171,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
     async def test_entry_with_empty_existing_id_no_raise(self):
         """HAPI entry with empty id is not treated as a clash — empty string is ignored."""
@@ -2193,7 +2193,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -2290,3 +2290,88 @@ async def test_terminology_helpers_require_an_mcs():
         await _find_existing_codesystem_id("http://cs.example/1", None, client)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         await _delete_existing_valueset("vs-1", client)  # type: ignore[call-arg]
+
+
+@pytest.mark.asyncio
+async def test_assert_no_canonical_url_clash_probes_the_given_mcs():
+    """The clash probe must ask the server the bundle is being pushed to.
+
+    Probing a different server means it either misses a real clash or invents one.
+    """
+    from app.services.validation import _assert_no_canonical_url_clash
+
+    seen: list[str] = []
+
+    async def _get(url, **kwargs):
+        seen.append(url)
+        return httpx.Response(200, json={"entry": []}, request=httpx.Request("GET", url))
+
+    with patch("app.services.validation.httpx.AsyncClient") as mock_httpx:
+        ctx = AsyncMock()
+        ctx.get = AsyncMock(side_effect=_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await _assert_no_canonical_url_clash(
+            [{"resourceType": "Measure", "url": "http://cms.gov/M1", "id": "m1"}], mcs=_mcs()
+        )
+
+    assert seen == ["https://mcs.example.org/fhir/Measure"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_measure_id_uses_the_given_mcs_by_relative_ref():
+    from app.services.validation import _resolve_measure_id
+
+    seen: list[str] = []
+
+    async def _get(url, **kwargs):
+        seen.append(url)
+        return httpx.Response(200, json={"id": "m1"}, request=httpx.Request("GET", url))
+
+    with patch("app.services.validation.httpx.AsyncClient") as mock_httpx:
+        ctx = AsyncMock()
+        ctx.get = AsyncMock(side_effect=_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _resolve_measure_id("Measure/m1", mcs=_mcs())
+
+    assert result == "m1"
+    assert seen == ["https://mcs.example.org/fhir/Measure/m1"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_measure_id_uses_the_given_mcs_by_canonical_url():
+    from app.services.validation import _resolve_measure_id
+
+    seen: list[str] = []
+
+    async def _get(url, **kwargs):
+        seen.append(url)
+        return httpx.Response(
+            200,
+            json={"entry": [{"resource": {"id": "m1"}}]},
+            request=httpx.Request("GET", url),
+        )
+
+    with patch("app.services.validation.httpx.AsyncClient") as mock_httpx:
+        ctx = AsyncMock()
+        ctx.get = AsyncMock(side_effect=_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _resolve_measure_id("http://cms.gov/M1", mcs=_mcs())
+
+    assert result == "m1"
+    assert seen == ["https://mcs.example.org/fhir/Measure"]
+
+
+@pytest.mark.asyncio
+async def test_measure_resolution_helpers_require_an_mcs():
+    from app.services.validation import _assert_no_canonical_url_clash, _resolve_measure_id
+
+    with pytest.raises(TypeError):
+        await _assert_no_canonical_url_clash([])  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        await _resolve_measure_id("Measure/m1")  # type: ignore[call-arg]
