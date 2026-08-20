@@ -13,6 +13,7 @@ unchanged. The alias will be removed once all call sites migrate to
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fastapi import Depends
 from sqlalchemy import select
@@ -23,6 +24,13 @@ from app.db import get_session
 from app.models.config import AuthType, CDRConfig
 from app.models.connection_base import ConnectionKind
 from app.models.mcs_config import MCSConfig
+
+if TYPE_CHECKING:
+    # Type-checking only — never executed, so this cannot create the runtime
+    # import cycle `_build_auth_headers` (below) is deliberately imported locally
+    # to avoid. Needed solely so `mcs_target_from_context`'s `-> McsTarget` return
+    # annotation resolves.
+    from app.services.fhir_client import McsTarget
 
 
 async def resolve_job_mcs_auth_headers(session: AsyncSession, job_id: int) -> dict[str, str]:
@@ -70,6 +78,24 @@ async def resolve_job_mcs_auth_headers(session: AsyncSession, job_id: int) -> di
             "was created against. Refusing to send its credentials to the snapshotted URL."
         )
     return await _build_auth_headers(cfg.auth_type, cfg.auth_credentials)
+
+
+async def mcs_target_from_context(ctx: ConnectionContext) -> McsTarget:
+    """Build a pipeline-ready `McsTarget` from an active-connection context.
+
+    Lives here rather than on `McsTarget` itself because it needs
+    `_build_auth_headers`, and `fhir_client` (where `McsTarget` is defined) must not
+    import this module — `dependencies` already imports `fhir_client`, so the
+    reverse direction would be an import cycle.
+    """
+    from app.services.fhir_client import McsTarget, _build_auth_headers
+
+    return McsTarget(
+        url=ctx.mcs_url,
+        auth_headers=await _build_auth_headers(ctx.auth_type, ctx.auth_credentials),
+        is_read_only=ctx.is_read_only,
+        wipe_before_job=ctx.wipe_before_job,
+    )
 
 
 @dataclass

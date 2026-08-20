@@ -267,3 +267,34 @@ def test_wipe_before_job_is_mcs_only():
     assert "wipe_before_job" in MCSConfig.__table__.columns
     assert "wipe_before_job" not in ConnectionConfigMixin.__dict__
     assert "wipe_before_job" not in CDRConfig.__table__.columns
+
+
+@pytest.mark.asyncio
+async def test_mcs_target_from_context_resolves_credentials(test_session):
+    """The bridge turns a ConnectionContext into a pipeline-ready target.
+
+    Credentials are resolved once here so no validation helper re-derives them.
+    """
+    from app.dependencies import get_active_mcs, mcs_target_from_context
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    cfg = MCSConfig(
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-397"},
+        is_active=True,
+        name="Remote MCS",
+        is_default=False,
+        wipe_before_job=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+
+    ctx = await get_active_mcs(session=test_session)
+    target = await mcs_target_from_context(ctx)
+
+    assert target.url == "https://mcs.example.org/fhir"
+    assert target.auth_headers == {"Authorization": "Bearer tok-397"}
+    assert target.is_read_only is False
+    assert target.wipe_before_job is True
