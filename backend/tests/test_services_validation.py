@@ -2,6 +2,7 @@
 
 import base64
 import json
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -1126,7 +1127,9 @@ class TestRunValidation:
         def make_ctx():
             return self._make_session_ctx(test_session)
 
-        async def resolve_measure_side_effect(measure_url):
+        async def resolve_measure_side_effect(measure_url, *, mcs):
+            # `mcs` is required (#397): run_validation must name the server it resolves against.
+            assert mcs.url == settings.MEASURE_ENGINE_URL
             if measure_url.endswith("/resolved"):
                 return "measure-1"
             return None
@@ -1254,7 +1257,9 @@ class TestRunValidation:
         def make_ctx():
             return self._make_session_ctx(test_session)
 
-        async def resolve_measure_side_effect(measure_url):
+        async def resolve_measure_side_effect(measure_url, *, mcs):
+            # `mcs` is required (#397): run_validation must name the server it resolves against.
+            assert mcs.url == "http://measure/fhir"
             if "CMS124" in measure_url:
                 return "measure-1"
             if "CMS816" in measure_url:
@@ -2438,3 +2443,330 @@ async def test_measure_resolution_helpers_require_an_mcs():
         await _assert_no_canonical_url_clash([])  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         await _resolve_measure_id("Measure/m1")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# run_validation targets its snapshotted MCS (issue #397 slice 3)
+# ---------------------------------------------------------------------------
+
+
+def make_session_patcher(test_session):
+    """Return a context-manager patcher that routes async_session() calls to test_session."""
+
+    @asynccontextmanager
+    async def _fake_session():
+        yield test_session
+
+    return _fake_session
+
+
+@pytest.mark.asyncio
+async def test_run_validation_targets_the_snapshotted_mcs(test_session, session_factory):
+    """Every measure-engine call in one run must hit the SAME server.
+
+    This is the anti-divergence guard. Pushing to one server and evaluating on
+    another produces confidently wrong pass/fail numbers rather than an error, which
+    is ADR-011's bug. A missed call site is exactly how that returns.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    cfg = MCSConfig(
+        name="Remote MCS",
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_id=cfg.id,
+        mcs_url=cfg.mcs_url,
+        mcs_name=cfg.name,
+        mcs_auth_type="none",
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    test_session.add(
+        ExpectedResult(
+            measure_url="http://cms.gov/M1",
+            patient_ref="p1",
+            expected_populations={"initial-population": 1},
+            period_start="2024-01-01",
+            period_end="2024-12-31",
+            source_bundle="m1.json",
+        )
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    targets: list[str] = []
+
+    async def _record_push(resources, **kwargs):
+        targets.append(kwargs.get("target_url"))
+        from app.services.fhir_client import BundleUploadResult
+
+        return BundleUploadResult()
+
+    async def _record_eval(measure_id, patient_id, ps, pe, **kwargs):
+        targets.append(kwargs.get("measure_engine_url"))
+        # An evaluatedResource Patient reference is what drives the patient-name
+        # lookup, the fourth measure-engine call site this run makes.
+        return {
+            "resourceType": "MeasureReport",
+            "group": [],
+            "evaluatedResource": [{"reference": "Patient/p1"}],
+        }
+
+    async def _record_patient_lookup(url, **kwargs):
+        targets.append(url.removesuffix("/Patient/p1"))
+        return httpx.Response(404, request=httpx.Request("GET", url))
+
+    # The CDR gather must succeed, or `push_resources` is never reached and the
+    # divergence this test exists to catch (push to one server, evaluate on
+    # another) would go unobserved.
+    strategy = MagicMock()
+    strategy.gather_patient_data = AsyncMock(
+        return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}])
+    )
+    name_client = AsyncMock()
+    name_client.get = AsyncMock(side_effect=_record_patient_lookup)
+    name_client_ctx = MagicMock()
+    name_client_ctx.__aenter__ = AsyncMock(return_value=name_client)
+    name_client_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
+        patch("app.services.validation.httpx.AsyncClient", return_value=name_client_ctx),
+        patch("app.services.validation.push_resources", side_effect=_record_push),
+        patch("app.services.validation.evaluate_measure", side_effect=_record_eval),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
+    ):
+        await run_validation(run.id)
+
+    assert targets, "no measure-engine calls were recorded"
+    # push + warmup evaluate + main evaluate + patient-name lookup. Pinning the
+    # count keeps the assertion below from passing because a site went unexercised.
+    assert len(targets) == 4, targets
+    assert set(targets) == {"https://mcs.example.org/fhir"}, targets
+
+
+@pytest.mark.asyncio
+async def test_run_validation_refuses_a_read_only_mcs(test_session, session_factory):
+    """Read-only is read LIVE, not from the snapshot: it answers "may I write now"."""
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.validation import ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    cfg = MCSConfig(
+        name="Protected MCS",
+        mcs_url="https://shared.example.org/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        is_read_only=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_id=cfg.id,
+        mcs_url=cfg.mcs_url,
+        mcs_auth_type="none",
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push,
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+    ):
+        await run_validation(run.id)
+
+    mock_push.assert_not_awaited()
+    mock_wipe.assert_not_awaited()
+    await test_session.refresh(run)
+    assert run.status == ValidationStatus.failed
+    assert "read-only" in (run.error_message or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_run_validation_refuses_a_connection_marked_read_only_after_queueing(test_session, session_factory):
+    """Controller ruling R15 — the spec's actual claim, which the test above does not make.
+
+    The spec (§5, and its Testing bullet "Read-only checked at execution time, not queue
+    time") requires that a run queued while the connection was WRITABLE still refuses if the
+    connection was marked read-only before it executed. The test above creates a
+    connection that was already read-only, which cannot distinguish "read live" from
+    "snapshotted" — nothing was ever written down to be stale. This one flips the flag
+    after the run row exists, so it fails if is_read_only is ever snapshotted.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.validation import ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    cfg = MCSConfig(
+        name="Later Protected MCS",
+        mcs_url="https://shared.example.org/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        is_read_only=False,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_id=cfg.id,
+        mcs_url=cfg.mcs_url,
+        mcs_auth_type="none",
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    # The user protects the server AFTER the run was queued.
+    cfg.is_read_only = True
+    await test_session.commit()
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push,
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+    ):
+        await run_validation(run.id)
+
+    mock_push.assert_not_awaited()
+    mock_wipe.assert_not_awaited()
+    await test_session.refresh(run)
+    assert run.status == ValidationStatus.failed
+    assert "read-only" in (run.error_message or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_run_validation_fails_when_the_config_was_repointed(test_session, session_factory):
+    """Controller ruling R16 — covers the try/except this task adds, and a spec item.
+
+    Step 3 wraps `resolve_mcs_auth_headers` in `except RuntimeError -> _fail_validation_run`,
+    and nothing in the original brief exercised that path. The spec's Testing section also
+    asks for the URL-drift guard firing "for a ValidationRun snapshot the same way" it does
+    for a Job. Credentials are read live while the URL comes from the snapshot, so a config
+    repointed at a different host must not have its token sent to the snapshotted host.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.validation import ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    cfg = MCSConfig(
+        name="Repointed MCS",
+        mcs_url="https://mcs-a.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-a"},
+        is_active=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_id=cfg.id,
+        mcs_url="https://mcs-a.example.org/fhir",
+        mcs_auth_type="bearer",
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    # The config is repointed at a different server after the run was queued.
+    cfg.mcs_url = "https://mcs-b.example.org/fhir"
+    await test_session.commit()
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push,
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+    ):
+        await run_validation(run.id)
+
+    mock_push.assert_not_awaited()
+    mock_wipe.assert_not_awaited()
+    await test_session.refresh(run)
+    assert run.status == ValidationStatus.failed
+    assert "different server" in (run.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_run_validation_legacy_null_mcs_url_falls_back(test_session, session_factory):
+    """Runs created before the snapshot column must remain runnable."""
+    from app.config import settings as app_settings
+    from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    run = ValidationRun(status=ValidationStatus.queued, mcs_url=None, mcs_auth_type=None)
+    test_session.add(run)
+    # Controller ruling R10: this row is required. Without an expected result the run
+    # short-circuits before any measure-engine call, `targets` stays empty, and the
+    # `for t in targets` loop below asserts nothing — the test passes while verifying
+    # no fallback at all.
+    test_session.add(
+        ExpectedResult(
+            measure_url="http://cms.gov/M1",
+            patient_ref="p1",
+            expected_populations={"initial-population": 1},
+            period_start="2024-01-01",
+            period_end="2024-12-31",
+            source_bundle="m1.json",
+        )
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    targets: list[str] = []
+
+    async def _record_push(resources, **kwargs):
+        targets.append(kwargs.get("target_url"))
+        from app.services.fhir_client import BundleUploadResult
+
+        return BundleUploadResult()
+
+    async def _record_eval(measure_id, patient_id, ps, pe, **kwargs):
+        targets.append(kwargs.get("measure_engine_url"))
+        return {"resourceType": "MeasureReport", "group": []}
+
+    # As above: without a succeeding CDR gather the push site is never reached.
+    strategy = MagicMock()
+    strategy.gather_patient_data = AsyncMock(
+        return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}])
+    )
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
+        patch("app.services.validation.push_resources", side_effect=_record_push),
+        patch("app.services.validation.evaluate_measure", side_effect=_record_eval),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
+    ):
+        await run_validation(run.id)
+
+    assert targets, "no measure-engine calls were recorded — the fallback is unverified"
+    for t in targets:
+        assert t == app_settings.MEASURE_ENGINE_URL

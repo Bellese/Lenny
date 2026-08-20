@@ -21,7 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import async_session
+from app.dependencies import resolve_mcs_auth_headers
 from app.models.config import CDRConfig
+from app.models.mcs_config import MCSConfig
 from app.models.validation import (
     BundleUpload,
     ExpectedResult,
@@ -1112,6 +1114,17 @@ async def _reload_measures_from_seed_bundles(*, mcs: McsTarget) -> dict[str, int
     return {"measures_loaded": total_measures, "libraries_loaded": total_libraries, "failed": failed}
 
 
+async def _fail_validation_run(validation_run_id: int, message: str) -> None:
+    """Mark a run failed with a diagnosis, so it never sits in `running` forever."""
+    async with async_session() as session:
+        run = await session.get(ValidationRun, validation_run_id)
+        if run:
+            run.status = ValidationStatus.failed
+            run.error_message = message
+            run.completed_at = datetime.now(timezone.utc)
+            await session.commit()
+
+
 async def run_validation(validation_run_id: int) -> None:
     """Worker dispatch target: execute a validation run."""
     async with async_session() as session:
@@ -1133,6 +1146,54 @@ async def run_validation(validation_run_id: int) -> None:
     try:
         if await _stop_or_delete_validation_run(validation_run_id):
             return
+
+        # Resolve the target ONCE from the run's snapshot, not from whatever connection
+        # is active now: a run that sat in the queue while the user switched connections
+        # must still execute against the server it was created for (issue #397).
+        async with async_session() as session:
+            run_row = await session.get(ValidationRun, validation_run_id)
+            if run_row is None:
+                return
+            mcs_url = run_row.mcs_url or settings.MEASURE_ENGINE_URL
+            snapshot_mcs_id = run_row.mcs_id
+            snapshot_auth_type = run_row.mcs_auth_type
+            wipe_before = bool(run_row.mcs_wipe_before_job)
+            try:
+                mcs_auth_headers = await resolve_mcs_auth_headers(
+                    session,
+                    mcs_id=snapshot_mcs_id,
+                    mcs_url=run_row.mcs_url,
+                    mcs_auth_type=snapshot_auth_type,
+                    owner_label=f"validation run {validation_run_id}",
+                )
+            except RuntimeError as exc:
+                await _fail_validation_run(validation_run_id, str(exc))
+                return
+
+            # is_read_only is read LIVE, not from the snapshot: it answers "may I write to
+            # this server NOW". Snapshotting it would let a run write to a server the user
+            # has since marked protected.
+            live_read_only = False
+            if snapshot_mcs_id is not None:
+                cfg = await session.get(MCSConfig, snapshot_mcs_id)
+                live_read_only = bool(cfg.is_read_only) if cfg else False
+
+        if live_read_only:
+            await _fail_validation_run(
+                validation_run_id,
+                "The measure engine connection for this run is configured as read-only. "
+                "A validation run must write measures and patient data, so it cannot proceed. "
+                "Switch to a writable connection and start a new run.",
+            )
+            return
+
+        mcs = McsTarget(
+            url=mcs_url,
+            auth_headers=mcs_auth_headers,
+            is_read_only=live_read_only,
+            wipe_before_job=wipe_before,
+        )
+
         # Load expected results
         async with async_session() as session:
             run = await session.get(ValidationRun, validation_run_id)
@@ -1170,7 +1231,7 @@ async def run_validation(validation_run_id: int) -> None:
 
         for measure_url, ers in measures.items():
             try:
-                hapi_id = await _resolve_measure_id(measure_url)
+                hapi_id = await _resolve_measure_id(measure_url, mcs=mcs)
             except Exception as exc:
                 unresolved_errors[measure_url] = f"Measure resolution failed: {sanitize_error(exc)}"
                 continue
@@ -1192,13 +1253,13 @@ async def run_validation(validation_run_id: int) -> None:
                 extra={"missing_count": len(missing_measures), "total": len(measures)},
             )
             try:
-                reload_result = await _reload_measures_from_seed_bundles()
+                reload_result = await _reload_measures_from_seed_bundles(mcs=mcs)
                 logger.info("Seed bundle reload complete", extra=reload_result)
 
                 # Retry resolving measures after reload
                 for measure_url in missing_measures:
                     try:
-                        hapi_id = await _resolve_measure_id(measure_url)
+                        hapi_id = await _resolve_measure_id(measure_url, mcs=mcs)
                     except Exception as exc:
                         unresolved_errors[measure_url] = (
                             f"Measure resolution failed after reload attempt: {sanitize_error(exc)}"
@@ -1281,7 +1342,7 @@ async def run_validation(validation_run_id: int) -> None:
                     gather_result = await strategy.gather_patient_data(cdr_url, patient_ref, auth_headers)
                     resources = gather_result.resources
                     if resources:
-                        await push_resources(resources)
+                        await push_resources(resources, target_url=mcs.url, auth_headers=mcs.auth_headers)
                     return {
                         resource.get("subject", {}).get("reference", "").removeprefix("Patient/")
                         for resource in resources
@@ -1330,6 +1391,8 @@ async def run_validation(validation_run_id: int) -> None:
                             warmup_er.patient_ref,
                             info["period_start"],
                             info["period_end"],
+                            measure_engine_url=mcs.url,
+                            auth_headers=mcs.auth_headers,
                         )
                         logger.debug(
                             "Warmup evaluation complete",
@@ -1377,6 +1440,8 @@ async def run_validation(validation_run_id: int) -> None:
                         er.patient_ref,
                         info["period_start"],
                         info["period_end"],
+                        measure_engine_url=mcs.url,
+                        auth_headers=mcs.auth_headers,
                     )
                     actual = _extract_population_counts(report)
 
@@ -1386,7 +1451,7 @@ async def run_validation(validation_run_id: int) -> None:
                         ref_str = eval_ref.get("reference", "")
                         if ref_str.startswith("Patient/"):
                             try:
-                                resp = await http_client.get(f"{settings.MEASURE_ENGINE_URL}/{ref_str}")
+                                resp = await http_client.get(f"{mcs.url}/{ref_str}", headers=mcs.auth_headers)
                                 if resp.status_code == 200:
                                     patient_name = _extract_patient_name(resp.json())
                             except Exception:

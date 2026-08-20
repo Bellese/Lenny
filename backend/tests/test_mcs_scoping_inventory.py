@@ -54,9 +54,11 @@ import pytest
 #                           legitimate way for the env var to become a connection here.
 #
 # KNOWN-OUTSTANDING DEFECTS — each must drop to 0 as its slice lands:
-#   validation.py        2  the wipe (1269) and the patient-name lookup (1389), cleared
-#                           in tasks 7 and 8. The valueset-expansion call is no longer
-#                           one of these — task 5 scoped it to mcs.url.
+#   validation.py        2  the wipe (1330), cleared in task 8, and run_validation's
+#                           legacy-NULL fallback (1157), which is LEGITIMATE — see the
+#                           task 7 note below. The patient-name lookup and the
+#                           valueset-expansion call are no longer among these: tasks 5
+#                           and 7 scoped them to mcs.url.
 #
 # CLEARED BY SLICE 2 (job-scoped):
 #   fhir_client.py       5 -> 3  $data-requirements now takes the job's MCS from the
@@ -84,6 +86,15 @@ import pytest
 # bundle_loader.py 1 -> 2: the boot seed path now builds an explicit McsTarget from
 # settings instead of letting triage_test_bundle's (now-required) mcs default
 # implicitly — a second legitimate read alongside the existing _wait_for_hapi probe.
+#
+# SLICE 3 (task 7): validation.py 2 -> 2. The count does NOT move, and that is the
+# interesting part — a number standing still is exactly where a reader assumes nothing
+# happened. run_validation now resolves its target from the run's MCS snapshot and
+# threads it through every measure-engine call, which REMOVED the patient-name lookup's
+# read and ADDED one: the `run_row.mcs_url or settings.MEASURE_ENGINE_URL` fallback for
+# runs created before the snapshot column existed. Net zero. That new read is
+# legitimate, mirroring the same legacy-NULL fallback in orchestrator.py, routes/jobs.py
+# and routes/results.py. Task 8 clears the wipe and takes this file to 1.
 #
 # When a slice lands, lower the number here in the same commit. A count that is
 # too HIGH fails just as loudly as one that is too low — a stale expectation is
