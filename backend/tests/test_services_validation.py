@@ -1153,10 +1153,16 @@ class TestRunValidation:
                             new_callable=AsyncMock,
                             return_value=BundleUploadResult(),
                         ) as mock_push:
-                            with patch(
-                                "app.services.validation.wipe_patient_data",
-                                new_callable=AsyncMock,
-                            ) as mock_wipe:
+                            with (
+                                patch(
+                                    "app.services.validation.wipe_patient_data",
+                                    new_callable=AsyncMock,
+                                ) as mock_wipe,
+                                patch(
+                                    "app.services.validation.wipe_patients_by_id",
+                                    new_callable=AsyncMock,
+                                ) as mock_scoped_wipe,
+                            ):
                                 with patch(
                                     "app.services.validation.evaluate_measure",
                                     new_callable=AsyncMock,
@@ -1202,12 +1208,14 @@ class TestRunValidation:
         assert rows[1].patient_ref == "patient-2"
         assert rows[1].status == "error"
         assert "Measure not found on engine after reload attempt" in rows[1].error_message
-        mock_wipe.assert_awaited_once()
-        # Regression guard: the pre-push wipe must target the measure engine explicitly
-        # (wipe_patient_data requires the keyword-only base_url argument).
-        _, wipe_kwargs = mock_wipe.await_args
-        assert wipe_kwargs.get("base_url") == settings.MEASURE_ENGINE_URL
-        assert wipe_kwargs.get("strict") is False
+        # Regression guard (#397 task 8): the pre-push wipe is scoped by default — the
+        # unfiltered wipe_patient_data must NOT run, and the scoped wipe must target the
+        # measure engine explicitly with only this run's resolved patient(s).
+        mock_wipe.assert_not_awaited()
+        mock_scoped_wipe.assert_awaited_once()
+        _, scoped_wipe_kwargs = mock_scoped_wipe.await_args
+        assert scoped_wipe_kwargs.get("base_url") == settings.MEASURE_ENGINE_URL
+        assert scoped_wipe_kwargs.get("patient_ids") == ["patient-1"]
         mock_push.assert_awaited_once()
         # Warmup burst adds 1 call per measure + 1 main eval = 2 total
         assert mock_evaluate.await_count == 2
@@ -1308,7 +1316,10 @@ class TestRunValidation:
                             new_callable=AsyncMock,
                             return_value=BundleUploadResult(),
                         ):
-                            with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock):
+                            with (
+                                patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+                                patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock),
+                            ):
                                 with patch(
                                     "app.services.validation.evaluate_measure",
                                     new_callable=AsyncMock,
@@ -1393,6 +1404,7 @@ class TestRunValidation:
             patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
             patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()),
             patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+            patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock),
             patch(
                 "app.services.validation.evaluate_measure",
                 new_callable=AsyncMock,
@@ -1502,7 +1514,10 @@ class TestRunValidation:
                             new_callable=AsyncMock,
                             return_value=BundleUploadResult(),
                         ):
-                            with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock):
+                            with (
+                                patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+                                patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock),
+                            ):
                                 with patch(
                                     "app.services.validation.evaluate_measure",
                                     side_effect=evaluate_measure_side_effect,
@@ -2571,6 +2586,7 @@ async def test_run_validation_targets_the_snapshotted_mcs(test_session, session_
         patch("app.services.validation.push_resources", side_effect=_record_push),
         patch("app.services.validation.evaluate_measure", side_effect=_record_eval),
         patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
     ):
         await run_validation(run.id)
@@ -2793,6 +2809,7 @@ async def test_run_validation_legacy_null_mcs_url_falls_back(test_session, sessi
         patch("app.services.validation.push_resources", side_effect=_record_push),
         patch("app.services.validation.evaluate_measure", side_effect=_record_eval),
         patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock),
         patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
     ):
         await run_validation(run.id)
@@ -2800,3 +2817,149 @@ async def test_run_validation_legacy_null_mcs_url_falls_back(test_session, sessi
     assert targets, "no measure-engine calls were recorded — the fallback is unverified"
     for t in targets:
         assert t == app_settings.MEASURE_ENGINE_URL
+
+
+# ---------------------------------------------------------------------------
+# run_validation scopes its pre-run wipe to the run's own patients (#397 task 8,
+# second copy of #392)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_validation_scoped_wipe_by_default(test_session, session_factory):
+    """The second copy of the #392 bug. Unfiltered here too until now.
+
+    #392 scoped run_job's wipe and never touched this path. Re-pointing it at the
+    active MCS without scoping would have deleted every participant's data on a
+    shared server.
+    """
+    from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_url="https://mcs.example.org/fhir",
+        mcs_auth_type=None,
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    for ref in ("p1", "p2"):
+        test_session.add(
+            ExpectedResult(
+                measure_url="http://cms.gov/M1",
+                patient_ref=ref,
+                expected_populations={"initial-population": 1},
+                period_start="2024-01-01",
+                period_end="2024-12-31",
+                source_bundle="m1.json",
+            )
+        )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock),
+        patch("app.services.validation.evaluate_measure", new_callable=AsyncMock, return_value={"group": []}),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_full,
+        patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped,
+    ):
+        await run_validation(run.id)
+
+    mock_full.assert_not_awaited()
+    mock_scoped.assert_awaited_once()
+    kwargs = mock_scoped.await_args.kwargs
+    assert kwargs["base_url"] == "https://mcs.example.org/fhir"
+    assert sorted(kwargs["patient_ids"]) == ["p1", "p2"]
+
+
+@pytest.mark.asyncio
+async def test_run_validation_full_wipe_when_connection_opted_in(test_session, session_factory):
+    from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_url="https://mcs.example.org/fhir",
+        mcs_auth_type=None,
+        mcs_wipe_before_job=True,
+    )
+    test_session.add(run)
+    test_session.add(
+        ExpectedResult(
+            measure_url="http://cms.gov/M1",
+            patient_ref="p1",
+            expected_populations={"initial-population": 1},
+            period_start="2024-01-01",
+            period_end="2024-12-31",
+            source_bundle="m1.json",
+        )
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock),
+        patch("app.services.validation.evaluate_measure", new_callable=AsyncMock, return_value={"group": []}),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_full,
+        patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped,
+    ):
+        await run_validation(run.id)
+
+    mock_scoped.assert_not_awaited()
+    mock_full.assert_awaited_once()
+    assert mock_full.await_args.kwargs["base_url"] == "https://mcs.example.org/fhir"
+
+
+@pytest.mark.asyncio
+async def test_run_validation_with_no_resolved_patients_wipes_nothing(test_session, session_factory):
+    """Controller ruling R14 — a spec Testing item the original brief omitted.
+
+    The spec's §4 states "A run with zero resolved expected results wipes nothing,
+    consistent with #392's zero-patient job behavior", and its Testing section lists
+    "zero-patient run wipes nothing" alongside both wipe modes. Neither of the two tests
+    above covers it. This matters because the scoped branch would otherwise be free to call
+    `wipe_patients_by_id(patient_ids=[])`, whose behavior against a real server on an empty
+    id list is not something this slice should be relying on.
+
+    `_resolve_measure_id` returning None leaves `measure_info` empty, so no expected result
+    resolves and `resolved_expected_results` is empty.
+    """
+    from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_url="https://mcs.example.org/fhir",
+        mcs_auth_type=None,
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    test_session.add(
+        ExpectedResult(
+            measure_url="http://cms.gov/M1",
+            patient_ref="p1",
+            expected_populations={"initial-population": 1},
+            period_start="2024-01-01",
+            period_end="2024-12-31",
+            source_bundle="m1.json",
+        )
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock),
+        patch("app.services.validation.evaluate_measure", new_callable=AsyncMock, return_value={"group": []}),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value=None),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_full,
+        patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped,
+    ):
+        await run_validation(run.id)
+
+    mock_full.assert_not_awaited()
+    mock_scoped.assert_not_awaited()

@@ -52,13 +52,13 @@ import pytest
 #                           seeding deliberately targets Lenny's own engine, so building
 #                           that target from settings, with a comment saying why, is the
 #                           legitimate way for the env var to become a connection here.
+#   validation.py        1  run_validation's legacy-NULL fallback (`run_row.mcs_url or
+#                           settings.MEASURE_ENGINE_URL`), added in task 7, mirroring the
+#                           same legacy-Job fallback pattern in orchestrator.py,
+#                           routes/jobs.py, and routes/results.py.
 #
-# KNOWN-OUTSTANDING DEFECTS — each must drop to 0 as its slice lands:
-#   validation.py        2  the wipe (1330), cleared in task 8, and run_validation's
-#                           legacy-NULL fallback (1157), which is LEGITIMATE — see the
-#                           task 7 note below. The patient-name lookup and the
-#                           valueset-expansion call are no longer among these: tasks 5
-#                           and 7 scoped them to mcs.url.
+# KNOWN-OUTSTANDING DEFECTS — each must drop to 0 as its slice lands: none remain in
+# this file. Task 8 cleared the last one (the wipe).
 #
 # CLEARED BY SLICE 2 (job-scoped):
 #   fhir_client.py       5 -> 3  $data-requirements now takes the job's MCS from the
@@ -94,7 +94,13 @@ import pytest
 # read and ADDED one: the `run_row.mcs_url or settings.MEASURE_ENGINE_URL` fallback for
 # runs created before the snapshot column existed. Net zero. That new read is
 # legitimate, mirroring the same legacy-NULL fallback in orchestrator.py, routes/jobs.py
-# and routes/results.py. Task 8 clears the wipe and takes this file to 1.
+# and routes/results.py.
+#
+# SLICE 3 (task 8): validation.py 2 -> 1. The wipe now takes mcs.url (and mcs.auth_headers)
+# instead of settings.MEASURE_ENGINE_URL, scoped by default via wipe_patients_by_id and
+# falling back to the unfiltered wipe_patient_data only when mcs.wipe_before_job is set.
+# The only remaining read is the legacy-NULL fallback from task 7, now listed above as
+# legitimate — this file has zero outstanding #397 defects.
 #
 # When a slice lands, lower the number here in the same commit. A count that is
 # too HIGH fails just as loudly as one that is too low — a stale expectation is
@@ -109,7 +115,7 @@ EXPECTED_READS: dict[str, int] = {
     "app/services/bundle_loader.py": 2,
     "app/services/fhir_client.py": 3,
     "app/services/orchestrator.py": 1,
-    "app/services/validation.py": 2,
+    "app/services/validation.py": 1,
 }
 
 _APP_ROOT = pathlib.Path(__file__).resolve().parents[1] / "app"

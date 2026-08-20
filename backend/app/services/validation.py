@@ -40,8 +40,9 @@ from app.services.fhir_client import (
     push_resources,
     wait_for_valueset_expansion,
     wipe_patient_data,
+    wipe_patients_by_id,
 )
-from app.services.fhir_errors import redact_outcome
+from app.services.fhir_errors import redact_outcome, sanitize_url
 
 logger = logging.getLogger(__name__)
 
@@ -1325,9 +1326,34 @@ async def run_validation(validation_run_id: int) -> None:
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
 
-            # Best-effort for validation: stale resources are worse than ideal, but
-            # aborting prevents patient-level comparison entirely on slow HAPI deletes.
-            await wipe_patient_data(base_url=settings.MEASURE_ENGINE_URL, strict=False)
+            # Clear the prior run's data off the target. Scoped by default: this is a
+            # second copy of the #392 hazard — #392 scoped run_job's wipe and never
+            # touched the validation path, so an unfiltered delete here would remove
+            # every participant's patients on a shared engine.
+            #
+            # Correctness is preserved for the same reason as #392: evaluation is
+            # per-subject, so patients this run never evaluates cannot affect its
+            # numbers. See ADR-012.
+            validation_patient_ids = sorted({er.patient_ref for er in resolved_expected_results if er.patient_ref})
+            if mcs.wipe_before_job:
+                logger.warning(
+                    "Full patient-data wipe starting — deletes ALL patients on the target MCS",
+                    extra={"run_id": validation_run_id, "mcs_url": sanitize_url(mcs.url), "scope": "all-patients"},
+                )
+                await wipe_patient_data(base_url=mcs.url, strict=False, auth_headers=mcs.auth_headers)
+            else:
+                logger.info(
+                    "Scoped patient-data wipe starting — deletes only this run's patients",
+                    extra={
+                        "run_id": validation_run_id,
+                        "mcs_url": sanitize_url(mcs.url),
+                        "scope": "run-patients",
+                        "patient_count": len(validation_patient_ids),
+                    },
+                )
+                await wipe_patients_by_id(
+                    base_url=mcs.url, patient_ids=validation_patient_ids, auth_headers=mcs.auth_headers
+                )
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
 
