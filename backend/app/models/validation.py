@@ -76,6 +76,20 @@ class ValidationRun(Base):
     patients_passed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     patients_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     delete_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # MCS connection snapshot — populated at run creation from the active MCS
+    # (issue #397). A validation result is a claim about correctness; without this,
+    # the claim has no recorded provenance. Mirrors Job's snapshot fields.
+    mcs_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("mcs_configs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    mcs_url: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    mcs_name: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # Required because mcs_id is ON DELETE SET NULL: once the config is gone the id
+    # is NULL, so mcs_id alone cannot distinguish "never had MCS auth" from
+    # "credentials are unrecoverable". Without it a run whose connection was deleted
+    # would execute unauthenticated against the snapshotted mcs_url.
+    mcs_auth_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    mcs_wipe_before_job: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
