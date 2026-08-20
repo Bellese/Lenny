@@ -32,6 +32,7 @@ from app.models.validation import (
 from app.services.fhir_client import (
     BatchQueryStrategy,
     FhirOperationError,
+    McsTarget,
     _build_auth_headers,
     evaluate_measure,
     push_resources,
@@ -559,13 +560,13 @@ async def _find_existing_valueset_id(
     url: str,
     client: httpx.AsyncClient,
     *,
-    target_url: str | None = None,
+    mcs: McsTarget,
 ) -> str | None:
-    """Return the existing HAPI ValueSet resource ID for a canonical URL."""
+    """Return the existing ValueSet resource ID for a canonical URL on `mcs`."""
     resp = await client.get(
-        f"{target_url or settings.MEASURE_ENGINE_URL}/ValueSet",
+        f"{mcs.url}/ValueSet",
         params={"url": url, "_count": 1, "_elements": "id,url"},
-        headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json"},
+        headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json", **mcs.auth_headers},
     )
     resp.raise_for_status()
     entries = resp.json().get("entry", [])
@@ -578,15 +579,17 @@ async def _find_existing_codesystem_id(
     url: str,
     version: str | None,
     client: httpx.AsyncClient,
+    *,
+    mcs: McsTarget,
 ) -> str | None:
-    """Return the existing HAPI CodeSystem resource ID for a canonical URL/version."""
+    """Return the existing CodeSystem resource ID for a canonical URL/version on `mcs`."""
     params: dict[str, str | int] = {"url": url, "_count": 50, "_elements": "id,url,version"}
     if version:
         params["version"] = version
     resp = await client.get(
-        f"{settings.MEASURE_ENGINE_URL}/CodeSystem",
+        f"{mcs.url}/CodeSystem",
         params=params,
-        headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json"},
+        headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json", **mcs.auth_headers},
     )
     resp.raise_for_status()
     entries = resp.json().get("entry", [])
@@ -598,9 +601,13 @@ async def _find_existing_codesystem_id(
     return None
 
 
-async def _delete_existing_valueset(existing_id: str, client: httpx.AsyncClient) -> None:
-    """Delete a stale ValueSet so HAPI rebuilds terminology tables from patched compose."""
-    resp = await client.delete(f"{settings.MEASURE_ENGINE_URL}/ValueSet/{existing_id}")
+async def _delete_existing_valueset(existing_id: str, client: httpx.AsyncClient, *, mcs: McsTarget) -> None:
+    """Delete a stale ValueSet on `mcs` so HAPI rebuilds terminology from patched compose.
+
+    DESTRUCTIVE against whatever server `mcs` names: on a shared engine this removes
+    another participant's terminology, which is why the target is required (#397).
+    """
+    resp = await client.delete(f"{mcs.url}/ValueSet/{existing_id}", headers=mcs.auth_headers)
     # 409 = referential integrity: other resources (Measure/Library) already reference this
     # ValueSet and HAPI won't delete it.  Treat as a no-op — push_resources will PUT the same
     # content to the existing ID and HAPI will accept it with a 200 update (issue #359).
@@ -611,6 +618,8 @@ async def _delete_existing_valueset(existing_id: str, client: httpx.AsyncClient)
 async def _prepare_measure_support_resources(
     resources: list[dict[str, Any]],
     bundle_json: dict[str, Any],
+    *,
+    mcs: McsTarget,
 ) -> list[dict[str, Any]]:
     """Prepare ValueSets/CodeSystems for HAPI upload.
 
@@ -632,7 +641,7 @@ async def _prepare_measure_support_resources(
                 url = stub.get("url")
                 if not url:
                     continue
-                if await _find_existing_valueset_id(url, client):
+                if await _find_existing_valueset_id(url, client, mcs=mcs):
                     continue
                 filtered_stubs.append(stub)
             if filtered_stubs:
@@ -649,6 +658,7 @@ async def _prepare_measure_support_resources(
                     resource["url"],
                     resource.get("version"),
                     client,
+                    mcs=mcs,
                 )
                 if existing_id and existing_id != resource.get("id"):
                     continue
@@ -658,7 +668,7 @@ async def _prepare_measure_support_resources(
             if resource.get("resourceType") != "ValueSet" or not resource.get("url"):
                 aligned.append(resource)
                 continue
-            existing_id = await _find_existing_valueset_id(resource["url"], client)
+            existing_id = await _find_existing_valueset_id(resource["url"], client, mcs=mcs)
             if existing_id:
                 logger.info(
                     "ValueSet reload",
@@ -670,7 +680,7 @@ async def _prepare_measure_support_resources(
                 )
                 if settings.VALUESET_RELOAD_MODE == "delete":
                     if resource["url"] not in deleted_valueset_urls:
-                        await _delete_existing_valueset(existing_id, client)
+                        await _delete_existing_valueset(existing_id, client, mcs=mcs)
                         deleted_valueset_urls.add(resource["url"])
                 elif existing_id != resource.get("id"):
                     resource = copy.deepcopy(resource)

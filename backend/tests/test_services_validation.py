@@ -4,6 +4,7 @@ import base64
 import json
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 
@@ -1873,7 +1874,7 @@ class TestMissingValueSetStubs:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            prepared = await _prepare_measure_support_resources([resource], bundle)
+            prepared = await _prepare_measure_support_resources([resource], bundle, mcs=_mcs())
 
         assert resource in prepared
         assert any(r.get("resourceType") == "ValueSet" and r.get("url") == missing_url for r in prepared)
@@ -1895,7 +1896,7 @@ class TestMissingValueSetStubs:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            prepared = await _prepare_measure_support_resources([], bundle)
+            prepared = await _prepare_measure_support_resources([], bundle, mcs=_mcs())
 
         assert prepared == []
 
@@ -1932,7 +1933,7 @@ class TestMissingValueSetStubs:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            prepared = await _prepare_measure_support_resources([valueset], bundle)
+            prepared = await _prepare_measure_support_resources([valueset], bundle, mcs=_mcs())
 
         if delete_called:
             mock_client.delete.assert_awaited_once()
@@ -1977,16 +1978,18 @@ class TestDeleteExistingValueset:
         """409 must not raise, must not call raise_for_status, and must DELETE the right URL."""
         mock_client, mock_response = _make_delete_mock(409)
 
-        await _delete_existing_valueset("vs-in-use", mock_client)
+        await _delete_existing_valueset("vs-in-use", mock_client, mcs=_mcs())
 
-        mock_client.delete.assert_awaited_once_with("http://hapi-fhir-measure:8080/fhir/ValueSet/vs-in-use")
+        mock_client.delete.assert_awaited_once_with(
+            "https://mcs.example.org/fhir/ValueSet/vs-in-use", headers=_mcs().auth_headers
+        )
         mock_response.raise_for_status.assert_not_called()
 
     @pytest.mark.parametrize("status_code", _ACCEPTED_DELETE_STATUSES)
     async def test_accepted_status_codes_do_not_raise(self, status_code):
         mock_client, mock_response = _make_delete_mock(status_code)
 
-        await _delete_existing_valueset("some-id", mock_client)
+        await _delete_existing_valueset("some-id", mock_client, mcs=_mcs())
 
         mock_client.delete.assert_awaited_once()
         mock_response.raise_for_status.assert_not_called()
@@ -1996,7 +1999,7 @@ class TestDeleteExistingValueset:
         mock_client, mock_response = _make_delete_mock(500, raise_side_effect=RuntimeError("HAPI error"))
 
         with pytest.raises(RuntimeError, match="HAPI error"):
-            await _delete_existing_valueset("some-id", mock_client)
+            await _delete_existing_valueset("some-id", mock_client, mcs=_mcs())
         mock_client.delete.assert_awaited_once()
         mock_response.raise_for_status.assert_called_once()
 
@@ -2191,3 +2194,99 @@ class TestAssertNoCanonicalUrlClash:
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             await _assert_no_canonical_url_clash(measures)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Terminology helpers follow the given MCS (issue #397 slice 3)
+# ---------------------------------------------------------------------------
+
+
+def _mcs(url: str = "https://mcs.example.org/fhir", headers: dict | None = None):
+    from app.services.fhir_client import McsTarget
+
+    return McsTarget(
+        url=url,
+        auth_headers=headers if headers is not None else {"Authorization": "Bearer tok-397"},
+        is_read_only=False,
+        wipe_before_job=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_existing_valueset_id_uses_the_given_mcs():
+    from app.services.validation import _find_existing_valueset_id
+
+    seen: dict[str, object] = {}
+
+    async def _get(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return httpx.Response(200, json={"entry": []}, request=httpx.Request("GET", url))
+
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=_get)
+
+    await _find_existing_valueset_id("http://vs.example/1", client, mcs=_mcs())
+
+    assert seen["url"] == "https://mcs.example.org/fhir/ValueSet"
+    assert seen["headers"]["Authorization"] == "Bearer tok-397"
+
+
+@pytest.mark.asyncio
+async def test_find_existing_codesystem_id_uses_the_given_mcs():
+    from app.services.validation import _find_existing_codesystem_id
+
+    seen: dict[str, object] = {}
+
+    async def _get(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return httpx.Response(200, json={"entry": []}, request=httpx.Request("GET", url))
+
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=_get)
+
+    await _find_existing_codesystem_id("http://cs.example/1", "1.0.0", client, mcs=_mcs())
+
+    assert seen["url"] == "https://mcs.example.org/fhir/CodeSystem"
+    assert seen["headers"]["Authorization"] == "Bearer tok-397"
+
+
+@pytest.mark.asyncio
+async def test_delete_existing_valueset_uses_the_given_mcs():
+    """Destructive: this deletes a ValueSet, so on a shared engine it removes
+    another participant's terminology. It must never guess its target."""
+    from app.services.validation import _delete_existing_valueset
+
+    seen: dict[str, object] = {}
+
+    async def _delete(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return httpx.Response(200, json={}, request=httpx.Request("DELETE", url))
+
+    client = AsyncMock()
+    client.delete = AsyncMock(side_effect=_delete)
+
+    await _delete_existing_valueset("vs-1", client, mcs=_mcs())
+
+    assert seen["url"] == "https://mcs.example.org/fhir/ValueSet/vs-1"
+    assert seen["headers"]["Authorization"] == "Bearer tok-397"
+
+
+@pytest.mark.asyncio
+async def test_terminology_helpers_require_an_mcs():
+    """No default target — the #397 mechanism is a target the caller did not choose."""
+    from app.services.validation import (
+        _delete_existing_valueset,
+        _find_existing_codesystem_id,
+        _find_existing_valueset_id,
+    )
+
+    client = AsyncMock()
+    with pytest.raises(TypeError):
+        await _find_existing_valueset_id("http://vs.example/1", client)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        await _find_existing_codesystem_id("http://cs.example/1", None, client)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        await _delete_existing_valueset("vs-1", client)  # type: ignore[call-arg]
