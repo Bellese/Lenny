@@ -7,8 +7,10 @@ this file pins the exact inventory of remaining reads per file.
 
 Two things it buys:
 
-1. **No new reads.** Any newly added `settings.MEASURE_ENGINE_URL` access fails
-   this test, so the class cannot grow while it is being eliminated.
+1. **No new reads, and no new defaulted targets.** Both an added
+   `settings.MEASURE_ENGINE_URL` access and a call that omits its target keyword
+   fail this suite. The second check exists because the first one alone reported a
+   clean inventory while seven unscoped calls sat in validation.py (#397 slice 3).
 2. **Progress is enforced, not asserted in prose.** Each slice that fixes sites
    must lower the numbers here, and the docstring below says which remaining
    reads are legitimate and which are known-outstanding defects.
@@ -183,4 +185,57 @@ def test_already_scoped_modules_stay_scoped(module: str):
     assert module not in _count_reads(), (
         f"{module} was migrated to the active MCS connection (#396/#398) and must not "
         "read settings.MEASURE_ENGINE_URL again."
+    )
+
+
+# Calls that reach a measure engine but take their target from a DEFAULTED parameter
+# rather than naming it. Invisible to the attribute-read counter above, which is how
+# seven unscoped sites in validation.py hid behind a guard that reported "clean".
+_TARGET_KWARG = {
+    "push_resources": "target_url",
+    "evaluate_measure": "measure_engine_url",
+    "resolve_evaluated_resource": "base_url",
+}
+
+# Remaining allowed omissions, per file. push_resources' CDR calls are NOT counted:
+# they pass target_url explicitly, which is the whole point.
+EXPECTED_UNSCOPED_CALLS: dict[str, int] = {}
+
+
+def _count_unscoped_calls() -> dict[str, int]:
+    """Count calls to target-taking helpers that omit their target keyword."""
+    counts: dict[str, int] = {}
+    for path in sorted(_APP_ROOT.rglob("*.py")):
+        tree = ast.parse(path.read_text())
+        hits = 0
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+            if name not in _TARGET_KWARG:
+                continue
+            # resolve_evaluated_resource takes base_url positionally as arg 2.
+            if name == "resolve_evaluated_resource" and len(node.args) >= 2:
+                continue
+            if any(kw.arg == _TARGET_KWARG[name] for kw in node.keywords):
+                continue
+            hits += 1
+        if hits:
+            counts[path.relative_to(_APP_ROOT.parent).as_posix()] = hits
+    return counts
+
+
+def test_no_measure_engine_call_relies_on_a_defaulted_target():
+    """Every call names the server it means.
+
+    A defaulted target is the #397 mechanism itself: the call reads as innocuous and
+    silently goes somewhere the caller did not choose.
+    """
+    actual = _count_unscoped_calls()
+    unexpected = {f: n for f, n in actual.items() if EXPECTED_UNSCOPED_CALLS.get(f, 0) != n}
+    assert not unexpected, (
+        f"Call(s) taking their measure-engine target from a default: {unexpected}. "
+        f"Pass the explicit keyword ({', '.join(f'{k}=>{v}' for k, v in _TARGET_KWARG.items())}), "
+        "or add the file to EXPECTED_UNSCOPED_CALLS with a reason."
     )
