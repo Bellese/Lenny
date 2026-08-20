@@ -298,3 +298,91 @@ async def test_mcs_target_from_context_resolves_credentials(test_session):
     assert target.auth_headers == {"Authorization": "Bearer tok-397"}
     assert target.is_read_only is False
     assert target.wipe_before_job is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_mcs_auth_headers_works_without_a_job_row(test_session):
+    """The generalised form takes snapshot FIELDS, not a Job id (issue #397).
+
+    ValidationRun needs the same URL-drift guard, and it is not a Job. Duplicating
+    the guard for validation is what this generalisation avoids.
+    """
+    from app.dependencies import resolve_mcs_auth_headers
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    cfg = MCSConfig(
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-vr"},
+        is_active=True,
+        name="Remote MCS",
+        is_default=False,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    headers = await resolve_mcs_auth_headers(
+        test_session,
+        mcs_id=cfg.id,
+        mcs_url="https://mcs.example.org/fhir",
+        mcs_auth_type="bearer",
+        owner_label="validation run 7",
+    )
+    assert headers == {"Authorization": "Bearer tok-vr"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_mcs_auth_headers_refuses_on_url_drift(test_session):
+    """Credentials are never sent to a host the snapshot does not name."""
+    from app.dependencies import resolve_mcs_auth_headers
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    cfg = MCSConfig(
+        mcs_url="https://moved.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-vr"},
+        is_active=True,
+        name="Moved MCS",
+        is_default=False,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    with pytest.raises(RuntimeError, match="different server"):
+        await resolve_mcs_auth_headers(
+            test_session,
+            mcs_id=cfg.id,
+            mcs_url="https://original.example.org/fhir",
+            mcs_auth_type="bearer",
+            owner_label="validation run 7",
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_mcs_auth_headers_deleted_config_with_auth_raises(test_session):
+    """A NULL mcs_id plus an auth-bearing snapshot means credentials are gone."""
+    from app.dependencies import resolve_mcs_auth_headers
+
+    with pytest.raises(RuntimeError, match="deleted after"):
+        await resolve_mcs_auth_headers(
+            test_session,
+            mcs_id=None,
+            mcs_url="https://mcs.example.org/fhir",
+            mcs_auth_type="bearer",
+            owner_label="validation run 7",
+        )
+
+
+@pytest.mark.asyncio
+async def test_resolve_mcs_auth_headers_no_config_no_auth_returns_empty(test_session):
+    """An unauthenticated target legitimately needs no headers."""
+    from app.dependencies import resolve_mcs_auth_headers
+
+    headers = await resolve_mcs_auth_headers(
+        test_session, mcs_id=None, mcs_url=None, mcs_auth_type=None, owner_label="validation run 7"
+    )
+    assert headers == {}
