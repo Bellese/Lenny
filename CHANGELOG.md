@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.22.0] - 2026-08-20
+
+### Fixed
+- **Validation now runs against the measure engine connection you selected.** It always ran against Lenny's own local container, no matter which MCS connection was active — so "validate my measures" quietly answered a question about a different server than the one in front of you. Uploading a test bundle, reloading measures, pushing patient data and evaluating each patient all now go to the connection you chose, with its credentials. (#397)
+- **A validation run no longer deletes other people's patient data.** Every run began by deleting *all* patients from the measure engine. That was invisible while it only ever hit the local container; pointing validation at a shared or connectathon server would have wiped every other participant's test data with no prompt and no undo. A run now deletes only the patients it is about to evaluate. Your numbers do not change: evaluation is per-patient, so patients a run never evaluates could never have affected its results. Connections with "delete all patient data before each job" ticked keep the full wipe, same as jobs. (#397, same bug class as #392)
+- **Validation results record which server produced them.** Each run now stores the connection it was created against — name, URL, and whether credentials were involved — and executes against that server even if you switch connections while it sits in the queue. Previously a run recorded nothing about where it ran, so a stored pass/fail result was a claim about correctness with no way to tell which server produced it. (#397)
+
+### Changed
+- **A read-only measure engine connection now refuses validation instead of ignoring the flag.** Validation has to write measures, terminology and patient data to the engine to produce a result, so it can no longer run against a connection you have marked read-only: uploading a test bundle is rejected before anything is written, and starting a run fails immediately with the reason on screen. **This is a behavior change.** If you marked your measure engine read-only and still expect validation to run, it will now stop. Switch to a writable connection, or clear the read-only flag. The alternative was a run that half-writes to a server you asked Lenny not to write to. (#397)
+
 ## [0.0.21.0] - 2026-08-19
 
 ### Fixed

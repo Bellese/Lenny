@@ -1,6 +1,6 @@
 # Design: MCS-scoping the validation pipeline (issue #397, slice 3)
 
-**Status:** approved design, not yet implemented
+**Status:** implemented on `fix/397-validation-mcs-scoping` (v0.0.22.0); see ADR-014 in `docs/decisions.md` for the as-built record and the limitations that shipped open
 **Date:** 2026-08-19
 **Branch:** `fix/397-validation-mcs-scoping` (off `main` @ `b10621b`)
 **Predecessors:** ADR-011 (#393), ADR-012 (#392), ADR-013 (#397 slices 1–2)
