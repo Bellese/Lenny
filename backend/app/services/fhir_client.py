@@ -36,6 +36,27 @@ logger = logging.getLogger(__name__)
 _MAX_CONSECUTIVE_FAILURES = 3
 
 
+@dataclass(frozen=True)
+class McsTarget:
+    """Which measure-calculation server a pipeline is working against (issue #397).
+
+    Carries RESOLVED auth headers rather than raw credentials so no helper deep in
+    the validation pipeline re-derives them, and carries the two connection flags so
+    no helper re-queries the database.
+
+    Frozen because it is threaded through roughly sixteen call sites: a helper
+    mutating a shared target would silently re-point every call after it.
+
+    Every field is required. The absence of a default is the point — the #397 bug
+    class is precisely a target that defaults to something the caller did not mean.
+    """
+
+    url: str
+    auth_headers: dict[str, str]
+    is_read_only: bool
+    wipe_before_job: bool
+
+
 @dataclass
 class FailedResourceFetch:
     resource_type: str

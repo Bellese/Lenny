@@ -2583,3 +2583,28 @@ async def test_resolve_evaluated_resource_uses_given_base_and_auth():
 
     assert mock_ctx.get.call_args[0][0] == "https://mcs.example.org/fhir/Condition/c1"
     assert mock_ctx.get.call_args.kwargs.get("headers", {}).get("Authorization") == "Bearer tok-123"
+
+
+# ---------------------------------------------------------------------------
+# McsTarget (issue #397 slice 3)
+# ---------------------------------------------------------------------------
+
+
+def test_mcs_target_is_frozen():
+    """Immutable on purpose: it is threaded through ~16 call sites, and a helper
+    mutating the shared target would silently re-point every later call."""
+    from dataclasses import FrozenInstanceError
+
+    from app.services.fhir_client import McsTarget
+
+    t = McsTarget(url="https://mcs.example.org/fhir", auth_headers={}, is_read_only=False, wipe_before_job=False)
+    with pytest.raises(FrozenInstanceError):
+        t.url = "https://elsewhere.example.org/fhir"  # type: ignore[misc]
+
+
+def test_mcs_target_requires_every_field():
+    """No defaults. A default target is exactly how issue #397 stayed invisible."""
+    from app.services.fhir_client import McsTarget
+
+    with pytest.raises(TypeError):
+        McsTarget(url="https://mcs.example.org/fhir")  # type: ignore[call-arg]

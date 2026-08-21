@@ -21,7 +21,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.db import async_session
+from app.dependencies import get_active_mcs, mcs_target_from_context, resolve_mcs_auth_headers
 from app.models.config import CDRConfig
+from app.models.mcs_config import MCSConfig
 from app.models.validation import (
     BundleUpload,
     ExpectedResult,
@@ -32,13 +34,15 @@ from app.models.validation import (
 from app.services.fhir_client import (
     BatchQueryStrategy,
     FhirOperationError,
+    McsTarget,
     _build_auth_headers,
     evaluate_measure,
     push_resources,
     wait_for_valueset_expansion,
     wipe_patient_data,
+    wipe_patients_by_id,
 )
-from app.services.fhir_errors import redact_outcome
+from app.services.fhir_errors import redact_outcome, sanitize_url
 
 logger = logging.getLogger(__name__)
 
@@ -559,13 +563,13 @@ async def _find_existing_valueset_id(
     url: str,
     client: httpx.AsyncClient,
     *,
-    target_url: str | None = None,
+    mcs: McsTarget,
 ) -> str | None:
-    """Return the existing HAPI ValueSet resource ID for a canonical URL."""
+    """Return the existing ValueSet resource ID for a canonical URL on `mcs`."""
     resp = await client.get(
-        f"{target_url or settings.MEASURE_ENGINE_URL}/ValueSet",
+        f"{mcs.url}/ValueSet",
         params={"url": url, "_count": 1, "_elements": "id,url"},
-        headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json"},
+        headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json", **mcs.auth_headers},
     )
     resp.raise_for_status()
     entries = resp.json().get("entry", [])
@@ -578,15 +582,17 @@ async def _find_existing_codesystem_id(
     url: str,
     version: str | None,
     client: httpx.AsyncClient,
+    *,
+    mcs: McsTarget,
 ) -> str | None:
-    """Return the existing HAPI CodeSystem resource ID for a canonical URL/version."""
+    """Return the existing CodeSystem resource ID for a canonical URL/version on `mcs`."""
     params: dict[str, str | int] = {"url": url, "_count": 50, "_elements": "id,url,version"}
     if version:
         params["version"] = version
     resp = await client.get(
-        f"{settings.MEASURE_ENGINE_URL}/CodeSystem",
+        f"{mcs.url}/CodeSystem",
         params=params,
-        headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json"},
+        headers={"Cache-Control": "no-cache", "Accept": "application/fhir+json", **mcs.auth_headers},
     )
     resp.raise_for_status()
     entries = resp.json().get("entry", [])
@@ -598,9 +604,13 @@ async def _find_existing_codesystem_id(
     return None
 
 
-async def _delete_existing_valueset(existing_id: str, client: httpx.AsyncClient) -> None:
-    """Delete a stale ValueSet so HAPI rebuilds terminology tables from patched compose."""
-    resp = await client.delete(f"{settings.MEASURE_ENGINE_URL}/ValueSet/{existing_id}")
+async def _delete_existing_valueset(existing_id: str, client: httpx.AsyncClient, *, mcs: McsTarget) -> None:
+    """Delete a stale ValueSet on `mcs` so HAPI rebuilds terminology from patched compose.
+
+    DESTRUCTIVE against whatever server `mcs` names: on a shared engine this removes
+    another participant's terminology, which is why the target is required (#397).
+    """
+    resp = await client.delete(f"{mcs.url}/ValueSet/{existing_id}", headers=mcs.auth_headers)
     # 409 = referential integrity: other resources (Measure/Library) already reference this
     # ValueSet and HAPI won't delete it.  Treat as a no-op — push_resources will PUT the same
     # content to the existing ID and HAPI will accept it with a 200 update (issue #359).
@@ -611,6 +621,8 @@ async def _delete_existing_valueset(existing_id: str, client: httpx.AsyncClient)
 async def _prepare_measure_support_resources(
     resources: list[dict[str, Any]],
     bundle_json: dict[str, Any],
+    *,
+    mcs: McsTarget,
 ) -> list[dict[str, Any]]:
     """Prepare ValueSets/CodeSystems for HAPI upload.
 
@@ -632,7 +644,7 @@ async def _prepare_measure_support_resources(
                 url = stub.get("url")
                 if not url:
                     continue
-                if await _find_existing_valueset_id(url, client):
+                if await _find_existing_valueset_id(url, client, mcs=mcs):
                     continue
                 filtered_stubs.append(stub)
             if filtered_stubs:
@@ -649,6 +661,7 @@ async def _prepare_measure_support_resources(
                     resource["url"],
                     resource.get("version"),
                     client,
+                    mcs=mcs,
                 )
                 if existing_id and existing_id != resource.get("id"):
                     continue
@@ -658,7 +671,7 @@ async def _prepare_measure_support_resources(
             if resource.get("resourceType") != "ValueSet" or not resource.get("url"):
                 aligned.append(resource)
                 continue
-            existing_id = await _find_existing_valueset_id(resource["url"], client)
+            existing_id = await _find_existing_valueset_id(resource["url"], client, mcs=mcs)
             if existing_id:
                 logger.info(
                     "ValueSet reload",
@@ -670,7 +683,7 @@ async def _prepare_measure_support_resources(
                 )
                 if settings.VALUESET_RELOAD_MODE == "delete":
                     if resource["url"] not in deleted_valueset_urls:
-                        await _delete_existing_valueset(existing_id, client)
+                        await _delete_existing_valueset(existing_id, client, mcs=mcs)
                         deleted_valueset_urls.add(resource["url"])
                 elif existing_id != resource.get("id"):
                     resource = copy.deepcopy(resource)
@@ -695,7 +708,7 @@ def _valueset_urls(resources: list[dict[str, Any]]) -> list[str]:
 _CLASH_PROBE_TIMEOUT_SECONDS = 10.0
 
 
-async def _assert_no_canonical_url_clash(measures: list[dict[str, Any]]) -> None:
+async def _assert_no_canonical_url_clash(measures: list[dict[str, Any]], *, mcs: McsTarget) -> None:
     """Raise ValueError if any Measure in *measures* would introduce a canonical-URL clash.
 
     A clash occurs when HAPI already contains a Measure with the same canonical URL
@@ -716,8 +729,9 @@ async def _assert_no_canonical_url_clash(measures: list[dict[str, Any]]) -> None
                 continue
             try:
                 resp = await client.get(
-                    f"{settings.MEASURE_ENGINE_URL}/Measure",
+                    f"{mcs.url}/Measure",
                     params={"url": canonical_url, "_elements": "id,url", "_count": "2"},
+                    headers=mcs.auth_headers,
                 )
             except Exception:
                 # Network errors during the probe are non-fatal; push_resources will
@@ -748,6 +762,7 @@ async def triage_test_bundle(
     filename: str,
     session: AsyncSession,
     *,
+    mcs: McsTarget,
     progress_fn: Callable[[str, int], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Triage a test bundle: send resources to their correct destinations.
@@ -758,6 +773,15 @@ async def triage_test_bundle(
 
     Returns summary dict with counts.
     """
+    # A test bundle upload writes Measures, Libraries and ValueSets to the measure
+    # engine, so a read-only target cannot work. Refuse up front rather than partway
+    # through, having already written some resources (issue #397). Mirrors the CDR
+    # read-only check further down this same function.
+    if mcs.is_read_only:
+        raise ValueError(
+            "Cannot upload measures: the active measure engine connection is configured "
+            "as read-only. Switch to a writable connection to load test bundles."
+        )
     _warn_unknown_bundle_types(bundle_json)
     measure_defs, clinical, test_cases = _classify_bundle_entries(bundle_json)
     measure_defs = _fix_library_deps_for_hapi(measure_defs)
@@ -771,12 +795,13 @@ async def triage_test_bundle(
         secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
         try:
             # ValueSets/CodeSystems plus ELM-declared missing ValueSet stubs.
-            support_resources = await _prepare_measure_support_resources(secondary, bundle_json)
+            support_resources = await _prepare_measure_support_resources(secondary, bundle_json, mcs=mcs)
             if support_resources:
-                await push_resources(support_resources)
+                await push_resources(support_resources, target_url=mcs.url, auth_headers=mcs.auth_headers)
             if primary:
-                await _assert_no_canonical_url_clash(primary)
-                await push_resources(primary)  # Measure + Library always pushed
+                await _assert_no_canonical_url_clash(primary, mcs=mcs)
+                # Measure + Library always pushed
+                await push_resources(primary, target_url=mcs.url, auth_headers=mcs.auth_headers)
         except Exception as exc:
             raise ValueError(
                 f"Failed to upload measures to HAPI measure engine. "
@@ -875,7 +900,12 @@ async def triage_test_bundle(
 
     valueset_urls = _valueset_urls([*measure_defs, *clinical])
     valueset_urls.extend(_valueset_urls(support_resources))
-    expanded = await asyncio.to_thread(wait_for_valueset_expansion, settings.MEASURE_ENGINE_URL, valueset_urls)
+    # URL only: wait_for_valueset_expansion is a synchronous polling helper with no
+    # auth parameter. Against an authenticated remote MCS its polls will 401 and it
+    # will report "not expanded" rather than failing — acceptable because the caller
+    # treats a non-expansion as a warning, not an error. Threading auth through it is
+    # follow-up work, tracked in the PR body, not silently assumed done.
+    expanded = await asyncio.to_thread(wait_for_valueset_expansion, mcs.url, valueset_urls)
     unique_valueset_count = len({url for url in valueset_urls if url})
     logger.info(
         "ValueSet expansion complete",
@@ -927,7 +957,8 @@ async def process_bundle_upload(upload_id: int) -> None:
                         setattr(u, field, value)
                         await prog_session.commit()
 
-            summary = await triage_test_bundle(bundle_json, upload.filename, session, progress_fn=_on_progress)
+            mcs = await mcs_target_from_context(await get_active_mcs(session=session))
+            summary = await triage_test_bundle(bundle_json, upload.filename, session, mcs=mcs, progress_fn=_on_progress)
 
             upload.measures_loaded = summary["measures_loaded"]
             upload.patients_loaded = summary["patients_loaded"]
@@ -970,7 +1001,7 @@ async def process_bundle_upload(upload_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_measure_id(measure_url: str) -> Optional[str]:
+async def _resolve_measure_id(measure_url: str, *, mcs: McsTarget) -> str | None:
     """Resolve a measure URL or relative reference to a HAPI FHIR resource ID.
 
     Handles two formats:
@@ -985,7 +1016,7 @@ async def _resolve_measure_id(measure_url: str) -> Optional[str]:
             # Relative reference like "Measure/measure-EXM130-FHIR4-7.2.000"
             parts = measure_url.split("/", 1)
             if len(parts) == 2 and parts[0] == "Measure":
-                resp = await client.get(f"{settings.MEASURE_ENGINE_URL}/Measure/{parts[1]}")
+                resp = await client.get(f"{mcs.url}/Measure/{parts[1]}", headers=mcs.auth_headers)
                 if resp.status_code == 404:
                     return None
                 resp.raise_for_status()
@@ -994,13 +1025,13 @@ async def _resolve_measure_id(measure_url: str) -> Optional[str]:
 
         # Canonical URL — search by ?url= parameter
         # Retry up to 3 times with 1s delay to handle search indexing lag
-        headers = {"Cache-Control": "no-cache", "Accept": "application/fhir+json"}
+        headers = {"Cache-Control": "no-cache", "Accept": "application/fhir+json", **mcs.auth_headers}
         params = {"url": measure_url, "_count": 1}
 
         for attempt in range(3):
             try:
                 resp = await client.get(
-                    f"{settings.MEASURE_ENGINE_URL}/Measure",
+                    f"{mcs.url}/Measure",
                     params=params,
                     headers=headers,
                 )
@@ -1029,7 +1060,7 @@ async def _resolve_measure_id(measure_url: str) -> Optional[str]:
     return None
 
 
-async def _reload_measures_from_seed_bundles() -> dict[str, int]:
+async def _reload_measures_from_seed_bundles(*, mcs: McsTarget) -> dict[str, int]:
     """Reload all Measure/Library resources from seed bundles into HAPI.
 
     Called when validation detects missing measures. Returns counts of loaded resources.
@@ -1055,12 +1086,12 @@ async def _reload_measures_from_seed_bundles() -> dict[str, int]:
             if measure_defs:
                 primary = [r for r in measure_defs if r.get("resourceType") in ("Measure", "Library")]
                 secondary = [r for r in measure_defs if r.get("resourceType") not in ("Measure", "Library")]
-                support_resources = await _prepare_measure_support_resources(secondary, bundle_json)
+                support_resources = await _prepare_measure_support_resources(secondary, bundle_json, mcs=mcs)
                 if support_resources:
-                    await push_resources(support_resources)
+                    await push_resources(support_resources, target_url=mcs.url, auth_headers=mcs.auth_headers)
                 if primary:
-                    await _assert_no_canonical_url_clash(primary)
-                    await push_resources(primary)
+                    await _assert_no_canonical_url_clash(primary, mcs=mcs)
+                    await push_resources(primary, target_url=mcs.url, auth_headers=mcs.auth_headers)
                     for r in primary:
                         if r.get("resourceType") == "Measure":
                             total_measures += 1
@@ -1080,6 +1111,17 @@ async def _reload_measures_from_seed_bundles() -> dict[str, int]:
             )
 
     return {"measures_loaded": total_measures, "libraries_loaded": total_libraries, "failed": failed}
+
+
+async def _fail_validation_run(validation_run_id: int, message: str) -> None:
+    """Mark a run failed with a diagnosis, so it never sits in `running` forever."""
+    async with async_session() as session:
+        run = await session.get(ValidationRun, validation_run_id)
+        if run:
+            run.status = ValidationStatus.failed
+            run.error_message = message
+            run.completed_at = datetime.now(timezone.utc)
+            await session.commit()
 
 
 async def run_validation(validation_run_id: int) -> None:
@@ -1103,6 +1145,54 @@ async def run_validation(validation_run_id: int) -> None:
     try:
         if await _stop_or_delete_validation_run(validation_run_id):
             return
+
+        # Resolve the target ONCE from the run's snapshot, not from whatever connection
+        # is active now: a run that sat in the queue while the user switched connections
+        # must still execute against the server it was created for (issue #397).
+        async with async_session() as session:
+            run_row = await session.get(ValidationRun, validation_run_id)
+            if run_row is None:
+                return
+            mcs_url = run_row.mcs_url or settings.MEASURE_ENGINE_URL
+            snapshot_mcs_id = run_row.mcs_id
+            snapshot_auth_type = run_row.mcs_auth_type
+            wipe_before = bool(run_row.mcs_wipe_before_job)
+            try:
+                mcs_auth_headers = await resolve_mcs_auth_headers(
+                    session,
+                    mcs_id=snapshot_mcs_id,
+                    mcs_url=run_row.mcs_url,
+                    mcs_auth_type=snapshot_auth_type,
+                    owner_label=f"validation run {validation_run_id}",
+                )
+            except RuntimeError as exc:
+                await _fail_validation_run(validation_run_id, sanitize_error(exc))
+                return
+
+            # is_read_only is read LIVE, not from the snapshot: it answers "may I write to
+            # this server NOW". Snapshotting it would let a run write to a server the user
+            # has since marked protected.
+            live_read_only = False
+            if snapshot_mcs_id is not None:
+                cfg = await session.get(MCSConfig, snapshot_mcs_id)
+                live_read_only = bool(cfg.is_read_only) if cfg else False
+
+        if live_read_only:
+            await _fail_validation_run(
+                validation_run_id,
+                "The measure engine connection for this run is configured as read-only. "
+                "A validation run must write measures and patient data, so it cannot proceed. "
+                "Switch to a writable connection and start a new run.",
+            )
+            return
+
+        mcs = McsTarget(
+            url=mcs_url,
+            auth_headers=mcs_auth_headers,
+            is_read_only=live_read_only,
+            wipe_before_job=wipe_before,
+        )
+
         # Load expected results
         async with async_session() as session:
             run = await session.get(ValidationRun, validation_run_id)
@@ -1140,7 +1230,7 @@ async def run_validation(validation_run_id: int) -> None:
 
         for measure_url, ers in measures.items():
             try:
-                hapi_id = await _resolve_measure_id(measure_url)
+                hapi_id = await _resolve_measure_id(measure_url, mcs=mcs)
             except Exception as exc:
                 unresolved_errors[measure_url] = f"Measure resolution failed: {sanitize_error(exc)}"
                 continue
@@ -1162,13 +1252,13 @@ async def run_validation(validation_run_id: int) -> None:
                 extra={"missing_count": len(missing_measures), "total": len(measures)},
             )
             try:
-                reload_result = await _reload_measures_from_seed_bundles()
+                reload_result = await _reload_measures_from_seed_bundles(mcs=mcs)
                 logger.info("Seed bundle reload complete", extra=reload_result)
 
                 # Retry resolving measures after reload
                 for measure_url in missing_measures:
                     try:
-                        hapi_id = await _resolve_measure_id(measure_url)
+                        hapi_id = await _resolve_measure_id(measure_url, mcs=mcs)
                     except Exception as exc:
                         unresolved_errors[measure_url] = (
                             f"Measure resolution failed after reload attempt: {sanitize_error(exc)}"
@@ -1234,9 +1324,34 @@ async def run_validation(validation_run_id: int) -> None:
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
 
-            # Best-effort for validation: stale resources are worse than ideal, but
-            # aborting prevents patient-level comparison entirely on slow HAPI deletes.
-            await wipe_patient_data(base_url=settings.MEASURE_ENGINE_URL, strict=False)
+            # Clear the prior run's data off the target. Scoped by default: this is a
+            # second copy of the #392 hazard — #392 scoped run_job's wipe and never
+            # touched the validation path, so an unfiltered delete here would remove
+            # every participant's patients on a shared engine.
+            #
+            # Correctness is preserved for the same reason as #392: evaluation is
+            # per-subject, so patients this run never evaluates cannot affect its
+            # numbers. See ADR-012.
+            validation_patient_ids = sorted({er.patient_ref for er in resolved_expected_results if er.patient_ref})
+            if mcs.wipe_before_job:
+                logger.warning(
+                    "Full patient-data wipe starting — deletes ALL patients on the target MCS",
+                    extra={"run_id": validation_run_id, "mcs_url": sanitize_url(mcs.url), "scope": "all-patients"},
+                )
+                await wipe_patient_data(base_url=mcs.url, strict=False, auth_headers=mcs.auth_headers)
+            else:
+                logger.info(
+                    "Scoped patient-data wipe starting — deletes only this run's patients",
+                    extra={
+                        "run_id": validation_run_id,
+                        "mcs_url": sanitize_url(mcs.url),
+                        "scope": "run-patients",
+                        "patient_count": len(validation_patient_ids),
+                    },
+                )
+                await wipe_patients_by_id(
+                    base_url=mcs.url, patient_ids=validation_patient_ids, auth_headers=mcs.auth_headers
+                )
             if await _stop_or_delete_validation_run(validation_run_id):
                 return
 
@@ -1251,7 +1366,7 @@ async def run_validation(validation_run_id: int) -> None:
                     gather_result = await strategy.gather_patient_data(cdr_url, patient_ref, auth_headers)
                     resources = gather_result.resources
                     if resources:
-                        await push_resources(resources)
+                        await push_resources(resources, target_url=mcs.url, auth_headers=mcs.auth_headers)
                     return {
                         resource.get("subject", {}).get("reference", "").removeprefix("Patient/")
                         for resource in resources
@@ -1300,6 +1415,8 @@ async def run_validation(validation_run_id: int) -> None:
                             warmup_er.patient_ref,
                             info["period_start"],
                             info["period_end"],
+                            measure_engine_url=mcs.url,
+                            auth_headers=mcs.auth_headers,
                         )
                         logger.debug(
                             "Warmup evaluation complete",
@@ -1347,6 +1464,8 @@ async def run_validation(validation_run_id: int) -> None:
                         er.patient_ref,
                         info["period_start"],
                         info["period_end"],
+                        measure_engine_url=mcs.url,
+                        auth_headers=mcs.auth_headers,
                     )
                     actual = _extract_population_counts(report)
 
@@ -1356,7 +1475,7 @@ async def run_validation(validation_run_id: int) -> None:
                         ref_str = eval_ref.get("reference", "")
                         if ref_str.startswith("Patient/"):
                             try:
-                                resp = await http_client.get(f"{settings.MEASURE_ENGINE_URL}/{ref_str}")
+                                resp = await http_client.get(f"{mcs.url}/{ref_str}", headers=mcs.auth_headers)
                                 if resp.status_code == 200:
                                     patient_name = _extract_patient_name(resp.json())
                             except Exception:

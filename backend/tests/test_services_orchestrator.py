@@ -1413,7 +1413,7 @@ async def test_get_mcs_auth_headers_raises_when_config_deleted(test_session, ses
     assert job.mcs_url == "https://mcs.example.org/fhir"
 
     with patch("app.services.orchestrator.async_session", session_factory):
-        with pytest.raises(RuntimeError, match="deleted after job creation"):
+        with pytest.raises(RuntimeError, match="deleted after"):
             await _get_mcs_auth_headers(job.id)
 
 
