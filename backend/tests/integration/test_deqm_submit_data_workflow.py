@@ -1,0 +1,117 @@
+"""End-to-end test: deqm_submit_data workflow against real HAPI (base-fallback path)."""
+
+from contextlib import ExitStack
+from unittest.mock import patch
+
+import httpx
+import pytest
+from sqlalchemy import select
+
+from app.models.job import MeasureResult
+from app.services.orchestrator import run_job
+from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL
+
+pytestmark = pytest.mark.integration
+
+MEASURE_ID = "CMS122FHIRDiabetesAssessGreaterThan9Percent"
+
+
+def _run_patches(integration_session_factory):
+    return (
+        patch("app.config.settings.MEASURE_ENGINE_URL", TEST_MEASURE_URL),
+        patch("app.config.settings.DEFAULT_CDR_URL", TEST_CDR_URL),
+        patch("app.services.orchestrator.settings.MEASURE_ENGINE_URL", TEST_MEASURE_URL),
+        patch("app.services.orchestrator.settings.DEFAULT_CDR_URL", TEST_CDR_URL),
+        patch("app.services.fhir_client.settings.MEASURE_ENGINE_URL", TEST_MEASURE_URL),
+        patch("app.services.fhir_client.settings.DEFAULT_CDR_URL", TEST_CDR_URL),
+        patch("app.services.orchestrator.settings.MAX_RETRIES", 1),
+        patch("app.services.orchestrator.settings.BATCH_SIZE", 100),
+        patch("app.services.orchestrator.async_session", integration_session_factory),
+    )
+
+
+async def _create_and_run(integration_client, integration_session_factory, workflow: str) -> dict:
+    resp = await integration_client.post(
+        "/jobs",
+        json={
+            "measure_id": MEASURE_ID,
+            "period_start": "2025-01-01",
+            "period_end": "2025-12-31",
+            "cdr_url": TEST_CDR_URL,
+            "workflow": workflow,
+        },
+    )
+    assert resp.status_code == 201, f"Job creation failed: {resp.text}"
+    job = resp.json()
+
+    with ExitStack() as stack:
+        for p in _run_patches(integration_session_factory):
+            stack.enter_context(p)
+        await run_job(job["id"])
+
+    detail = await integration_client.get(f"/jobs/{job['id']}")
+    return detail.json()
+
+
+async def test_deqm_job_records_base_fallback_mode(integration_client, integration_session_factory):
+    """Bundled HAPI has no $deqm-submit-data, so the probe must record base-fallback."""
+    resp = await integration_client.post(
+        "/jobs",
+        json={
+            "measure_id": MEASURE_ID,
+            "period_start": "2025-01-01",
+            "period_end": "2025-12-31",
+            "cdr_url": TEST_CDR_URL,
+            "workflow": "deqm_submit_data",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    body = resp.json()
+    assert body["workflow"] == "deqm_submit_data"
+    assert body["submit_data_mode"] == "base-fallback"
+
+
+async def test_deqm_job_matches_direct_load_populations(integration_client, integration_session_factory):
+    """The DEQM workflow must produce the same populations as direct load."""
+    direct = await _create_and_run(integration_client, integration_session_factory, "direct_load")
+    deqm = await _create_and_run(integration_client, integration_session_factory, "deqm_submit_data")
+
+    assert direct["status"] == "complete", f"direct job failed: {direct.get('error_message')}"
+    assert deqm["status"] == "complete", f"DEQM job failed: {deqm.get('error_message')}"
+    assert deqm["failed_patients"] == 0, "DEQM job had failed patients"
+
+    async with integration_session_factory() as session:
+        rows_direct = (
+            (await session.execute(select(MeasureResult).where(MeasureResult.job_id == direct["id"]))).scalars().all()
+        )
+        rows_deqm = (
+            (await session.execute(select(MeasureResult).where(MeasureResult.job_id == deqm["id"]))).scalars().all()
+        )
+
+    # A parity test that passes because both jobs produced zero patients proves nothing.
+    assert rows_direct, "direct_load job produced no patient results"
+    assert rows_deqm, "deqm_submit_data job produced no patient results"
+
+    pops_direct = {r.patient_id: r.populations for r in rows_direct}
+    pops_deqm = {r.patient_id: r.populations for r in rows_deqm}
+    assert set(pops_deqm) == set(pops_direct)
+    for pid, pops in pops_direct.items():
+        assert pops_deqm[pid] == pops, f"Population mismatch for {pid}"
+
+
+async def test_deqm_submission_stored_on_mcs(integration_client, integration_session_factory):
+    """The base $submit-data path stores the DEQM MeasureReport on the MCS."""
+    deqm = await _create_and_run(integration_client, integration_session_factory, "deqm_submit_data")
+    assert deqm["status"] == "complete", deqm.get("error_message")
+
+    async with integration_session_factory() as session:
+        row = (await session.execute(select(MeasureResult).where(MeasureResult.job_id == deqm["id"]))).scalars().first()
+    assert row is not None, "deqm_submit_data job produced no patient results"
+
+    # Client-assigned MeasureReport id is deqm-{job_id}-{patient_id}; read one
+    # back directly (direct reads bypass any index lag — CLAUDE.md triage rule).
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        direct_read = await client.get(f"{TEST_MEASURE_URL}/MeasureReport/deqm-{deqm['id']}-{row.patient_id}")
+    assert direct_read.status_code == 200, direct_read.text
+    stored = direct_read.json()
+    assert stored["type"] == "data-collection"
