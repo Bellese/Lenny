@@ -81,6 +81,10 @@ describe('JobsPage — data submission workflow', () => {
     render(<Harness />);
     const badge = await screen.findByTitle(/does not support DEQM STU5/i);
     expect(badge).toHaveTextContent('DEQM');
+    // The fallback explanation must survive without a mouse hover — a
+    // screen reader needs an accessible name that carries the same
+    // message as the title tooltip, not just the visible "DEQM ⚠" text.
+    expect(screen.getByLabelText(/does not support DEQM STU5/i)).toBe(badge);
   });
 
   test('direct load jobs show no workflow badge', async () => {

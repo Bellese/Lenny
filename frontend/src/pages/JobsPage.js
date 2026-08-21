@@ -421,6 +421,9 @@ export default function JobsPage() {
                             title={job.submit_data_mode === 'base-fallback'
                               ? 'MCS does not support DEQM STU5 $deqm-submit-data — base $submit-data fallback used.'
                               : 'DEQM STU5 $deqm-submit-data'}
+                            aria-label={job.submit_data_mode === 'base-fallback'
+                              ? 'DEQM — MCS does not support DEQM STU5 $deqm-submit-data — base $submit-data fallback used.'
+                              : 'DEQM — DEQM STU5 $deqm-submit-data'}
                           >
                             DEQM{job.submit_data_mode === 'base-fallback' ? ' ⚠' : ''}
                           </span>
