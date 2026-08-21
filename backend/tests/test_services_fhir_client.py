@@ -2535,6 +2535,55 @@ async def test_fetch_by_requirements_single_valueset_filter_preserved():
     assert len(resources) == 1
 
 
+async def test_fetch_by_requirements_mixed_filtered_and_unfiltered_drops_filter():
+    """One requirement for a type carries a codeFilter, another for the SAME
+    type has none — the mix must drop the filter and over-fetch, same as the
+    multiple-distinct-valuesets case (coverage-audit gap fill for the
+    `has_unfiltered` branch of the grouping logic in I3)."""
+    vs_url = "http://example.org/ValueSet/vs1"
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [
+            {"type": "Observation", "codeFilter": [{"valueSet": vs_url}]},
+            {"type": "Observation"},  # same type, no codeFilter at all
+        ],
+    }
+    obs_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [
+            {"resource": {"resourceType": "Observation", "id": "o1"}},
+            {"resource": {"resourceType": "Observation", "id": "o2"}},
+        ],
+        "link": [],
+    }
+
+    captured_urls: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        captured_urls.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        if "/Patient/" in url:
+            return _make_response(404, {"resourceType": "OperationOutcome"})
+        return _make_response(200, obs_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+        resources = gather_result.resources
+
+    obs_urls = [u for u in captured_urls if "Observation" in u]
+    assert len(obs_urls) == 1, f"Observation should be fetched exactly once, got {obs_urls}"
+    assert "code:in" not in obs_urls[0]
+    assert len(resources) == 2
+
+
 async def test_fetch_by_requirements_patient_always_fetched_even_when_absent():
     """Patient is fetched by direct read even when it's not a declared
     dataRequirement — $everything always includes it, and its absence fails

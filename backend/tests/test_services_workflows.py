@@ -5,12 +5,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.services.fhir_client import GatherResult
+from app.config import settings
+from app.services.fhir_client import BatchQueryStrategy, DataRequirementsStrategy, GatherResult
 from app.services.fhir_errors import FhirOperationError
 from app.services.workflows import (
     DeqmSubmitDataWorkflow,
     DirectLoadWorkflow,
     TransferPhaseError,
+    _acquisition_strategy,
     build_submission_workflow,
 )
 
@@ -255,6 +257,27 @@ class TestDeqmSubmitDataWorkflow:
         assert len(base_mode_calls) == 2
         assert wf._mode == "base-fallback"
 
+    async def test_empty_gather_still_submits_reporter_org_only(self):
+        """Coverage-audit gap fill: DeqmSubmitDataWorkflow does not skip
+        submission when gather returns zero resources (unlike DirectLoadWorkflow,
+        which skips the push entirely). The DEQM MeasureReport + reporter Org
+        must still be sent so the MCS gets a snapshot recording 'no data found'
+        for this patient/period."""
+        wf = _deqm_workflow()
+        empty = GatherResult(resources=[])
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=empty)),
+            patch("app.services.workflows.submit_data", new=AsyncMock()) as submit,
+        ):
+            result = await wf.transfer_patient("http://cdr", "p1", {})
+        assert result is empty
+        submit.assert_awaited_once()
+        params = submit.call_args.kwargs["parameters"]
+        submitted_types = [p["resource"]["resourceType"] for p in params["parameter"][1:]]
+        assert submitted_types == ["Organization"]
+        mr = params["parameter"][0]["resource"]
+        assert mr["evaluatedResource"] == []
+
     async def test_stu5_non_downgrade_status_does_not_retry(self):
         """A non-400/404 STU5 failure (e.g. 500) does NOT trigger a downgrade retry."""
         wf = _deqm_workflow(mode="stu5")
@@ -268,6 +291,36 @@ class TestDeqmSubmitDataWorkflow:
         assert exc_info.value.phase == "submit"
         assert wf._mode == "stu5"  # no downgrade attempted
         assert submit.await_count == 1
+
+
+class TestAcquisitionStrategy:
+    """Direct, parametrized coverage of _acquisition_strategy (coverage-audit
+    gap fill — previously only exercised indirectly through DirectLoadWorkflow
+    construction in test_services_orchestrator.py)."""
+
+    @pytest.mark.parametrize(
+        "configured_strategy,expected_cls",
+        [
+            ("batch", BatchQueryStrategy),
+            ("data_requirements", DataRequirementsStrategy),
+        ],
+    )
+    def test_selects_strategy_from_settings(self, monkeypatch, configured_strategy, expected_cls):
+        monkeypatch.setattr(settings, "PATIENT_DATA_STRATEGY", configured_strategy)
+        strategy = _acquisition_strategy("M1", "http://mcs", {"Authorization": "Bearer t"})
+        assert isinstance(strategy, expected_cls)
+
+    def test_data_requirements_strategy_receives_measure_and_mcs_args(self, monkeypatch):
+        monkeypatch.setattr(settings, "PATIENT_DATA_STRATEGY", "data_requirements")
+        strategy = _acquisition_strategy("M1", "http://mcs", {"Authorization": "Bearer t"})
+        assert strategy._measure_id == "M1"
+        assert strategy._mcs_url == "http://mcs"
+        assert strategy._mcs_auth_headers == {"Authorization": "Bearer t"}
+
+    def test_batch_strategy_ignores_measure_and_mcs_args(self, monkeypatch):
+        monkeypatch.setattr(settings, "PATIENT_DATA_STRATEGY", "batch")
+        strategy = _acquisition_strategy("M1", "http://mcs", {"Authorization": "Bearer t"})
+        assert isinstance(strategy, BatchQueryStrategy)
 
 
 class TestBuildSubmissionWorkflow:
@@ -304,3 +357,27 @@ class TestBuildSubmissionWorkflow:
         assert isinstance(wf, DeqmSubmitDataWorkflow)
         canon.assert_awaited_once_with("M1", mcs_url="http://mcs", auth_headers={})
         assert wf._mode == "base-fallback"
+
+    async def test_deqm_propagates_canonical_fetch_failure(self):
+        """Coverage-audit gap fill: build_submission_workflow must let a
+        get_measure_canonical failure propagate (job fails fast) rather than
+        swallowing it or returning a partially-built workflow."""
+        with patch(
+            "app.services.workflows.get_measure_canonical",
+            new=AsyncMock(
+                side_effect=FhirOperationError(
+                    operation="read-measure", url="http://mcs/Measure/M1", status_code=404, outcome=None, latency_ms=1
+                )
+            ),
+        ):
+            with pytest.raises(FhirOperationError):
+                await build_submission_workflow(
+                    workflow="deqm_submit_data",
+                    job_id=1,
+                    measure_id="M1",
+                    mcs_url="http://mcs",
+                    mcs_auth_headers={},
+                    submit_data_mode=None,
+                    period_start="2025-01-01",
+                    period_end="2025-12-31",
+                )

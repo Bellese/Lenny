@@ -1650,3 +1650,95 @@ async def test_direct_load_gather_failure_still_recorded_as_gather(test_session,
     async with session_factory() as session:
         row = (await session.execute(select(MeasureResult).where(MeasureResult.job_id == job_id))).scalar_one()
         assert row.error_phase == "gather"
+
+
+# ---------------------------------------------------------------------------
+# build_submission_workflow wiring (coverage-audit gap fill)
+# ---------------------------------------------------------------------------
+
+
+async def test_run_job_passes_job_fields_to_build_submission_workflow(test_session, session_factory):
+    """run_job must forward the job's own snapshot fields (workflow, measure_id,
+    mcs_url/auth, submit_data_mode, period) to build_submission_workflow — not
+    env defaults or another job's values. Every prior test mocks this call
+    without asserting its arguments."""
+    job_id = await _setup_job(test_session)
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        job.workflow = "deqm_submit_data"
+        job.submit_data_mode = "stu5"
+        job.measure_id = "measure-1"
+        job.period_start = "2024-01-01"
+        job.period_end = "2024-12-31"
+        await session.commit()
+
+    patients = [{"resourceType": "Patient", "id": "p1", "name": [{"family": "Test"}]}]
+    stub = _StubWorkflow(GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]))
+
+    with contextlib.ExitStack() as stack:
+        for p in _run_job_patches(session_factory, patients, stub):
+            stack.enter_context(p)
+        build_mock = stack.enter_context(
+            patch(
+                "app.services.orchestrator.build_submission_workflow",
+                new_callable=AsyncMock,
+                return_value=stub,
+            )
+        )
+        stack.enter_context(patch("app.services.orchestrator.evaluate_measure", new_callable=AsyncMock))
+        await run_job(job_id)
+
+    build_mock.assert_awaited_once_with(
+        workflow="deqm_submit_data",
+        job_id=job_id,
+        measure_id="measure-1",
+        mcs_url=settings.MEASURE_ENGINE_URL,
+        mcs_auth_headers={},
+        submit_data_mode="stu5",
+        period_start="2024-01-01",
+        period_end="2024-12-31",
+    )
+
+
+async def test_run_job_build_submission_workflow_failure_skips_wipe_and_fails_job(test_session, session_factory):
+    """If build_submission_workflow raises (e.g. a DEQM canonical-fetch failure),
+    run_job must fail fast BEFORE the wipe — a canonical-fetch failure must not
+    wipe the MCS and then fail anyway (see orchestrator.py comment above the
+    build_submission_workflow call)."""
+    from app.services.fhir_errors import FhirOperationError
+
+    job_id = await _setup_job(test_session)
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        job.workflow = "deqm_submit_data"
+        await session.commit()
+
+    patients = [{"resourceType": "Patient", "id": "p1", "name": [{"family": "Test"}]}]
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped_wipe,
+        patch("app.services.orchestrator._get_cdr_auth_headers", new_callable=AsyncMock, return_value={}),
+        patch("app.services.orchestrator._get_cdr_url", new_callable=AsyncMock, return_value="http://cdr/fhir"),
+        patch.object(BatchQueryStrategy, "gather_patients", new_callable=AsyncMock, return_value=patients),
+        patch(
+            "app.services.orchestrator.build_submission_workflow",
+            new_callable=AsyncMock,
+            side_effect=FhirOperationError(
+                operation="read-measure",
+                url="http://mcs/Measure/measure-1",
+                status_code=404,
+                outcome=None,
+                latency_ms=1,
+            ),
+        ),
+    ):
+        await run_job(job_id)
+
+    mock_wipe.assert_not_awaited()
+    mock_scoped_wipe.assert_not_awaited()
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        assert job.status == JobStatus.failed
+        assert job.error_message is not None

@@ -74,6 +74,23 @@ describe('JobsPage — data submission workflow', () => {
     );
   });
 
+  test('creating a DEQM job that falls back to base mode shows a warning toast', async () => {
+    // Coverage-audit gap fill: JobsPage.js fires toast.warning() when the
+    // creation response comes back with submit_data_mode === 'base-fallback'.
+    // No prior test asserted this toast actually renders.
+    api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
+    render(<Harness />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    const workflowSelect = await screen.findByLabelText(/Data submission workflow/i);
+    await userEvent.selectOptions(workflowSelect, 'deqm_submit_data');
+    const measureSelect = await screen.findByLabelText('Measure');
+    await waitFor(() => expect(measureSelect.value).toBe('CMS999'));
+    await userEvent.click(screen.getByRole('button', { name: /Start calculation/i }));
+    expect(
+      await screen.findByText(/MCS does not support DEQM STU5 \$deqm-submit-data — falling back to base \$submit-data\./i)
+    ).toBeInTheDocument();
+  });
+
   test('DEQM job with base-fallback shows the STU5 warning badge', async () => {
     api.getJobs = jest.fn().mockResolvedValue({
       jobs: [{ ...BASE_JOB, workflow: 'deqm_submit_data', submit_data_mode: 'base-fallback' }],
