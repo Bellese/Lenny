@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.db import async_session
+from app.dependencies import resolve_job_mcs_auth_headers
 from app.models.config import CDRConfig
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
 from app.services.fhir_client import (
@@ -28,6 +29,7 @@ from app.services.fhir_client import (
     push_resources,
     snapshot_evaluated_resources,
     wipe_patient_data,
+    wipe_patients_by_id,
 )
 from app.services.fhir_errors import redact_outcome, sanitize_url
 from app.services.validation import sanitize_error
@@ -130,10 +132,15 @@ def _error_measure_report(
     }
 
 
-def _patient_data_strategy(measure_id: str):
-    """Create the configured patient data acquisition strategy."""
+def _patient_data_strategy(measure_id: str, mcs_url: str, mcs_auth_headers: dict[str, str] | None = None):
+    """Create the configured patient data acquisition strategy.
+
+    `mcs_url`/`mcs_auth_headers` are threaded through to DataRequirementsStrategy so
+    `$data-requirements` asks the job's own measure engine rather than the env-var
+    default (issue #397). BatchQueryStrategy ignores them — it only talks to the CDR.
+    """
     if settings.PATIENT_DATA_STRATEGY == "data_requirements":
-        return DataRequirementsStrategy(measure_id)
+        return DataRequirementsStrategy(measure_id, mcs_url, mcs_auth_headers)
     return BatchQueryStrategy()
 
 
@@ -171,11 +178,12 @@ async def run_job(job_id: int) -> None:
         await session.commit()
 
     try:
-        # Step 1: Wipe patient data from measure engine (cleanup from prior job)
-        logger.info("Wiping prior patient data from measure engine", extra={"job_id": job_id})
-        await wipe_patient_data(base_url=settings.MEASURE_ENGINE_URL, strict=False)
-        if await _stop_or_delete_job(job_id):
-            return
+        # Resolve the MCS up front: the wipe below must target the same engine the
+        # job will push to and evaluate against, not the env-var default. Pointing
+        # the wipe at a different server would leave the real target's prior-run
+        # data in place and silently contaminate this job's populations.
+        mcs_url = await _get_mcs_url(job_id)
+        mcs_auth_headers = await _get_mcs_auth_headers(job_id)
 
         # Step 2: Resolve CDR connection settings
         auth_headers = await _get_cdr_auth_headers(job_id)
@@ -214,6 +222,25 @@ async def run_job(job_id: int) -> None:
         patient_ids = list(patient_map.keys())
         batch_size = settings.BATCH_SIZE
 
+        # Step 4a: Clear the prior run's data off the MCS (issue #392).
+        #
+        # This sits after the gather and before the push, not at the top of the
+        # job, because the scoped wipe needs the patient IDs to scope to. Running
+        # it after the push would delete the data this job just pushed.
+        #
+        # Consequence of the move: a job that gathers zero patients returns above
+        # without wiping at all. Nothing is evaluated in that case either, so no
+        # result is affected — but it does mean an empty job no longer doubles as
+        # a way to clear the local engine.
+        await _wipe_prior_run_data(
+            job_id=job_id,
+            mcs_url=mcs_url,
+            mcs_auth_headers=mcs_auth_headers,
+            patient_ids=patient_ids,
+        )
+
+        # The cancellation check that already guarded the batch-creation block
+        # below now also covers the wipe above — no second check needed.
         if await _stop_or_delete_job(job_id):
             return
         async with async_session() as session:
@@ -238,9 +265,8 @@ async def run_job(job_id: int) -> None:
         # Step 5: Process batches with concurrency control
         semaphore = asyncio.Semaphore(settings.MAX_WORKERS)
 
-        # Resolve MCS URL once for the whole job. Falls back to the env-var
-        # default if Job.mcs_url is NULL (legacy rows pre-dating PR #4).
-        mcs_url = await _get_mcs_url(job_id)
+        # mcs_url / mcs_auth_headers were resolved before the wipe above so every
+        # MCS interaction in this job targets one server with one set of credentials.
 
         async def process_batch(batch_id: int) -> None:
             async with semaphore:
@@ -251,6 +277,7 @@ async def run_job(job_id: int) -> None:
                     cdr_url=cdr_url,
                     auth_headers=auth_headers,
                     mcs_url=mcs_url,
+                    mcs_auth_headers=mcs_auth_headers,
                 )
 
         # Check for cancellation before starting
@@ -345,6 +372,71 @@ async def _get_cdr_url(job_id: int) -> str:
     return settings.DEFAULT_CDR_URL
 
 
+async def _get_mcs_auth_headers(job_id: int) -> dict[str, str]:
+    """Resolve auth headers by reading live credentials from the referenced MCS config.
+
+    Mirrors `_get_cdr_auth_headers`: the job snapshots `mcs_id`, and credentials are
+    read from the live config rather than duplicated onto the job row, so secrets
+    live in exactly one place.
+
+    The logic lives in `dependencies.resolve_job_mcs_auth_headers` so request
+    handlers can run it on the request's own session (issue #397). This wrapper is
+    the background-task entry point: it owns the session, the shared helper owns the
+    rules.
+    """
+    async with async_session() as session:
+        return await resolve_job_mcs_auth_headers(session, job_id)
+
+
+async def _wipe_prior_run_data(
+    *,
+    job_id: int,
+    mcs_url: str,
+    mcs_auth_headers: dict[str, str],
+    patient_ids: list[str],
+) -> None:
+    """Clear the previous run's data off the MCS before this job pushes (issue #392).
+
+    Two modes, chosen by the job's `mcs_wipe_before_job` snapshot:
+
+    - False (default for every user-created connection): delete only the patients
+      this job is about to push. Safe on a shared server, and equivalent for
+      correctness because evaluation is per-subject.
+    - True (the seeded local engine, or an explicit opt-in): the historical
+      unfiltered wipe of every patient on the target.
+
+    The full-wipe branch logs at WARNING with the target URL. It is a destructive
+    operation against a server Lenny may not own, and issue #392 was filed partly
+    because the only trace it left was a routine INFO line.
+    """
+    async with async_session() as session:
+        job = await session.get(Job, job_id)
+        full_wipe = bool(job.mcs_wipe_before_job) if job else False
+
+    if full_wipe:
+        logger.warning(
+            "Full patient-data wipe starting — deletes ALL patients on the target MCS",
+            extra={
+                "job_id": job_id,
+                "mcs_url": sanitize_url(mcs_url),
+                "scope": "all-patients",
+            },
+        )
+        await wipe_patient_data(base_url=mcs_url, strict=False, auth_headers=mcs_auth_headers)
+        return
+
+    logger.info(
+        "Scoped patient-data wipe starting — deletes only this job's patients",
+        extra={
+            "job_id": job_id,
+            "mcs_url": sanitize_url(mcs_url),
+            "scope": "job-patients",
+            "patient_count": len(patient_ids),
+        },
+    )
+    await wipe_patients_by_id(base_url=mcs_url, patient_ids=patient_ids, auth_headers=mcs_auth_headers)
+
+
 async def _get_mcs_url(job_id: int) -> str:
     """Resolve the MCS URL for a job.
 
@@ -370,6 +462,7 @@ async def _process_single_batch(
     cdr_url: str,
     auth_headers: dict[str, str],
     mcs_url: str,
+    mcs_auth_headers: dict[str, str] | None = None,
 ) -> None:
     """Process a single batch in two phases.
 
@@ -407,7 +500,7 @@ async def _process_single_batch(
                 period_start = job.period_start
                 period_end = job.period_end
 
-            strategy = _patient_data_strategy(measure_id)
+            strategy = _patient_data_strategy(measure_id, mcs_url, mcs_auth_headers)
             logger.info(
                 "Using patient data strategy",
                 extra={"strategy": settings.PATIENT_DATA_STRATEGY, "job_id": job_id, "batch_id": batch_id},
@@ -431,7 +524,11 @@ async def _process_single_batch(
                 try:
                     gather_result = await strategy.gather_patient_data(cdr_url, patient_id, auth_headers)
                     if gather_result.resources:
-                        await push_resources(gather_result.resources)
+                        await push_resources(
+                            gather_result.resources,
+                            target_url=mcs_url,
+                            auth_headers=mcs_auth_headers,
+                        )
                     logger.info(
                         f"Pushed {len(gather_result.resources)} resources for {patient_id[:8]}",
                         extra={"job_id": job_id, "patient_id": patient_id},
@@ -546,7 +643,12 @@ async def _process_single_batch(
 
                 try:
                     measure_report = await evaluate_measure(
-                        measure_id, patient_id, period_start, period_end, measure_engine_url=mcs_url
+                        measure_id,
+                        patient_id,
+                        period_start,
+                        period_end,
+                        measure_engine_url=mcs_url,
+                        auth_headers=mcs_auth_headers,
                     )
 
                     populations = _extract_populations(measure_report)
@@ -564,7 +666,7 @@ async def _process_single_batch(
                     # new rows without refs.
                     evaluated_resources_snapshot: list[dict] | None = None
                     try:
-                        snapshot_result = await snapshot_evaluated_resources(measure_report)
+                        snapshot_result = await snapshot_evaluated_resources(measure_report, mcs_url, mcs_auth_headers)
                         evaluated_resources_snapshot = snapshot_result if snapshot_result is not None else []
                     except Exception as snap_exc:
                         logger.warning(

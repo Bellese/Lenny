@@ -16,6 +16,7 @@ import httpx
 
 from app.config import settings
 from app.db import async_session
+from app.services.fhir_client import McsTarget
 from app.services.validation import triage_test_bundle
 
 logger = logging.getLogger(__name__)
@@ -79,13 +80,24 @@ async def load_connectathon_bundles(
     failed = 0
     details: list[dict[str, Any]] = []
 
+    # Seeding deliberately targets Lenny's own measure engine: this runs at boot, before
+    # any MCS connection row is guaranteed to exist. Building the target explicitly from
+    # settings makes that intent visible instead of relying on a defaulted parameter
+    # (issue #397). It is identical for every bundle, so build it once.
+    seed_mcs = McsTarget(
+        url=settings.MEASURE_ENGINE_URL,
+        auth_headers={},
+        is_read_only=False,
+        wipe_before_job=False,
+    )
+
     for bundle_path in bundle_files:
         if bundle_path.name == "manifest.json":
             continue
         try:
             bundle_json = json.loads(bundle_path.read_bytes())
             async with async_session() as session:
-                summary = await triage_test_bundle(bundle_json, bundle_path.name, session)
+                summary = await triage_test_bundle(bundle_json, bundle_path.name, session, mcs=seed_mcs)
                 await session.commit()
             loaded += 1
             details.append({"file": bundle_path.name, "status": "loaded", **summary})

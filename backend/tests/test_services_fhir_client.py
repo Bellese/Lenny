@@ -11,13 +11,18 @@ from app.services.fhir_client import (
     _acquire_smart_token,
     _build_auth_headers,
     _chunk_request_entries,
+    _remap_valueset_ids_for_hapi,
+    delete_measure,
     evaluate_measure,
     list_measures,
+    measure_exists,
     push_resources,
     resolve_evaluated_resource,
     upload_measure_bundle,
     wait_for_valueset_expansion,
+    wipe_measure_definitions,
     wipe_patient_data,
+    wipe_patients_by_id,
 )
 from app.services.fhir_client import (
     verify_fhir_connection as fhir_test_connection,
@@ -769,7 +774,7 @@ async def test_gather_result_partial_failure_surfaced():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
 
     assert isinstance(gather_result, GatherResult)
@@ -801,6 +806,98 @@ async def test_wipe_patient_data():
 
     # Should have made delete calls for each resource type
     assert mock_ctx.delete.call_count >= 10  # At least 10 resource types
+
+
+async def test_wipe_patient_data_raises_on_unauthorized_instead_of_silent_noop():
+    """A 401 on the conditional delete must abort, not degrade to a silent no-op.
+
+    Regression guard. `httpx` does not raise on status codes and the wipe never
+    called `raise_for_status()`, so a 401 fell through to the search-and-delete
+    fallback — which was unauthenticated, 401'd on its own GET, `break`ed, and
+    let wipe_patient_data return success having deleted nothing. The prior job's
+    resources then inflated the next job's populations with no error signal.
+    """
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=_make_response(401, {}))
+        mock_ctx.get = AsyncMock(return_value=_make_response(401, {}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(RuntimeError, match="Not authorized to wipe"):
+            await wipe_patient_data(base_url="https://mcs.example.org/fhir", auth_headers={"Authorization": "Bearer x"})
+
+
+async def test_wipe_patient_data_fallback_carries_credentials():
+    """When conditional delete is unsupported, the fallback sweep stays authenticated."""
+    headers = {"Authorization": "Bearer tok-1"}
+    empty_bundle = _make_response(200, {"resourceType": "Bundle", "entry": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        # 405 = conditional delete unsupported, the legitimate fallback trigger.
+        mock_ctx.delete = AsyncMock(return_value=_make_response(405, {}))
+        mock_ctx.get = AsyncMock(return_value=empty_bundle)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await wipe_patient_data(base_url="https://mcs.example.org/fhir", auth_headers=headers)
+
+    assert mock_ctx.get.await_count > 0, "fallback sweep never ran"
+    for call in mock_ctx.get.await_args_list:
+        assert call.kwargs.get("headers") == headers, "fallback GET went out unauthenticated"
+
+
+async def test_wipe_patient_data_fallback_rejects_cross_origin_next_link():
+    """A hostile next link must not steer the fallback sweep at another host."""
+    hostile = _make_response(
+        200,
+        {
+            "resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "Patient", "id": "p1"}}],
+            "link": [{"relation": "next", "url": "http://169.254.169.254/latest/meta-data/"}],
+        },
+    )
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=_make_response(405, {}))
+        mock_ctx.get = AsyncMock(return_value=hostile)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await wipe_patient_data(base_url="https://mcs.example.org/fhir", auth_headers={})
+
+    for call in mock_ctx.get.await_args_list:
+        requested = call.args[0] if call.args else ""
+        assert "169.254.169.254" not in requested, "followed a cross-origin next link"
+
+
+async def test_wipe_patient_data_fallback_rejects_traversal_ids():
+    """Server-supplied ids containing path separators must not become DELETE paths."""
+    malicious = _make_response(
+        200,
+        {
+            "resourceType": "Bundle",
+            "entry": [
+                {"resource": {"resourceType": "Patient", "id": "../../Measure/CMS130"}},
+                {"resource": {"resourceType": "Patient", "id": "safe-1"}},
+            ],
+        },
+    )
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=_make_response(405, {}))
+        mock_ctx.get = AsyncMock(return_value=malicious)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await wipe_patient_data(base_url="https://mcs.example.org/fhir", auth_headers={})
+
+    for call in mock_ctx.delete.await_args_list:
+        requested = call.args[0] if call.args else ""
+        assert "Measure/CMS130" not in requested, "traversal id became a DELETE path"
 
 
 async def test_wipe_patient_data_includes_qi_core_types():
@@ -900,6 +997,329 @@ async def test_wipe_patient_data_non_strict_raises_after_consecutive_failures():
             await wipe_patient_data(base_url="http://test-fhir:8080/fhir", strict=False)
 
     assert mock_ctx.delete.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# wipe_patients_by_id (issue #392)
+# ---------------------------------------------------------------------------
+
+
+def _delete_urls(mock_ctx) -> list[str]:
+    """Every URL passed positionally to client.delete()."""
+    return [call.args[0] for call in mock_ctx.delete.await_args_list]
+
+
+class TestWipePatientsById:
+    """The patient-scoped wipe that makes running against a shared MCS safe.
+
+    Issue #392: the full wipe deletes every patient on the target server. Since
+    evaluation is per-subject (`$evaluate-measure?subject=Patient/<id>`), deleting
+    only the IDs this job is about to push is equivalent for correctness while
+    leaving other participants' data alone.
+    """
+
+    def _mock_client(self, mock_httpx, response=None):
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=response or _make_response(200, {}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        return mock_ctx
+
+    async def test_every_delete_is_scoped_to_the_given_patients(self):
+        """No DELETE may go out without a scoping filter.
+
+        This is the whole point of the issue: an unfiltered conditional delete is
+        what wipes a shared server. The three legitimate scoping params are
+        `patient=`, `subject=` (AdverseEvent) and `_id=` (Patient itself).
+        """
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1", "p2"])
+
+        urls = _delete_urls(mock_ctx)
+        assert urls, "no deletes issued"
+        for url in urls:
+            assert any(f"?{p}=" in url for p in ("patient", "subject", "_id")), (
+                f"unscoped delete would wipe the server: {url}"
+            )
+            assert "_lastUpdated" not in url, f"full-wipe filter leaked into the scoped wipe: {url}"
+
+    async def test_deletes_the_patient_resource_itself(self):
+        """The Patient resource must go too, scoped by _id.
+
+        Regression guard: the first implementation swept 19 clinical types and left
+        the Patient behind. HAPI 400s on `Patient?patient=`, so Patient needs `_id`
+        — and it has to come last, because HAPI 409s while clinical resources still
+        reference it. Caught by the integration test, not by a mock.
+        """
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1", "p2"])
+
+        urls = _delete_urls(mock_ctx)
+        patient_urls = [u for u in urls if "/Patient?" in u]
+        assert patient_urls, "the Patient resource was never deleted"
+        assert "_id=p1,p2" in patient_urls[0]
+        assert urls[-1] in patient_urls, "Patient must be deleted last or HAPI returns 409"
+
+    async def test_covers_the_patient_linked_clinical_types(self):
+        """The types that carry measure-relevant data must all be swept."""
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        urls = _delete_urls(mock_ctx)
+        for rt in ("MeasureReport", "Condition", "Observation", "Encounter", "Procedure", "MedicationRequest"):
+            assert any(f"/{rt}?" in u for u in urls), f"{rt} not wiped"
+
+    async def test_skips_types_with_no_patient_link(self):
+        """Medication/Location/Practitioner/Organization have no patient search param.
+
+        Verified against HAPI: both `patient=` and `subject=` return HTTP 400 for
+        these. They are also shared infrastructure on a multi-tenant server, and
+        re-push restores them by ID, so skipping them is correct as well as required.
+        """
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        urls = _delete_urls(mock_ctx)
+        for rt in ("Medication", "Location", "Practitioner", "Organization"):
+            assert not any(f"/{rt}?" in u for u in urls), f"{rt} has no patient link — delete would be unscoped"
+
+    async def test_adverse_event_uses_subject_not_patient(self):
+        """AdverseEvent is the one type where `patient=` is a 400 on HAPI."""
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        adverse = [u for u in _delete_urls(mock_ctx) if "/AdverseEvent?" in u]
+        assert len(adverse) == 1
+        assert "subject=" in adverse[0]
+        assert "patient=" not in adverse[0]
+
+    async def test_batches_ids_into_one_request_per_type(self):
+        """IDs are OR'd in a single param so the sweep is 19 requests, not 19*N."""
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1", "p2", "p3"])
+
+        condition = [u for u in _delete_urls(mock_ctx) if "/Condition?" in u]
+        assert len(condition) == 1, "one request per type expected for a small ID list"
+        assert "p1,p2,p3" in condition[0]
+
+    async def test_chunks_large_id_lists(self):
+        """A 460-patient job must not produce a multi-kilobyte URL."""
+        ids = [f"p{i}" for i in range(250)]
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=ids)
+
+        condition = [u for u in _delete_urls(mock_ctx) if "/Condition?" in u]
+        assert len(condition) > 1, "large ID list was not chunked"
+        for url in condition:
+            assert len(url) < 2000, f"URL too long for a GET/DELETE line: {len(url)}"
+        # Every ID must appear somewhere — chunking must not silently drop any.
+        joined = " ".join(condition)
+        for pid in ids:
+            assert f"{pid}," in joined or f"{pid} " in joined or joined.endswith(pid) or f"{pid}&" in joined, (
+                f"{pid} dropped by chunking"
+            )
+
+    async def test_no_patient_ids_issues_no_deletes(self):
+        """An empty gather must not fall through to an unscoped sweep."""
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=[])
+
+        assert mock_ctx.delete.await_count == 0
+
+    async def test_carries_auth_headers(self):
+        headers = {"Authorization": "Bearer tok-1"}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"], auth_headers=headers)
+
+        for call in mock_ctx.delete.await_args_list:
+            assert call.kwargs.get("headers") == headers, "scoped delete went out unauthenticated"
+
+    async def test_raises_on_unauthorized(self):
+        """Same fail-loud rule as the full wipe: a 401 must not report success.
+
+        Silently failing here leaves the prior run's resources attached to the
+        patients this job is about to evaluate, which corrupts its populations.
+        """
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._mock_client(mock_httpx, response=_make_response(401, {}))
+            with pytest.raises(RuntimeError, match="Not authorized"):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+    async def test_raises_after_consecutive_transport_failures(self):
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.delete = AsyncMock(side_effect=httpx.TimeoutException("slow delete"))
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with pytest.raises(RuntimeError, match="FHIR server unreachable"):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert mock_ctx.delete.await_count == 3
+
+    async def test_tolerates_404_on_absent_types(self):
+        """A server that doesn't stock a type must not fail the whole wipe."""
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx, response=_make_response(404, {}))
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert mock_ctx.delete.await_count > 0
+
+    async def test_falls_back_to_one_by_one_when_multiple_delete_is_disabled(self):
+        """A server with allow_multiple_delete=false must still get wiped.
+
+        This is the deployment the whole feature targets: our own containers set
+        `hapi.fhir.allow_multiple_delete=true`, but a shared remote MCS may not.
+        HAPI then rejects a conditional delete whose search matches more than one
+        resource. Without a fallback the wipe logs a warning, deletes nothing, and
+        the prior run's resources stay attached to the patients this job is about
+        to evaluate — silently corrupting its populations.
+        """
+        # 412 = HAPI's "search matched multiple resources and multiple delete is
+        # disabled" response.
+        rejected = _make_response(412, {})
+        found = _make_response(
+            200,
+            {
+                "resourceType": "Bundle",
+                "entry": [{"resource": {"resourceType": "Condition", "id": "cond-1"}}],
+            },
+        )
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+
+            # Conditional delete (has a "?") is rejected; delete by id succeeds.
+            async def _delete(url, **kwargs):
+                return rejected if "?" in url else _make_response(200, {})
+
+            mock_ctx.delete = AsyncMock(side_effect=_delete)
+            mock_ctx.get = AsyncMock(return_value=found)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        # The fallback searched...
+        assert mock_ctx.get.await_count > 0, "no fallback search was issued"
+        # ...and every search it issued stayed scoped to the patient.
+        for call in mock_ctx.get.await_args_list:
+            url = call.args[0]
+            assert any(f"&{p}=" in url for p in ("patient", "subject", "_id")), f"fallback search was unscoped: {url}"
+        # ...and deleted by id.
+        by_id = [u for u in _delete_urls(mock_ctx) if "?" not in u]
+        assert any("/Condition/cond-1" in u for u in by_id), "fallback never deleted the matched resource"
+
+    async def test_fallback_search_stays_authenticated(self):
+        """The fallback must carry credentials or it 401s and silently no-ops."""
+        headers = {"Authorization": "Bearer tok-1"}
+        found = _make_response(200, {"resourceType": "Bundle", "entry": []})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = AsyncMock()
+            mock_ctx.delete = AsyncMock(return_value=_make_response(412, {}))
+            mock_ctx.get = AsyncMock(return_value=found)
+            mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+            mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"], auth_headers=headers)
+
+        assert mock_ctx.get.await_count > 0
+        for call in mock_ctx.get.await_args_list:
+            assert call.kwargs.get("headers") == headers, "fallback search went out unauthenticated"
+
+
+# ---------------------------------------------------------------------------
+# wipe_measure_definitions (issue #397)
+# ---------------------------------------------------------------------------
+
+
+class TestWipeMeasureDefinitions:
+    """The admin 'wipe measure engine' primitive, scoped to a caller-supplied server.
+
+    Issue #397: this read `settings.MEASURE_ENGINE_URL` directly, so an admin
+    connected to a remote MCS who clicked the control wiped Lenny's LOCAL engine
+    and got a success response, while the server they were looking at was
+    untouched. The inverse is the real hazard — a naive fix makes it capable of
+    wiping a shared remote server — so `base_url` is required and the callers own
+    the read-only guard.
+    """
+
+    def _mock_client(self, mock_httpx, response=None):
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=response or _make_response(200, {}))
+        mock_ctx.get = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle", "entry": []}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        return mock_ctx
+
+    async def test_base_url_is_required(self):
+        """No env-var default. A default is how this bug class stayed invisible."""
+        with pytest.raises(TypeError):
+            await wipe_measure_definitions()  # type: ignore[call-arg]
+
+    async def test_targets_the_given_server(self):
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_measure_definitions(base_url="https://mcs.example.org/fhir")
+
+        urls = [call.args[0] for call in mock_ctx.delete.await_args_list]
+        assert urls, "no deletes issued"
+        for url in urls:
+            assert url.startswith("https://mcs.example.org/fhir/"), f"wrong server: {url}"
+
+    async def test_covers_the_definition_types_and_not_clinical_data(self):
+        """Definitions only — this control must not delete patients."""
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_measure_definitions(base_url="https://mcs.example.org/fhir")
+
+        urls = [call.args[0] for call in mock_ctx.delete.await_args_list]
+        for rt in ("Library", "Measure", "ValueSet", "CodeSystem", "ConceptMap"):
+            assert any(f"/{rt}?" in u for u in urls), f"{rt} not wiped"
+        for rt in ("Patient", "Encounter", "Condition", "Observation"):
+            assert not any(f"/{rt}?" in u for u in urls), f"{rt} must not be touched by a definitions wipe"
+
+    async def test_carries_auth_headers(self):
+        """A remote MCS rejects every DELETE without credentials."""
+        headers = {"Authorization": "Bearer tok-1"}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_measure_definitions(base_url="https://mcs.example.org/fhir", auth_headers=headers)
+
+        for call in mock_ctx.delete.await_args_list:
+            assert call.kwargs.get("headers") == headers, "definitions delete went out unauthenticated"
+
+    async def test_raises_on_unauthorized(self):
+        """A 401 must abort, naming the wipe — same rule as the other two wipes.
+
+        Without the explicit check this still failed, but via the fallback sweep's
+        "not authorized to enumerate" error, which names the wrong operation.
+        """
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._mock_client(mock_httpx, response=_make_response(401, {}))
+            with pytest.raises(RuntimeError, match="Not authorized to wipe"):
+                await wipe_measure_definitions(base_url="https://mcs.example.org/fhir")
+
+    async def test_fallback_sweep_carries_auth_headers(self):
+        """When conditional delete is unsupported, the per-resource sweep stays authenticated."""
+        headers = {"Authorization": "Bearer tok-1"}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx, response=_make_response(405, {}))
+            await wipe_measure_definitions(base_url="https://mcs.example.org/fhir", auth_headers=headers)
+
+        assert mock_ctx.get.await_count > 0, "fallback sweep never ran"
+        for call in mock_ctx.get.await_args_list:
+            assert call.kwargs.get("headers") == headers, "fallback GET went out unauthenticated"
 
 
 # ---------------------------------------------------------------------------
@@ -1006,9 +1426,42 @@ async def test_resolve_evaluated_resource():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        result = await resolve_evaluated_resource("Patient/p1")
+        result = await resolve_evaluated_resource("Patient/p1", "http://mcs/fhir")
 
     assert result == resource
+
+
+async def test_resolve_evaluated_resource_requires_base_url():
+    """The env-var fallback is gone (issue #397).
+
+    It defaulted to settings.MEASURE_ENGINE_URL with no credentials, which only
+    ever worked for a local unauthenticated HAPI. Every caller now names the server.
+    """
+    with pytest.raises(TypeError):
+        await resolve_evaluated_resource("Patient/p1")  # type: ignore[call-arg]
+
+
+async def test_resolve_evaluated_resource_targets_the_given_server():
+    resource = {"resourceType": "Patient", "id": "p1"}
+    seen: dict[str, object] = {}
+
+    async def _get(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return _make_response(200, resource)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await resolve_evaluated_resource(
+            "Patient/p1", "https://mcs.example.org/fhir", {"Authorization": "Bearer tok-r"}
+        )
+
+    assert seen["url"] == "https://mcs.example.org/fhir/Patient/p1"
+    assert seen["headers"] == {"Authorization": "Bearer tok-r"}
 
 
 # ---------------------------------------------------------------------------
@@ -1032,7 +1485,7 @@ async def test_snapshot_evaluated_resources_returns_resolved_list():
         "Encounter/e1": {"resourceType": "Encounter", "id": "e1"},
     }
 
-    async def fake_resolve(ref):
+    async def fake_resolve(ref, base_url=None, auth_headers=None):
         return fake_resources[ref]
 
     with patch("app.services.fhir_client.resolve_evaluated_resource", side_effect=fake_resolve):
@@ -1054,7 +1507,7 @@ async def test_snapshot_evaluated_resources_skips_failed_refs():
         ],
     }
 
-    async def fake_resolve(ref):
+    async def fake_resolve(ref, base_url=None, auth_headers=None):
         if ref == "Encounter/e1":
             raise RuntimeError("404 not found")
         return {"resourceType": ref.split("/")[0], "id": ref.split("/")[1]}
@@ -1079,12 +1532,23 @@ async def test_snapshot_evaluated_resources_returns_none_when_no_refs():
 
 
 # ---------------------------------------------------------------------------
-# list_measures
+# Measure-management functions: base_url targeting (issue #396)
+#
+# These four tests are the regression guard for the whole bug. Every measure-
+# management call must hit the base_url it was handed and never
+# settings.MEASURE_ENGINE_URL — that env-var read is what made the measure list
+# ignore the connected MCS. `_ACTIVE_MCS` is deliberately different from the
+# env-var default (`http://hapi-fhir-measure:8080/fhir`) so a regression shows
+# up as a failed URL assertion rather than an accidental pass.
 # ---------------------------------------------------------------------------
+
+_ACTIVE_MCS = "https://attendee-mcs.example.com/fhir"
 
 
 async def test_list_measures(mock_measure_bundle):
-    """list_measures returns the bundle from the measure engine."""
+    """list_measures queries the passed base_url, not settings.MEASURE_ENGINE_URL."""
+    from app.config import settings
+
     mock_response = _make_response(200, mock_measure_bundle)
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
@@ -1093,19 +1557,20 @@ async def test_list_measures(mock_measure_bundle):
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        result = await list_measures()
+        result = await list_measures(_ACTIVE_MCS, auth_headers={"Authorization": "Bearer tok"})
 
     assert result["resourceType"] == "Bundle"
     assert len(result["entry"]) == 1
-
-
-# ---------------------------------------------------------------------------
-# upload_measure_bundle
-# ---------------------------------------------------------------------------
+    called_url = mock_ctx.get.await_args.args[0]
+    assert called_url.startswith(_ACTIVE_MCS)
+    assert settings.MEASURE_ENGINE_URL not in called_url
+    assert mock_ctx.get.await_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
 
 
 async def test_upload_measure_bundle():
-    """upload_measure_bundle posts a bundle and returns the response."""
+    """upload_measure_bundle POSTs to the passed base_url, not the env-var engine."""
+    from app.config import settings
+
     input_bundle = {"resourceType": "Bundle", "type": "transaction", "entry": []}
     response_bundle = {"resourceType": "Bundle", "type": "transaction-response"}
     mock_response = _make_response(200, response_bundle)
@@ -1116,9 +1581,170 @@ async def test_upload_measure_bundle():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        result = await upload_measure_bundle(input_bundle)
+        result = await upload_measure_bundle(
+            input_bundle,
+            _ACTIVE_MCS,
+            auth_headers={"Authorization": "Bearer tok"},
+        )
 
     assert result["type"] == "transaction-response"
+    posted_url = mock_ctx.post.await_args.args[0]
+    assert posted_url == _ACTIVE_MCS
+    assert posted_url != settings.MEASURE_ENGINE_URL
+    headers = mock_ctx.post.await_args.kwargs["headers"]
+    assert headers["Authorization"] == "Bearer tok"
+    assert headers["Content-Type"] == "application/fhir+json"
+
+
+async def test_upload_measure_bundle_threads_base_url_into_remap():
+    """upload_measure_bundle hands its base_url + credentials to the ValueSet remap.
+
+    `_remap_valueset_ids_for_hapi` is tested directly elsewhere, so only the
+    wiring is at risk — but "the passed base_url is used everywhere" is the
+    central guard of issue #396, and an untested wire is where it would rot.
+    Asserted with the collaborator mocked so the assertion can't be satisfied
+    by the remap silently no-opping on a non-200 lookup.
+    """
+    from app.config import settings
+
+    input_bundle = {
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{"resource": {"resourceType": "ValueSet", "id": "1014", "url": "http://vs.example.com/1014"}}],
+    }
+    mock_response = _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+    with (
+        patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx,
+        patch(
+            "app.services.fhir_client._remap_valueset_ids_for_hapi",
+            new_callable=AsyncMock,
+            side_effect=lambda entries, client, base_url, auth_headers=None: entries,
+        ) as mock_remap,
+    ):
+        mock_ctx = AsyncMock()
+        mock_ctx.post = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await upload_measure_bundle(
+            input_bundle,
+            _ACTIVE_MCS,
+            auth_headers={"Authorization": "Bearer tok"},
+        )
+
+    mock_remap.assert_awaited_once()
+    remap_base = mock_remap.await_args.args[2]
+    assert remap_base == _ACTIVE_MCS
+    assert remap_base != settings.MEASURE_ENGINE_URL
+    assert mock_remap.await_args.args[3] == {"Authorization": "Bearer tok"}
+
+
+async def test_delete_measure_targets_passed_base_url():
+    """delete_measure DELETEs against the passed base_url with its auth headers."""
+    from app.config import settings
+
+    mock_response = _make_response(204, {})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await delete_measure("CMS122", _ACTIVE_MCS, auth_headers={"Authorization": "Bearer tok"})
+
+    called_url = mock_ctx.delete.await_args.args[0]
+    assert called_url == f"{_ACTIVE_MCS}/Measure/CMS122"
+    assert settings.MEASURE_ENGINE_URL not in called_url
+    assert mock_ctx.delete.await_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
+
+
+async def test_remap_valueset_ids_queries_passed_base_url():
+    """_remap_valueset_ids_for_hapi resolves existing ValueSets on the upload target.
+
+    Querying the env-var engine here would rewrite ids to values that don't
+    exist on the server the bundle is about to be POSTed to.
+    """
+    from app.config import settings
+
+    entries = [
+        {
+            "resource": {"resourceType": "ValueSet", "id": "1014", "url": "http://vs.example.com/1014"},
+            "request": {"method": "PUT", "url": "ValueSet/1014"},
+        }
+    ]
+    existing = {"entry": [{"resource": {"id": "1014-20240112"}}]}
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=_make_response(200, existing))
+
+    out = await _remap_valueset_ids_for_hapi(entries, client, _ACTIVE_MCS, {"Authorization": "Bearer tok"})
+
+    called_url = client.get.await_args.args[0]
+    assert called_url == f"{_ACTIVE_MCS}/ValueSet"
+    assert settings.MEASURE_ENGINE_URL not in called_url
+    assert client.get.await_args.kwargs["headers"] == {"Authorization": "Bearer tok"}
+    # And the remap itself still happened.
+    assert out[0]["resource"]["id"] == "1014-20240112"
+    assert out[0]["request"]["url"] == "ValueSet/1014-20240112"
+
+
+# ---------------------------------------------------------------------------
+# measure_exists
+# ---------------------------------------------------------------------------
+
+
+async def test_measure_exists_true_when_total_positive():
+    """total > 0 in the count bundle means the measure is present."""
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle", "total": 1}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        assert await measure_exists("CMS122", _ACTIVE_MCS) is True
+
+    assert mock_ctx.get.await_args.args[0] == f"{_ACTIVE_MCS}/Measure"
+    assert mock_ctx.get.await_args.kwargs["params"] == {"_id": "CMS122", "_summary": "count"}
+
+
+async def test_measure_exists_false_when_total_zero():
+    """total == 0 means the measure is absent — a normal answer, not an error."""
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle", "total": 0}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        assert await measure_exists("CMS122", _ACTIVE_MCS) is False
+
+
+async def test_measure_exists_propagates_transport_errors():
+    """Connection failures must NOT be swallowed into False.
+
+    POST /jobs distinguishes "measure absent" (400) from "MCS unreachable"
+    (502); collapsing the two here would make that impossible.
+    """
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(httpx.ConnectError):
+            await measure_exists("CMS122", _ACTIVE_MCS)
+
+
+async def test_measure_exists_propagates_http_status_errors():
+    """A 500 from the MCS raises rather than reporting the measure as missing."""
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=_make_response(500, {"resourceType": "OperationOutcome"}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await measure_exists("CMS122", _ACTIVE_MCS)
 
 
 # ---------------------------------------------------------------------------
@@ -1398,13 +2024,52 @@ async def test_data_requirements_strategy_uses_requirements():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
     assert len(resources) == 2
     types = {r["resourceType"] for r in resources}
     assert types == {"Patient", "Observation"}
+
+
+async def test_data_requirements_targets_the_jobs_mcs_with_credentials():
+    """$data-requirements goes to the job's MCS, authenticated (issue #397).
+
+    It previously read settings.MEASURE_ENGINE_URL with no credentials, so a job
+    against a remote MCS asked the LOCAL engine what data the measure needs — and
+    silently fell back to $everything when that answer was wrong or the call 401'd.
+    """
+    seen: dict[str, object] = {}
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            seen["url"] = url
+            seen["headers"] = kwargs.get("headers")
+            return _make_response(200, {"resourceType": "Library", "dataRequirement": [{"type": "Patient"}]})
+        return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy(
+            "m1",
+            mcs_url="https://mcs.example.org/fhir",
+            mcs_auth_headers={"Authorization": "Bearer tok-dr"},
+        )
+        await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    assert seen["url"] == "https://mcs.example.org/fhir/Measure/m1/$data-requirements"
+    assert seen["headers"] == {"Authorization": "Bearer tok-dr"}
+
+
+async def test_data_requirements_requires_an_mcs_url():
+    """No env-var default — the caller must say which engine to ask."""
+    with pytest.raises(TypeError):
+        DataRequirementsStrategy("m1")  # type: ignore[call-arg]
 
 
 async def test_data_requirements_strategy_falls_back_on_empty():
@@ -1431,7 +2096,7 @@ async def test_data_requirements_strategy_falls_back_on_empty():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -1462,7 +2127,7 @@ async def test_data_requirements_strategy_falls_back_on_error():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -1499,7 +2164,7 @@ async def test_data_requirements_strategy_fetch_fails_falls_back_to_everything()
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -1535,7 +2200,7 @@ async def test_data_requirements_strategy_dedup_skips_duplicate_types():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -1563,7 +2228,7 @@ async def test_data_requirements_strategy_non_200_patient_not_appended():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -1593,7 +2258,7 @@ async def test_data_requirements_strategy_non_200_resource_entries_skipped():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -1636,7 +2301,7 @@ async def test_fetch_by_requirements_code_filter_appends_code_in():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -1674,7 +2339,7 @@ async def test_fetch_by_requirements_date_filter_does_not_add_params():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
 
     obs_url = next((u for u in captured_urls if "Observation" in u), None)
@@ -1709,7 +2374,7 @@ async def test_fetch_by_requirements_no_filter_type_only():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -1750,7 +2415,7 @@ async def test_fetch_by_requirements_one_type_fails_partial_result_no_fallback()
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
         resources = gather_result.resources
 
@@ -1776,7 +2441,7 @@ async def test_data_requirements_strategy_gather_patients_delegates_to_batch():
         mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        strategy = DataRequirementsStrategy("m1")
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
         patients = await strategy.gather_patients("http://cdr/fhir", {})
 
     assert len(patients) == 1
@@ -1852,3 +2517,94 @@ def test_wait_for_valueset_expansion_logs_timeout(monkeypatch, caplog):
 
     assert expanded == {}
     assert "ValueSet expansion timed out" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# MCS auth wiring — evaluate_measure / resolve_evaluated_resource
+# (regression: remote MCS connections got 401 because no auth was ever sent)
+# ---------------------------------------------------------------------------
+
+
+async def test_evaluate_measure_sends_auth_headers(mock_measure_report):
+    """evaluate_measure forwards auth headers to the MCS."""
+    mock_response = _make_response(200, mock_measure_report)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await evaluate_measure(
+            "measure-1",
+            "patient-1",
+            "2024-01-01",
+            "2024-12-31",
+            measure_engine_url="https://mcs.example.org/fhir",
+            auth_headers={"Authorization": "Bearer tok-123"},
+        )
+
+    sent = mock_ctx.get.call_args.kwargs.get("headers")
+    assert sent is not None, "evaluate_measure must pass headers to the MCS"
+    assert sent.get("Authorization") == "Bearer tok-123"
+
+
+async def test_evaluate_measure_without_auth_sends_no_authorization(mock_measure_report):
+    """Unauthenticated MCS (local HAPI) keeps working — no Authorization header."""
+    mock_response = _make_response(200, mock_measure_report)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await evaluate_measure("measure-1", "patient-1", "2024-01-01", "2024-12-31")
+
+    sent = mock_ctx.get.call_args.kwargs.get("headers") or {}
+    assert "Authorization" not in sent
+
+
+async def test_resolve_evaluated_resource_uses_given_base_and_auth():
+    """Snapshot reads target the job's MCS with its credentials, not the env default."""
+    mock_response = _make_response(200, {"resourceType": "Condition", "id": "c1"})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await resolve_evaluated_resource(
+            "Condition/c1",
+            base_url="https://mcs.example.org/fhir",
+            auth_headers={"Authorization": "Bearer tok-123"},
+        )
+
+    assert mock_ctx.get.call_args[0][0] == "https://mcs.example.org/fhir/Condition/c1"
+    assert mock_ctx.get.call_args.kwargs.get("headers", {}).get("Authorization") == "Bearer tok-123"
+
+
+# ---------------------------------------------------------------------------
+# McsTarget (issue #397 slice 3)
+# ---------------------------------------------------------------------------
+
+
+def test_mcs_target_is_frozen():
+    """Immutable on purpose: it is threaded through ~16 call sites, and a helper
+    mutating the shared target would silently re-point every later call."""
+    from dataclasses import FrozenInstanceError
+
+    from app.services.fhir_client import McsTarget
+
+    t = McsTarget(url="https://mcs.example.org/fhir", auth_headers={}, is_read_only=False, wipe_before_job=False)
+    with pytest.raises(FrozenInstanceError):
+        t.url = "https://elsewhere.example.org/fhir"  # type: ignore[misc]
+
+
+def test_mcs_target_requires_every_field():
+    """No defaults. A default target is exactly how issue #397 stayed invisible."""
+    from app.services.fhir_client import McsTarget
+
+    with pytest.raises(TypeError):
+        McsTarget(url="https://mcs.example.org/fhir")  # type: ignore[call-arg]

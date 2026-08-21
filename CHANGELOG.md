@@ -2,6 +2,39 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.0.22.0] - 2026-08-20
+
+### Fixed
+- **Validation now runs against the measure engine connection you selected.** It always ran against Lenny's own local container, no matter which MCS connection was active — so "validate my measures" quietly answered a question about a different server than the one in front of you. Uploading a test bundle, reloading measures, pushing patient data and evaluating each patient all now go to the connection you chose, with its credentials. (#397)
+- **A validation run no longer deletes other people's patient data.** Every run began by deleting *all* patients from the measure engine. That was invisible while it only ever hit the local container; pointing validation at a shared or connectathon server would have wiped every other participant's test data with no prompt and no undo. A run now deletes only the patients it is about to evaluate. Your numbers do not change: evaluation is per-patient, so patients a run never evaluates could never have affected its results. Connections with "delete all patient data before each job" ticked keep the full wipe, same as jobs. (#397, same bug class as #392)
+- **A queued validation run sticks to the connection it was started on.** Now that runs follow the connection you selected (above), which one that is has to be pinned when you press Start: each run records it internally — name, URL, and whether credentials were involved — and executes against it even if you switch connections while the run waits in the queue. Runs no longer store nothing about where they ran, so a stored pass/fail result is no longer a claim about correctness with nothing attached saying which server produced it. That record is not visible yet, though: the runs list and run detail views still do not show the server, so reading it back today means querying the database. Surfacing it in the API and the UI is follow-up work. (#397)
+
+### Changed
+- **A read-only measure engine connection now refuses validation instead of ignoring the flag.** Validation has to write measures, terminology and patient data to the engine to produce a result, so it can no longer run against a connection you have marked read-only: uploading a test bundle is rejected before anything is written, and starting a run fails immediately with the reason on screen. **This is a behavior change.** If you marked your measure engine read-only and still expect validation to run, it will now stop. Switch to a writable connection, or clear the read-only flag. The alternative was a run that half-writes to a server you asked Lenny not to write to. (#397)
+
+## [0.0.21.0] - 2026-08-19
+
+### Fixed
+- **Admin controls now act on the measure engine you are actually connected to.** "Wipe measure engine" and the measure-engine half of Factory Reset both targeted Lenny's own local container regardless of which MCS connection was active. Connected to a remote server, you got a success message while the server in front of you kept all its data — and the local one silently lost its measure definitions. Both now follow the active connection and send its credentials. (#397)
+- **Comparison view says what actually went wrong.** When Lenny could not resolve a job's measure on the measure engine, the Results comparison returned an empty result, which read as "No expected results available for this measure and period. Load a connectathon bundle via Settings" — advice that sends you to load data you already have. It now reports the real problem, and distinguishes an unreachable server from one that rejected the request for credentials. A measure that genuinely is not on the server still shows the empty state, because that is not an error. (#397)
+- **A job's comparison and evaluated-resource views resolve against the server that job ran on.** Both read the environment default, so for a job that ran against a remote MCS they queried the wrong server and returned nothing useful. (#397)
+- **`$data-requirements` asks the job's own measure engine.** It asked the local engine what a remote job's measure needed, then quietly fell back to fetching everything when the answer was wrong or the call was rejected. Only affects installs running `PATIENT_DATA_STRATEGY=data_requirements`. (#397)
+
+### Added
+- **Read-only connections are now respected by destructive admin operations.** Marking a connection read-only previously did nothing for these paths: "Wipe measure engine" would wipe a server you had flagged, and Factory Reset ignored the flag on both the CDR and the measure engine. The admin wipe now refuses outright, and Factory Reset skips that step, names the reason on screen, and still completes its other steps. (#397)
+
+## [0.0.20.0] - 2026-08-19
+
+### Fixed
+- **Running a job against a shared measure server no longer deletes other people's patient data.** Every job used to begin by deleting all patients from the target measure engine — correct for Lenny's own container, destructive once you point Lenny at a connectathon or shared server, where it silently removed every other participant's test data with no prompt and no way to undo. Jobs now delete only the patients they are about to evaluate. Measure results are unchanged: evaluation is per-patient, so patients a job never evaluates could never have affected its numbers. (#392)
+- **Wiping now works against measure servers that reject bulk deletes.** When a server refuses a conditional delete that matches multiple resources (`allow_multiple_delete` disabled, which Lenny's own containers enable but a shared server may not), Lenny falls back to deleting each resource individually instead of reporting success having deleted nothing. (#392)
+
+### Added
+- **"Delete all patient data before each job" setting on each measure engine connection.** Off for every connection you create, so a shared server is safe by default. Ticking it shows a warning naming exactly what it will do, and any connection with it enabled carries a "full wipe" badge in the connections list. The built-in Local Measure Engine keeps its existing full-wipe behavior with no action needed from you. (#392)
+
+### Changed
+- **The pre-job cleanup now runs after Lenny gathers patients, instead of at job start.** It needs to know which patients to clean. One visible consequence: a job that finds zero patients no longer clears the local measure engine as a side effect. (#392)
+
 ## [0.0.19.3] - 2026-06-09
 
 ### Fixed

@@ -50,6 +50,7 @@ export default function KebabMenu({ items }) {
                 key={i}
                 role="menuitem"
                 disabled={disabled}
+                title={item.title}
                 className={`${styles.item} ${item.tone === 'destructive' ? styles.itemDestructive : ''} ${disabled ? styles.itemDisabled : ''}`}
                 onClick={() => { if (!disabled) { setOpen(false); item.onClick(); } }}
               >

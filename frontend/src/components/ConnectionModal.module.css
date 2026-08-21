@@ -110,6 +110,19 @@
   cursor: pointer;
 }
 
+/* Shown when a user opts a measure engine into the destructive full wipe
+   (issue #392). Warning rather than error styling: it is a legitimate choice for
+   an engine you own, but it needs to state what it does before you save. */
+.warningBanner {
+  margin-top: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--color-warning-light);
+  color: var(--color-warning);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+}
+
 .errorBanner {
   padding: var(--space-3) var(--space-4);
   background: var(--color-error-light);

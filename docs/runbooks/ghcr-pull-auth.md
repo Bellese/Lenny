@@ -22,7 +22,13 @@ No GHCR login step is needed. `docker compose pull` will pull from
 
 ## Verification
 
-> **Note (2026-05-06):** Production currently runs vanilla `hapiproject/hapi:v8.8.0-1`, not the pre-baked GHCR images. The steps below apply only if prod is switched to prebaked. For CI verification, this section remains accurate.
+> **Note (superseded 2026-08-21):** the earlier note here said production runs vanilla `hapiproject/hapi:v8.8.0-1` rather than GHCR images. That was wrong. `/opt/leonard/.env` pins `HAPI_CDR_IMAGE`/`HAPI_MEASURE_IMAGE` to `ghcr.io/bellese/mct2-hapi-*:latest` — the **pre-rename** package names, which return 403. Every prod deploy logs:
+>
+> ```
+> hapi-fhir-cdr Error Head "https://ghcr.io/v2/bellese/mct2-hapi-cdr/manifests/latest": denied: denied
+> ```
+>
+> `--ignore-pull-failures` swallows it, so prod keeps running a stale cached image and the weekly bake never lands there. Note this is *not* a pull-auth problem — `lenny-hapi-*` is public and pulls fine unauthenticated; the pinned names are simply obsolete. Tracked separately; see `docs/deploy.md` § Production and GHCR.
 
 After deploy (if using prebaked images), confirm images are present:
 
@@ -43,3 +49,4 @@ artifacts (HAPI binary, connectathon bundles, IGs) — no secrets.
 
 - Issue #200 — the decision to make packages public
 - Bake workflow: `.github/workflows/bake-hapi-image.yml`
+- `docs/deploy.md` — GHCR's role in the pipeline, and the stale prod pin

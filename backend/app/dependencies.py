@@ -13,6 +13,7 @@ unchanged. The alias will be removed once all call sites migrate to
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from fastapi import Depends
 from sqlalchemy import select
@@ -23,6 +24,94 @@ from app.db import get_session
 from app.models.config import AuthType, CDRConfig
 from app.models.connection_base import ConnectionKind
 from app.models.mcs_config import MCSConfig
+
+if TYPE_CHECKING:
+    # Type-checking only — never executed, so this cannot create the runtime
+    # import cycle `_build_auth_headers` (below) is deliberately imported locally
+    # to avoid. Needed solely so `mcs_target_from_context`'s `-> McsTarget` return
+    # annotation resolves.
+    from app.services.fhir_client import McsTarget
+
+
+async def resolve_mcs_auth_headers(
+    session: AsyncSession,
+    *,
+    mcs_id: int | None,
+    mcs_url: str | None,
+    mcs_auth_type: str | None,
+    owner_label: str,
+) -> dict[str, str]:
+    """Resolve MCS credentials from the live config for any snapshot-carrying row.
+
+    Takes the three snapshot FIELDS rather than a row id, so both `Job` and
+    `ValidationRun` use one implementation (issue #397 slice 3). `owner_label`
+    (e.g. "job 12", "validation run 4") only shapes the error messages.
+
+    `mcs_id` is ON DELETE SET NULL on both tables, so a NULL id means EITHER "this
+    row never had an MCS config" OR "the config was deleted after creation". The
+    snapshotted `mcs_auth_type` is what tells them apart: without that check, a row
+    whose connection was deleted would run unauthenticated against the
+    still-snapshotted URL.
+    """
+    from app.services.fhir_client import _build_auth_headers
+
+    if mcs_id is None:
+        if not mcs_auth_type or mcs_auth_type == "none":
+            return {}
+        raise RuntimeError(
+            f"{owner_label} has no mcs_id — MCS config was deleted after creation. Cannot fetch auth credentials."
+        )
+    cfg = await session.get(MCSConfig, mcs_id)
+    if cfg is None:
+        # Defensive: unreachable under the ON DELETE SET NULL FK, but a database
+        # without the constraint enforced would land here.
+        raise RuntimeError(f"MCS config {mcs_id} referenced by {owner_label} no longer exists.")
+    if mcs_url and cfg.mcs_url != mcs_url:
+        # The URL comes from the snapshot but credentials are read live, so a config
+        # repointed at a different host would hand the new host's token to the old one.
+        raise RuntimeError(
+            f"MCS config {mcs_id} now points at a different server than {owner_label} "
+            "was created against. Refusing to send its credentials to the snapshotted URL."
+        )
+    return await _build_auth_headers(cfg.auth_type, cfg.auth_credentials)
+
+
+async def resolve_job_mcs_auth_headers(session: AsyncSession, job_id: int) -> dict[str, str]:
+    """Job-shaped wrapper over `resolve_mcs_auth_headers`.
+
+    Kept so slice 2's call sites (routes/jobs.py, routes/results.py,
+    orchestrator._get_mcs_auth_headers) are unchanged.
+    """
+    from app.models.job import Job
+
+    job = await session.get(Job, job_id)
+    if job is None:
+        return {}
+    return await resolve_mcs_auth_headers(
+        session,
+        mcs_id=job.mcs_id,
+        mcs_url=job.mcs_url,
+        mcs_auth_type=job.mcs_auth_type,
+        owner_label=f"Job {job_id}",
+    )
+
+
+async def mcs_target_from_context(ctx: ConnectionContext) -> McsTarget:
+    """Build a pipeline-ready `McsTarget` from an active-connection context.
+
+    Lives here rather than on `McsTarget` itself because it needs
+    `_build_auth_headers`, and `fhir_client` (where `McsTarget` is defined) must not
+    import this module — `dependencies` already imports `fhir_client`, so the
+    reverse direction would be an import cycle.
+    """
+    from app.services.fhir_client import McsTarget, _build_auth_headers
+
+    return McsTarget(
+        url=ctx.mcs_url,
+        auth_headers=await _build_auth_headers(ctx.auth_type, ctx.auth_credentials),
+        is_read_only=ctx.is_read_only,
+        wipe_before_job=ctx.wipe_before_job,
+    )
 
 
 @dataclass
@@ -45,7 +134,11 @@ class ConnectionContext:
     is_default: bool
     cdr_url: str = ""
     mcs_url: str = ""
-    is_read_only: bool = False  # CDR-specific; default for other kinds
+    is_read_only: bool = False  # Shared across kinds (issue #396) — blocks writes
+    # MCS-only (issue #392). True = a job full-wipes the target before running;
+    # False = it wipes only the patients it is about to push. Always False for a
+    # CDR context, which is never wiped as part of a job.
+    wipe_before_job: bool = False
     request_timeout_seconds: int = 30
     kind: ConnectionKind = ConnectionKind.cdr
 
@@ -112,6 +205,15 @@ async def get_active_mcs(session: AsyncSession = Depends(get_session)) -> Connec
             auth_credentials=None,
             is_default=True,
             mcs_url=settings.MEASURE_ENGINE_URL,
+            # The built-in local measure engine is writable — uploading and
+            # deleting measure bundles against it is the whole point.
+            is_read_only=False,
+            # ...and it is Lenny's own container, so the historical full wipe is
+            # correct here (issue #392). This fallback fires on a stock install
+            # before the seed has run; defaulting it to False would silently
+            # change local behavior for exactly the users who never configured
+            # anything.
+            wipe_before_job=True,
             request_timeout_seconds=30,
             kind=ConnectionKind.mcs,
         )
@@ -122,6 +224,8 @@ async def get_active_mcs(session: AsyncSession = Depends(get_session)) -> Connec
         auth_credentials=cfg.auth_credentials,
         is_default=cfg.is_default,
         mcs_url=cfg.mcs_url,
+        is_read_only=cfg.is_read_only,
+        wipe_before_job=cfg.wipe_before_job,
         request_timeout_seconds=cfg.request_timeout_seconds,
         kind=ConnectionKind.mcs,
     )

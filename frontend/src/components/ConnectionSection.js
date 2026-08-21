@@ -13,6 +13,7 @@ import ConnectionModal from './ConnectionModal';
 import ConfirmDialog from './ConfirmDialog';
 import OperationOutcomeView from './OperationOutcomeView';
 import { useToast } from './Toast';
+import { useConnection } from '../contexts/ConnectionContext';
 
 const KIND_API = {
   cdr: {
@@ -29,7 +30,10 @@ const KIND_API = {
     title: 'MCS Connections',
     addLabel: 'Add MCS connection',
     urlField: 'mcs_url',
-    showReadOnlyBadge: false,
+    showReadOnlyBadge: true,
+    // Issue #392: surface the destructive opt-in on the row, so a full-wipe
+    // connection is visible without opening the edit modal.
+    showWipeBadge: true,
     list: getMcsConnections,
     activate: activateMcsConnection,
     remove: deleteMcsConnection,
@@ -42,6 +46,7 @@ const AUTH_LABEL = { none: 'No Auth', basic: 'Basic', bearer: 'Bearer', smart: '
 export default function ConnectionSection({ kind, onChange }) {
   const api = KIND_API[kind];
   const toast = useToast();
+  const { refresh } = useConnection();
   const [connections, setConnections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
@@ -77,6 +82,10 @@ export default function ConnectionSection({ kind, onChange }) {
       await api.activate(id);
       await load();
       onChange?.();
+      // Push an immediate health probe instead of waiting up to 30s for the
+      // next poll tick — otherwise the UI still names the old connection
+      // right after switching (#396).
+      refresh();
     } catch (err) {
       toast.error(err.message || 'Failed to activate connection');
     }
@@ -159,6 +168,14 @@ export default function ConnectionSection({ kind, onChange }) {
                       <span className={styles.connBadge}>{AUTH_LABEL[conn.auth_type] || conn.auth_type || 'No Auth'}</span>
                       {api.showReadOnlyBadge && conn.is_read_only && (
                         <span className={`${styles.connBadge} ${styles.connBadgeReadOnly}`}>read-only</span>
+                      )}
+                      {api.showWipeBadge && conn.wipe_before_job && (
+                        <span
+                          className={`${styles.connBadge} ${styles.connBadgeFullWipe}`}
+                          title="Every job deletes ALL patient data on this server before running"
+                        >
+                          full wipe
+                        </span>
                       )}
                     </div>
                     <div className={styles.connActions}>

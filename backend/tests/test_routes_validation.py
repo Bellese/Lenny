@@ -130,6 +130,53 @@ class TestStartValidationRun:
         assert data["status"] == "queued"
         assert "id" in data
 
+    @pytest.mark.asyncio
+    async def test_start_validation_snapshots_the_active_mcs(self, client, test_session):
+        """A validation result is a correctness claim; it needs provenance (issue #397).
+
+        Without the snapshot, switching connections makes last week's "33/33 passed"
+        describe a server nobody can identify.
+        """
+        from sqlalchemy import select as sa_select
+        from sqlalchemy import update as sa_update
+
+        from app.models.connection_base import AuthType
+        from app.models.mcs_config import MCSConfig
+
+        await test_session.execute(sa_update(MCSConfig).values(is_active=False))
+        cfg = MCSConfig(
+            name="Remote MCS",
+            mcs_url="https://mcs.example.org/fhir",
+            auth_type=AuthType.bearer,
+            auth_credentials={"token": "tok-vr"},
+            is_active=True,
+            wipe_before_job=True,
+        )
+        test_session.add(cfg)
+        test_session.add(
+            ExpectedResult(
+                measure_url="http://cms.gov/M1",
+                patient_ref="p1",
+                expected_populations={"initial-population": 1},
+                period_start="2024-01-01",
+                period_end="2024-12-31",
+                source_bundle="test.json",
+            )
+        )
+        await test_session.commit()
+        await test_session.refresh(cfg)
+
+        resp = await client.post("/validation/run", json={})
+        assert resp.status_code in (200, 201), resp.text
+        run_id = resp.json()["id"]
+
+        run = (await test_session.execute(sa_select(ValidationRun).where(ValidationRun.id == run_id))).scalar_one()
+        assert run.mcs_url == "https://mcs.example.org/fhir"
+        assert run.mcs_id == cfg.id
+        assert run.mcs_name == "Remote MCS"
+        assert run.mcs_auth_type == "bearer"
+        assert run.mcs_wipe_before_job is True
+
 
 # ---------------------------------------------------------------------------
 # GET /validation/runs

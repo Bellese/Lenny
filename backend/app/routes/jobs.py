@@ -15,11 +15,18 @@ from sqlalchemy.orm import noload
 
 from app.config import settings
 from app.db import get_session
-from app.dependencies import CDRContext, ConnectionContext, get_active_cdr, get_active_mcs
+from app.dependencies import (
+    CDRContext,
+    ConnectionContext,
+    get_active_cdr,
+    get_active_mcs,
+    resolve_job_mcs_auth_headers,
+)
 from app.models.job import BatchStatus, Job, JobStatus, MeasureResult
 from app.models.validation import ExpectedResult
-from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups
-from app.services.validation import _extract_population_counts, compare_populations
+from app.services.fhir_client import _build_auth_headers, _validate_ssrf_url, list_groups, measure_exists
+from app.services.fhir_errors import sanitize_url
+from app.services.validation import _extract_population_counts, compare_populations, sanitize_error
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/jobs", tags=["jobs"])
@@ -31,6 +38,12 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
 _GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,256}$")
+
+# Ceiling for the `measure_exists` pre-flight on POST /jobs. The connection's own
+# `request_timeout_seconds` (up to 1800s) is sized for measure evaluation, not for
+# a `_summary=count` lookup on an interactive request. Taken as a min() with the
+# connection value so a deliberately short connection timeout still wins.
+_PREFLIGHT_TIMEOUT_SECONDS = 10
 
 
 class JobCreate(BaseModel):
@@ -199,6 +212,69 @@ async def create_job(
             )
     cdr_url = body.cdr_url or cdr.cdr_url
 
+    # Confirm the measure actually lives on the MCS this job will run against,
+    # before a Job row exists. Otherwise the job queues, starts, and fails deep
+    # in the worker with an opaque error — the user's real mistake being that
+    # they switched to an MCS that doesn't carry this measure.
+    #
+    # Deliberately NOT mcs.request_timeout_seconds: that is sized for measure
+    # evaluation, which legitimately runs for many minutes (cap is 1800s), and
+    # this is an interactive request. The pre-flight is a metadata count query;
+    # if the MCS can't answer it in 10s, "unreachable → 502" is the right answer.
+    #
+    # `_build_auth_headers` is inside the `try` on purpose: SMART auth makes a
+    # token-endpoint round trip, so credential resolution fails the same ways
+    # the count query does and deserves the same 502 OperationOutcome rather
+    # than a bare 500. (Unlike the measures routes, nothing in this `except`
+    # chain special-cases a status code, so no mis-mapping is possible here.)
+    try:
+        mcs_auth_headers = await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
+        found = await measure_exists(
+            body.measure_id,
+            mcs.mcs_url,
+            auth_headers=mcs_auth_headers,
+            timeout=float(min(mcs.request_timeout_seconds, _PREFLIGHT_TIMEOUT_SECONDS)),
+        )
+    except Exception as exc:
+        logger.warning(
+            "Measure existence check failed",
+            extra={"measure_id": body.measure_id, "mcs_id": mcs.id, "mcs_name": mcs.name},
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "diagnostics": (
+                            f"Cannot reach measure calculation server '{mcs.name}' to verify "
+                            f"measure '{body.measure_id}': {sanitize_error(exc)}"
+                        ),
+                    }
+                ],
+            },
+        ) from exc
+    if not found:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "not-found",
+                        "diagnostics": (
+                            f"Measure '{body.measure_id}' does not exist on the active measure "
+                            f"calculation server '{mcs.name}'. Upload it there, or switch to an "
+                            f"MCS connection that has it."
+                        ),
+                    }
+                ],
+            },
+        )
+
     job = Job(
         measure_id=body.measure_id,
         measure_name=body.measure_name,
@@ -214,6 +290,8 @@ async def create_job(
         mcs_url=mcs.mcs_url,
         mcs_name=mcs.name,
         mcs_id=mcs.id if mcs.id else None,
+        mcs_auth_type=mcs.auth_type.value if mcs.auth_type else None,
+        mcs_wipe_before_job=mcs.wipe_before_job,
     )
     session.add(job)
     await session.commit()
@@ -437,14 +515,69 @@ async def get_job_comparison(
             },
         )
 
+    # Resolve the measure against the MCS this job actually ran on, with that job's
+    # credentials (issue #397). Reading settings.MEASURE_ENGINE_URL asked the local
+    # container about a job that ran elsewhere, and sending no credentials meant an
+    # authenticated remote MCS 401'd — which the bare `except` then swallowed.
+    mcs_url = job.mcs_url or settings.MEASURE_ENGINE_URL
     measure_url = ""
     try:
+        # Raises if the linked config now points at a different host than the job
+        # snapshotted — refusing to send its credentials to the new one. Runs on the
+        # request's session rather than opening its own.
+        mcs_auth_headers = await resolve_job_mcs_auth_headers(session, job_id)
         async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.get(f"{settings.MEASURE_ENGINE_URL}/Measure/{job.measure_id}")
-            if resp.status_code == 200:
-                measure_url = resp.json().get("url", "")
-    except Exception:
-        logger.warning("Could not resolve measure URL for comparison", extra={"measure_id": job.measure_id})
+            resp = await client.get(f"{mcs_url}/Measure/{job.measure_id}", headers=mcs_auth_headers)
+        if resp.status_code == 200:
+            measure_url = resp.json().get("url", "")
+        elif resp.status_code == 404:
+            # The engine answered and the measure is not there. That is a real
+            # empty result, not an outage — see the 502 branch below.
+            logger.info(
+                "Measure not found on the job's MCS; comparison has no expected results",
+                extra={"job_id": job_id, "measure_id": job.measure_id, "mcs_url": sanitize_url(mcs_url)},
+            )
+            return _empty_comparison_response()
+        elif resp.status_code in (401, 403):
+            # "Could not reach" would be wrong here — the engine answered and
+            # refused. Naming credentials is the difference between a useful
+            # message and another wrong diagnosis.
+            raise RuntimeError(
+                f"the measure engine rejected the request (HTTP {resp.status_code}). "
+                "Check the credentials on the MCS connection this job ran against"
+            )
+        else:
+            raise RuntimeError(f"measure lookup returned HTTP {resp.status_code}")
+    except Exception as exc:
+        # Distinguishing "could not ask" from "asked, nothing there" is the point.
+        # This used to return 200 + empty, which the UI renders as "No expected
+        # results available — load a connectathon bundle", sending the user to load
+        # data they already have when the real fault was auth or connectivity.
+        logger.warning(
+            "Could not resolve measure URL for comparison",
+            extra={
+                "job_id": job_id,
+                "measure_id": job.measure_id,
+                "mcs_url": sanitize_url(mcs_url),
+                "error": sanitize_error(exc),
+            },
+        )
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "exception",
+                        "diagnostics": (
+                            f"Could not resolve measure '{job.measure_id}' on the measure engine "
+                            f"this job ran against, so comparison is unavailable: {sanitize_error(exc)}"
+                        ),
+                    }
+                ],
+            },
+        )
 
     if not measure_url:
         return _empty_comparison_response()

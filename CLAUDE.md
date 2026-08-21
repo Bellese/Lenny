@@ -71,7 +71,13 @@ If the change is documentation-only (`*.md`, no code), steps 1–4 are not requi
 
 ## Architecture
 
-5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (bundles + IGs baked into the image, PR #199). Production currently runs vanilla `hapiproject/hapi:v8.8.0-1` — the `seed` service POSTs the connectathon bundles into a persistent H2 volume on first boot, and the volume keeps them warm across redeploys. Whether to switch prod to prebaked is an open question; see `docs/decisions.md`. Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`.
+5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (bundles + IGs baked into the image, PR #199).
+
+**Production does NOT use the prebaked overlay** — `deploy-prod.sh` runs `docker-compose.yml` + `docker-compose.prod.yml` only, so the `cdrdata`/`measuredata` volumes mount over `/data/hapi` and shadow any baked H2 store. Prod data is what the `seed` service loaded into those volumes; it persists across redeploys.
+
+Prod's `/opt/leonard/.env` *does* pin `HAPI_CDR_IMAGE`/`HAPI_MEASURE_IMAGE`, but at the pre-rename `ghcr.io/bellese/mct2-hapi-*:latest` names, which 403 (PR #261 renamed the packages on 2026-05-04 but couldn't touch that file — it's not in git). `compose pull --ignore-pull-failures` swallows the error every deploy, so prod's HAPI **binary** is frozen on an image cached before that date, while its config (from `docker-compose.yml`, refreshed from git) and data (from the volumes) stay current. **That image exists only in that instance's local Docker cache — not in any registry — so prod is not reproducible from git and an instance rebuild cannot restore it.** Don't describe prod as running vanilla `hapiproject/hapi` — it isn't; don't assume a bake reaches prod — it doesn't; and don't assume prod can be rebuilt from this repo — it can't, until the pin is fixed. See `docs/deploy.md`.
+
+Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`. **End-to-end prod CI/CD pipeline, GHCR's role, and the inventory of everything outside this repo: `docs/deploy.md`.**
 
 ## Code Conventions
 
@@ -117,8 +123,16 @@ Shortcuts: bug fixes start at Build (use `/investigate` for root cause); small t
 - **Trigger:** `push` to `main` (auto-deploy on every merge) + manual `workflow_dispatch`. Concurrency group `deploy-production`, `cancel-in-progress: false` — deploys are serialized.
 - **Deploy mechanism:** GitHub Actions → AWS OIDC role `arn:aws:iam::439475769170:role/leonard-github-deploy` → `aws ssm send-command --document-name leonard-deploy --instance-ids i-0f00585639d2f3ef1`. Poll loop with 64 × 15s (~16 min budget) checking `aws ssm get-command-invocation` status.
 - **Built-in workflow health check:** workflow polls `https://api.lenny.bellese.dev/health` 24 × 5s (~2 min budget) immediately after the SSM command succeeds. Deploy fails if the URL doesn't respond within that window.
-- **Merge method:** squash (per repo settings + observed single-line PR-suffixed commits on `main`).
-- **Pre-merge hooks:** the `pr-checks.yml` workflow (Lint, Unit Tests + Coverage, Integration Tests, Frontend Build, Script Security Lint) gates merges via branch protection. The Deploy workflow does NOT re-run tests (deliberate — see in-line comment in `deploy.yml:23-27`); CI parity comes from branch protection requiring the PR's merge commit to be byte-identical to a tested commit.
+- **Merge method:** squash. Branch protection requires linear history, so merge commits are rejected on `main` (squash and rebase both work).
+- **Branch protection on `main`** (verified 2026-08-19). All six `pr-checks.yml` checks are required:
+  `Lint`, `Unit Tests + Coverage`, `Integration Tests`, `Frontend Build`, `Config Validation`, `Script Security Lint`.
+  - `strict: true` — a PR must be up to date with `main` and re-pass CI before merging. This is the mechanism behind the CI-parity claim below: the commit that deploys is the commit that was tested.
+  - `enforce_admins: true` — admins cannot merge past a red check either.
+  - No review approval required. Status checks are the gate; a solo maintainer can still merge.
+  - Force pushes and branch deletion on `main` are blocked.
+
+  Protection was absent until 2026-08-19 despite this file describing it, so anything merged before that date did **not** pass through this gate. `deploy.yml:23-27` also skips re-running tests on the strength of that guarantee, so the deploy pipeline's central assumption was unfounded for the same period. Both are now true; if protection is ever removed, that comment and this section become wrong together.
+- **Pre-merge hooks:** the `pr-checks.yml` workflow gates merges via the branch protection above. The Deploy workflow does NOT re-run tests (deliberate — see in-line comment in `deploy.yml:23-27`); CI parity comes from `strict: true` requiring the PR to be rebased onto current `main` and green before it can merge.
 
 ### Deploy status command (for `/land-and-deploy`)
 
@@ -141,7 +155,7 @@ curl -fsS -o /dev/null -w "%{http_code}" https://lenny.bellese.dev    # expect 2
 
 ### Staging
 
-No staging environment configured. All merges to `main` deploy straight to production. CI parity (pr-checks.yml passes before merge) is the safety gate.
+No staging environment configured. All merges to `main` deploy straight to production. Branch protection is the only safety gate: all six `pr-checks.yml` checks must pass, and `strict: true` forces the PR to be up to date with `main` first — so production runs the commit CI actually tested. There is no second chance after merge; the deploy fires immediately.
 
 ## Do NOT
 

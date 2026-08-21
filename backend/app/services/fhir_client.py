@@ -29,6 +29,33 @@ from app.services.fhir_errors import (
 
 logger = logging.getLogger(__name__)
 
+# Consecutive transport failures that abort a wipe. Shared by `wipe_patient_data`
+# and `wipe_patients_by_id`: a timed-out DELETE leaves HAPI's server-side
+# operation running, and pushing new data over it lets the in-flight DELETE wipe
+# the freshly-pushed resources.
+_MAX_CONSECUTIVE_FAILURES = 3
+
+
+@dataclass(frozen=True)
+class McsTarget:
+    """Which measure-calculation server a pipeline is working against (issue #397).
+
+    Carries RESOLVED auth headers rather than raw credentials so no helper deep in
+    the validation pipeline re-derives them, and carries the two connection flags so
+    no helper re-queries the database.
+
+    Frozen because it is threaded through roughly sixteen call sites: a helper
+    mutating a shared target would silently re-point every call after it.
+
+    Every field is required. The absence of a default is the point — the #397 bug
+    class is precisely a target that defaults to something the caller did not mean.
+    """
+
+    url: str
+    auth_headers: dict[str, str]
+    is_read_only: bool
+    wipe_before_job: bool
+
 
 @dataclass
 class FailedResourceFetch:
@@ -324,8 +351,22 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
     returns an empty list or raises any exception.
     """
 
-    def __init__(self, measure_id: str) -> None:
+    def __init__(
+        self,
+        measure_id: str,
+        mcs_url: str,
+        mcs_auth_headers: dict[str, str] | None = None,
+    ) -> None:
+        """`mcs_url` is REQUIRED — it names the engine to ask for data requirements.
+
+        It previously read `settings.MEASURE_ENGINE_URL`, so a job against a remote
+        MCS asked the LOCAL engine what data its measure needs (issue #397). The
+        answer was either wrong or a 401, and the strategy then quietly fell back to
+        `$everything` — a silent downgrade with no error surfaced.
+        """
         self._measure_id = measure_id
+        self._mcs_url = mcs_url
+        self._mcs_auth_headers = mcs_auth_headers or {}
         self._fallback = BatchQueryStrategy()
 
     async def gather_patients(
@@ -370,9 +411,9 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
 
     async def _get_data_requirements(self) -> list[dict[str, Any]]:
         """Call $data-requirements on MCS and return the dataRequirement entries."""
-        url = f"{settings.MEASURE_ENGINE_URL}/Measure/{self._measure_id}/$data-requirements"
+        url = f"{self._mcs_url}/Measure/{self._measure_id}/$data-requirements"
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url)
+            resp = await client.get(url, headers=self._mcs_auth_headers)
             resp.raise_for_status()
             library = resp.json()
             return library.get("dataRequirement", [])
@@ -767,6 +808,7 @@ async def evaluate_measure(
     period_start: str,
     period_end: str,
     measure_engine_url: str | None = None,
+    auth_headers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Call $evaluate-measure on the measure engine for a single patient.
 
@@ -776,6 +818,9 @@ async def evaluate_measure(
             haven't yet been wired to per-job active-MCS context. The
             orchestrator passes `job.mcs_url` so jobs run against the MCS
             that was active at job creation time, not whatever's active now.
+        auth_headers: Credentials for the MCS, resolved from the job's linked
+            MCSConfig. Omitted for unauthenticated engines (local HAPI). A
+            remote MCS rejects every evaluation with 401 without these.
 
     Raises FhirOperationError (with the MCS OperationOutcome preserved) on
     4xx/5xx responses and on 200 OK where the body is an OperationOutcome
@@ -796,7 +841,7 @@ async def evaluate_measure(
                 extra={"measure_id": measure_id, "patient_id": patient_id, "attempt": attempt + 1},
             )
             start_ms = int(time.monotonic() * 1000)
-            resp = await client.get(url)
+            resp = await client.get(url, headers=auth_headers or {})
             latency_ms = int(time.monotonic() * 1000) - start_ms
             try:
                 resp.raise_for_status()
@@ -858,7 +903,10 @@ async def evaluate_measure(
 
 
 async def _remap_valueset_ids_for_hapi(
-    entries: list[dict[str, Any]], client: httpx.AsyncClient
+    entries: list[dict[str, Any]],
+    client: httpx.AsyncClient,
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Rewrite ValueSet resource IDs to match existing HAPI resources.
 
@@ -866,6 +914,10 @@ async def _remap_valueset_ids_for_hapi(
     with a bare OID id (e.g. "…1014") but HAPI already holds the same url+version
     under a versioned id (e.g. "…1014-20240112"), the POST fails with HAPI-0902.
     Querying by URL and remapping the id turns the create into an in-place update.
+
+    `base_url` must be the same MCS the bundle is about to be POSTed to —
+    remapping against a different server would rewrite ids to values that don't
+    exist on the upload target.
     """
     for entry in entries:
         resource = entry.get("resource", {})
@@ -873,8 +925,9 @@ async def _remap_valueset_ids_for_hapi(
             continue
         try:
             resp = await client.get(
-                f"{settings.MEASURE_ENGINE_URL}/ValueSet",
+                f"{base_url}/ValueSet",
                 params={"url": resource["url"], "_count": "1"},
+                headers=auth_headers or {},
                 timeout=10,
             )
             if resp.status_code == 200:
@@ -893,32 +946,79 @@ async def _remap_valueset_ids_for_hapi(
     return entries
 
 
-async def upload_measure_bundle(bundle_json: dict[str, Any]) -> dict[str, Any]:
-    """POST a Measure bundle to the measure engine."""
-    async with httpx.AsyncClient(timeout=60.0) as client:
+async def upload_measure_bundle(
+    bundle_json: dict[str, Any],
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    """POST a Measure bundle to the measure engine.
+
+    `base_url` is REQUIRED — it identifies the active MCS connection. It is
+    deliberately not defaulted to `settings.MEASURE_ENGINE_URL`: a default is
+    exactly how issue #396 (measure management ignoring the connected MCS)
+    stayed invisible.
+    """
+    async with httpx.AsyncClient(timeout=timeout) as client:
         # Remap ValueSet IDs to avoid HAPI-0902 url+version conflicts with
         # resources already loaded by seed or prior uploads.
         entries = list(bundle_json.get("entry", []))
-        entries = await _remap_valueset_ids_for_hapi(entries, client)
+        entries = await _remap_valueset_ids_for_hapi(entries, client, base_url, auth_headers)
         bundle = {**bundle_json, "entry": entries}
         resp = await client.post(
-            settings.MEASURE_ENGINE_URL,
+            base_url,
             json=bundle,
-            headers={"Content-Type": "application/fhir+json"},
+            headers={**(auth_headers or {}), "Content-Type": "application/fhir+json"},
         )
         resp.raise_for_status()
         return resp.json()
 
 
-async def delete_measure(measure_id: str) -> None:
-    """Delete a Measure resource from the measure engine."""
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.delete(f"{settings.MEASURE_ENGINE_URL}/Measure/{measure_id}")
+async def delete_measure(
+    measure_id: str,
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> None:
+    """Delete a Measure resource from the measure engine.
+
+    `base_url` is REQUIRED — see `upload_measure_bundle` for why.
+    """
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.delete(f"{base_url}/Measure/{measure_id}", headers=auth_headers or {})
         if resp.status_code not in (200, 202, 204):
             resp.raise_for_status()
 
 
-async def wipe_patient_data(*, base_url: str, strict: bool = True) -> None:
+async def measure_exists(
+    measure_id: str,
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> bool:
+    """Return True when `measure_id` exists on the MCS at `base_url`.
+
+    Uses `Measure?_id=…&_summary=count` so the MCS returns a bare count bundle
+    rather than the full resource.
+
+    Transport failures (connect errors, timeouts, non-2xx) propagate to the
+    caller. Swallowing them into `False` would make "the MCS is unreachable"
+    indistinguishable from "the measure isn't there", and `POST /jobs` needs to
+    answer 502 for one and 400 for the other.
+    """
+    url = f"{base_url}/Measure"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(
+            url,
+            params={"_id": measure_id, "_summary": "count"},
+            headers=auth_headers or {},
+        )
+        resp.raise_for_status()
+        bundle = resp.json()
+    return bundle.get("total", 0) > 0
+
+
+async def wipe_patient_data(*, base_url: str, strict: bool = True, auth_headers: dict[str, str] | None = None) -> None:
     """Delete patient-related data from a FHIR server.
 
     Called at the START of a new job (with base_url=MEASURE_ENGINE_URL) to clean
@@ -929,6 +1029,10 @@ async def wipe_patient_data(*, base_url: str, strict: bool = True) -> None:
     A timed-out DELETE leaves HAPI's server-side operation still running; pushing new
     data over it causes the in-flight DELETE to wipe the freshly-pushed resources.
     The strict parameter is kept for API compatibility but no longer silences failures.
+
+    `auth_headers` credentials the target server. A remote MCS rejects every DELETE
+    with 401 without them, which would leave the prior job's patients in place and
+    contaminate the next evaluation.
     """
     # Delete clinical resources before Patient: HAPI returns 409 when Patient is
     # referenced by Condition/Encounter/etc., so Patient must be last.
@@ -958,19 +1062,31 @@ async def wipe_patient_data(*, base_url: str, strict: bool = True) -> None:
         "Organization",
         "Patient",
     ]
-    _MAX_CONSECUTIVE_FAILURES = 3
     consecutive_failures = 0
     async with httpx.AsyncClient(timeout=300.0) as client:
         for rt in resource_types:
             try:
                 # Use conditional delete: DELETE ResourceType?_lastUpdated=gt1900-01-01
                 delete_url = f"{base_url}/{rt}?_lastUpdated=gt1900-01-01"
-                resp = await client.delete(delete_url)
+                resp = await client.delete(delete_url, headers=auth_headers or {})
                 if resp.status_code < 300:
                     logger.info("Wiped resource type", extra={"resourceType": rt})
+                elif resp.status_code in (401, 403):
+                    # Credentials are wrong or missing for this server. Falling
+                    # back would sweep unauthenticated, fail silently, and let
+                    # wipe_patient_data report success while deleting nothing —
+                    # the prior job's resources then inflate the next job's
+                    # populations with no error signal. Fail loudly instead.
+                    raise RuntimeError(
+                        f"Not authorized to wipe {rt} at the target server (HTTP {resp.status_code}). "
+                        "Check the connection's credentials. Job aborted rather than "
+                        "evaluating against stale data."
+                    )
                 else:
-                    # Fall back to individual delete via search-and-delete
-                    await _delete_all_of_type(client, rt, base_url)
+                    # Conditional delete unsupported (e.g. HAPI without
+                    # allow_multiple_delete) — fall back to search-and-delete,
+                    # carrying the same credentials.
+                    await _delete_all_of_type(client, rt, base_url, auth_headers)
                 consecutive_failures = 0
             except httpx.HTTPError:
                 consecutive_failures += 1
@@ -985,34 +1101,227 @@ async def wipe_patient_data(*, base_url: str, strict: bool = True) -> None:
                     )
 
 
-async def wipe_measure_definitions() -> None:
-    """Delete all measure-definition resources from the measure engine.
+# Patient-scoped wipe (issue #392) ------------------------------------------
+#
+# Resource type -> the search parameter that scopes it to a patient. Values were
+# verified empirically against `hapiproject/hapi:v8.8.0-1` by issuing
+# `GET /{Type}?{param}=Patient/x&_summary=count` and checking for 200 vs 400 —
+# not read off the R4 spec, because the two disagree in one place: AdverseEvent
+# answers `subject` and 400s on `patient`.
+#
+# Ordered clinical-resources-before-Patient for the same reason as the full
+# wipe: HAPI 409s on deleting a Patient that is still referenced.
+_PATIENT_SCOPED_TYPES: list[tuple[str, str]] = [
+    ("MeasureReport", "patient"),
+    ("Condition", "patient"),
+    ("Observation", "patient"),
+    ("Encounter", "patient"),
+    ("Procedure", "patient"),
+    ("MedicationRequest", "patient"),
+    ("MedicationAdministration", "patient"),
+    ("Immunization", "patient"),
+    ("DiagnosticReport", "patient"),
+    ("AllergyIntolerance", "patient"),
+    ("AdverseEvent", "subject"),
+    ("CarePlan", "patient"),
+    ("CareTeam", "patient"),
+    ("Goal", "patient"),
+    ("ServiceRequest", "patient"),
+    ("DeviceRequest", "patient"),
+    ("Task", "patient"),
+    ("Coverage", "patient"),
+    ("Claim", "patient"),
+    # Patient is scoped by its own id, not by a reference param — HAPI 400s on
+    # both `patient=` and `subject=` here. It MUST stay last: HAPI returns 409
+    # when a Patient is still referenced by a Condition/Encounter/etc., so every
+    # clinical type above has to be cleared first.
+    ("Patient", "_id"),
+]
+
+# Deliberately absent from `_PATIENT_SCOPED_TYPES`: Medication, Location,
+# Practitioner, Organization. HAPI 400s on both `patient=` and `subject=` for
+# all four, so there is no way to scope a delete to them — and no need. They are
+# shared infrastructure on a multi-tenant server (deleting another participant's
+# Practitioner is exactly the harm #392 is about), and `push_resources` PUTs them
+# back by ID on every job, so a stale copy is overwritten rather than orphaned.
+_PATIENT_UNSCOPABLE_TYPES = ("Medication", "Location", "Practitioner", "Organization")
+
+# Max patient IDs per conditional-delete URL. 50 x ~40-char FHIR ids keeps the
+# request line under ~2KB, well inside the 8KB default header limit on HAPI's
+# embedded Tomcat. A 460-patient job becomes ~10 requests per type instead of 460.
+_WIPE_ID_CHUNK_SIZE = 50
+
+
+async def wipe_patients_by_id(
+    *,
+    base_url: str,
+    patient_ids: list[str],
+    auth_headers: dict[str, str] | None = None,
+) -> None:
+    """Delete only the given patients' data from a FHIR server (issue #392).
+
+    The safe alternative to `wipe_patient_data` when the target is a shared MCS.
+    `wipe_patient_data` issues unfiltered conditional deletes, which remove every
+    patient on the server — including other participants' data at a connectathon.
+
+    This is not a correctness compromise. `evaluate_measure` calls
+    `$evaluate-measure?...&subject=Patient/<id>` per patient and the job
+    aggregates only over the patients it gathered, so resources belonging to
+    patients this job never evaluates cannot affect its populations. The stale
+    data that *can* affect them — a resource attached to a patient this job is
+    about to push, left over from a prior run and absent from this push — is
+    exactly what this deletes.
+
+    No-ops on an empty `patient_ids`: falling through to an unscoped sweep is the
+    bug this function exists to prevent.
+
+    Raises RuntimeError on 401/403 (same fail-loud rule as `wipe_patient_data`:
+    a wipe that reports success while deleting nothing corrupts the next
+    evaluation silently) and after 3 consecutive transport failures.
+    """
+    if not patient_ids:
+        logger.info("Scoped wipe: no patients to wipe", extra={"target": sanitize_url(base_url)})
+        return
+
+    chunks = [patient_ids[i : i + _WIPE_ID_CHUNK_SIZE] for i in range(0, len(patient_ids), _WIPE_ID_CHUNK_SIZE)]
+    logger.info(
+        "Scoped wipe starting",
+        extra={
+            "target": sanitize_url(base_url),
+            "patient_count": len(patient_ids),
+            "resource_types": len(_PATIENT_SCOPED_TYPES),
+            "requests": len(_PATIENT_SCOPED_TYPES) * len(chunks),
+            "skipped_types": list(_PATIENT_UNSCOPABLE_TYPES),
+        },
+    )
+
+    consecutive_failures = 0
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        for rt, param in _PATIENT_SCOPED_TYPES:
+            for chunk in chunks:
+                # Comma-joined values are a FHIR OR match, so one request covers
+                # the whole chunk. Unqualified ids (not "Patient/x") match the
+                # reference search param and keep the URL short.
+                search_filter = f"{param}={','.join(chunk)}"
+                delete_url = f"{base_url}/{rt}?{search_filter}"
+                try:
+                    resp = await client.delete(delete_url, headers=auth_headers or {})
+                    if resp.status_code in (401, 403):
+                        raise RuntimeError(
+                            f"Not authorized to wipe {rt} at the target server (HTTP {resp.status_code}). "
+                            "Check the connection's credentials. Job aborted rather than "
+                            "evaluating against stale data."
+                        )
+                    if resp.status_code >= 400 and resp.status_code != 404:
+                        # 404 = the server doesn't stock this type; nothing to do.
+                        # Anything else means the conditional delete itself was
+                        # refused — most often HAPI's 412 when the search matches
+                        # multiple resources and `allow_multiple_delete` is false.
+                        # Our own containers enable it, but a shared remote MCS
+                        # (the case this function exists for) may not, so fall back
+                        # to a scoped search-and-delete rather than logging and
+                        # moving on with nothing deleted.
+                        logger.info(
+                            "Scoped wipe: conditional delete refused, falling back to per-resource delete",
+                            extra={"resourceType": rt, "status_code": resp.status_code},
+                        )
+                        await _delete_all_of_type(client, rt, base_url, auth_headers, search_filter=search_filter)
+                    consecutive_failures = 0
+                except httpx.HTTPError:
+                    consecutive_failures += 1
+                    logger.warning(
+                        "Scoped wipe: request failed",
+                        extra={"resourceType": rt, "consecutive_failures": consecutive_failures},
+                    )
+                    if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                        raise RuntimeError(
+                            f"FHIR server unreachable: {consecutive_failures} consecutive "
+                            "timeouts during scoped wipe. Job aborted."
+                        )
+
+    logger.info(
+        "Scoped wipe complete",
+        extra={"target": sanitize_url(base_url), "patient_count": len(patient_ids)},
+    )
+
+
+async def wipe_measure_definitions(*, base_url: str, auth_headers: dict[str, str] | None = None) -> None:
+    """Delete all measure-definition resources from the measure engine at `base_url`.
 
     Removes Library, Measure, ValueSet, CodeSystem, and ConceptMap.
     Does NOT touch clinical resources (Patient, Encounter, etc.).
     Called from the admin UI to recover from JVM/H2 state corruption (issue #238).
     After this call the bundle_loader must re-seed the engine before the next job.
+
+    `base_url` is REQUIRED and keyword-only — it identifies the MCS the caller
+    actually means. It previously read `settings.MEASURE_ENGINE_URL`, so an admin
+    connected to a remote MCS wiped Lenny's local container and got a success
+    response while the server they were looking at kept its data (issue #397).
+
+    Callers own the read-only guard: this function will wipe whatever server it is
+    pointed at, and pointing it at a shared MCS is exactly the hazard that made
+    #397 worth fixing carefully rather than quickly.
     """
     definition_types = ["Library", "Measure", "ValueSet", "CodeSystem", "ConceptMap"]
-    base_url = settings.MEASURE_ENGINE_URL
+    logger.warning(
+        "Wiping measure definitions",
+        extra={"target": sanitize_url(base_url), "resource_types": definition_types},
+    )
     async with httpx.AsyncClient(timeout=300.0) as client:
         for rt in definition_types:
             try:
                 delete_url = f"{base_url}/{rt}?_lastUpdated=gt1900-01-01"
-                resp = await client.delete(delete_url)
+                resp = await client.delete(delete_url, headers=auth_headers or {})
                 if resp.status_code < 300:
                     logger.info("Wiped measure definition type", extra={"resourceType": rt})
+                elif resp.status_code in (401, 403):
+                    # Explicit, matching wipe_patient_data and wipe_patients_by_id.
+                    # A 401 would otherwise fall through to the fallback sweep and
+                    # surface as "not authorized to enumerate" — which does fail
+                    # loudly, but names the wrong operation. All three wipes should
+                    # report an auth failure the same way.
+                    raise RuntimeError(
+                        f"Not authorized to wipe {rt} definitions at the target server "
+                        f"(HTTP {resp.status_code}). Check the connection's credentials. "
+                        "Refusing to report a successful wipe."
+                    )
                 else:
-                    await _delete_all_of_type(client, rt, base_url)
+                    await _delete_all_of_type(client, rt, base_url, auth_headers)
             except httpx.HTTPError:
                 logger.warning("Failed to wipe measure definition type", extra={"resourceType": rt})
 
 
-async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str, base_url: str) -> None:
-    """Delete all resources of a given type one by one from the given FHIR server."""
-    url: Optional[str] = f"{base_url}/{resource_type}?_count=100"
+async def _delete_all_of_type(
+    client: httpx.AsyncClient,
+    resource_type: str,
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+    search_filter: str | None = None,
+) -> None:
+    """Delete resources of a given type one by one from the given FHIR server.
+
+    `auth_headers` MUST be threaded through from the caller. This is the fallback
+    path taken when conditional delete is unsupported, and the target may be an
+    authenticated remote MCS — an unauthenticated sweep here 401s on the first
+    GET and returns silently, making the whole wipe a no-op that reports success.
+
+    `search_filter` narrows the sweep to matching resources (e.g.
+    `"patient=p1,p2"`). Without it every resource of the type is deleted, which is
+    what `wipe_patient_data` wants; `wipe_patients_by_id` passes a filter so the
+    fallback stays as scoped as the conditional delete it is standing in for.
+    Passing an unscoped fallback there would turn a shared-server safety feature
+    into the exact full wipe it exists to prevent (issue #392).
+    """
+    headers = auth_headers or {}
+    query = f"_count=100&{search_filter}" if search_filter else "_count=100"
+    url: Optional[str] = f"{base_url}/{resource_type}?{query}"
     while url:
-        resp = await client.get(url)
+        resp = await client.get(url, headers=headers)
+        if resp.status_code in (401, 403):
+            raise RuntimeError(
+                f"Not authorized to enumerate {resource_type} at the target server "
+                f"(HTTP {resp.status_code}). Refusing to report a successful wipe."
+            )
         if resp.status_code != 200:
             break
         bundle = resp.json()
@@ -1022,35 +1331,64 @@ async def _delete_all_of_type(client: httpx.AsyncClient, resource_type: str, bas
         for entry in entries:
             res = entry.get("resource", {})
             res_id = res.get("id")
-            if res_id:
+            # Reject ids that would escape the resource-type path. The bundle is
+            # server-supplied, so "../../Measure/CMS130" would otherwise be
+            # normalised into a DELETE against an arbitrary path.
+            if res_id and "/" not in res_id and ".." not in res_id:
                 del_url = f"{base_url}/{resource_type}/{res_id}"
                 try:
-                    await client.delete(del_url)
+                    await client.delete(del_url, headers=headers)
                 except httpx.HTTPError:
                     pass
-        # Re-check if more remain
+        # Re-check if more remain. Only follow a same-origin next link — a
+        # hostile or misconfigured server could otherwise steer this loop at
+        # an arbitrary host.
         url = None
         for link in bundle.get("link", []):
             if link.get("relation") == "next":
-                url = link.get("url")
+                next_url = link.get("url")
+                if next_url and _same_origin(base_url, next_url):
+                    url = next_url
+                elif next_url:
+                    logger.warning(
+                        "SSRF: wipe pagination next link rejected (origin mismatch)",
+                        extra={"url": sanitize_url(next_url)},
+                    )
                 break
 
 
-async def resolve_evaluated_resource(reference: str) -> dict[str, Any]:
-    """Resolve an evaluatedResource reference from the measure engine."""
-    url = f"{settings.MEASURE_ENGINE_URL}/{reference}"
+async def resolve_evaluated_resource(
+    reference: str,
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Resolve an evaluatedResource reference from the measure engine at `base_url`.
+
+    `base_url` is REQUIRED. It used to default to `settings.MEASURE_ENGINE_URL` with
+    no credentials, which only ever worked for a local unauthenticated HAPI: against
+    an authenticated remote MCS the resolve 401'd, and against any remote MCS it
+    asked the wrong server entirely (issue #397).
+    """
+    url = f"{base_url}/{reference}"
     async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url)
+        resp = await client.get(url, headers=auth_headers or {})
         resp.raise_for_status()
         return resp.json()
 
 
-async def snapshot_evaluated_resources(measure_report: dict[str, Any]) -> list[dict[str, Any]] | None:
+async def snapshot_evaluated_resources(
+    measure_report: dict[str, Any],
+    base_url: str | None = None,
+    auth_headers: dict[str, str] | None = None,
+) -> list[dict[str, Any]] | None:
     """Resolve every evaluatedResource reference in a MeasureReport to a stored snapshot.
 
     Returns a list of full FHIR resources. Per-reference failures are skipped and logged
     rather than raised — partial snapshots are still useful and the caller has already
     persisted the MeasureReport itself. Returns None when there is nothing to snapshot.
+
+    `base_url`/`auth_headers` identify the MCS the report came from, so snapshots
+    are read back from the same server that evaluated them.
     """
     refs = [
         r.get("reference")
@@ -1063,7 +1401,7 @@ async def snapshot_evaluated_resources(measure_report: dict[str, Any]) -> list[d
     resources: list[dict[str, Any]] = []
     for ref in refs:
         try:
-            resources.append(await resolve_evaluated_resource(ref))
+            resources.append(await resolve_evaluated_resource(ref, base_url, auth_headers))
         except Exception as exc:
             logger.warning(
                 "Failed to snapshot evaluated resource",
@@ -1365,11 +1703,18 @@ async def get_group_members(
     return patients
 
 
-async def list_measures() -> dict[str, Any]:
-    """List all Measure resources on the measure engine."""
-    url = f"{settings.MEASURE_ENGINE_URL}/Measure?_count=100"
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        resp = await client.get(url)
+async def list_measures(
+    base_url: str,
+    auth_headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
+    """List all Measure resources on the measure engine at `base_url`.
+
+    `base_url` is REQUIRED — see `upload_measure_bundle` for why.
+    """
+    url = f"{base_url}/Measure?_count=100"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, headers=auth_headers or {})
         resp.raise_for_status()
         return resp.json()
 

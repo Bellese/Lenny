@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import MAX_UPLOAD_SIZE
 from app.db import get_session
+from app.dependencies import get_active_mcs
 from app.limiter import limiter
 from app.models.validation import (
     BundleUpload,
@@ -197,9 +198,17 @@ async def start_validation_run(
             detail="No expected results loaded. Upload a test bundle first.",
         )
 
+    mcs = await get_active_mcs(session=session)
     run = ValidationRun(
         status=ValidationStatus.queued,
         measure_urls=body.measure_urls if body else None,
+        # get_active_mcs returns a synthetic context with id=0 when no active MCS
+        # row exists; 0 is not a valid mcs_configs FK, so guard it to NULL.
+        mcs_id=mcs.id if mcs.id else None,
+        mcs_url=mcs.mcs_url,
+        mcs_name=mcs.name,
+        mcs_auth_type=mcs.auth_type.value if mcs.auth_type else None,
+        mcs_wipe_before_job=mcs.wipe_before_job,
     )
     session.add(run)
     await session.commit()

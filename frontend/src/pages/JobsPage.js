@@ -8,6 +8,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 import PulseDot from '../components/PulseDot';
 import { TrashIcon, ViewIcon, SparkIcon, PlusIcon, XIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
+import { useConnection } from '../contexts/ConnectionContext';
 import PeriodPicker from '../components/PeriodPicker';
 import { extractCmsId, measureDisplayLabel, measureOptionLabel, findMatchingGroup } from '../utils/measureFormat';
 import { isActuallyRunning, isRunning, isComplete, selectActiveJob } from '../utils/jobStatus';
@@ -45,6 +46,11 @@ export default function JobsPage() {
   const location = useLocation();
   const [jobs, setJobs] = useState([]);
   const [measures, setMeasures] = useState([]);
+  // Distinguishes "haven't fetched yet" (initial mount) from "fetched and
+  // the list is genuinely empty" — the reset effect below must not touch
+  // formData.measure_id before the former, but must clear it for the
+  // latter (#396).
+  const [measuresLoaded, setMeasuresLoaded] = useState(false);
   const [groups, setGroups] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -56,6 +62,7 @@ export default function JobsPage() {
   const pollRef = useRef(null);
   const toast = useToast();
   const { query } = useSearch();
+  const { mcs } = useConnection();
 
   const loadJobs = useCallback(async () => {
     try {
@@ -74,7 +81,18 @@ export default function JobsPage() {
       const data = await getMeasures();
       const list = Array.isArray(data) ? data : data.measures || data.entry || [];
       setMeasures(list);
-    } catch { /* non-blocking */ }
+      setMeasuresLoaded(true);
+    } catch {
+      // Non-blocking for the Jobs page itself (jobs list / loading / error
+      // state are untouched) — but the measure dropdown must not keep
+      // offering the PREVIOUS MCS's measures after a failed refetch (e.g.
+      // right after switching MCS and the new one being unreachable). Clear
+      // it, same as MeasuresPage does in its own catch branch, and mark it
+      // "loaded" so the reset effect below clears any now-stale
+      // formData.measure_id instead of stranding it (#396).
+      setMeasures([]);
+      setMeasuresLoaded(true);
+    }
   }, []);
 
   const loadGroups = useCallback(async () => {
@@ -88,13 +106,32 @@ export default function JobsPage() {
     loadJobs();
     loadMeasures();
     loadGroups();
-  }, [loadJobs, loadMeasures, loadGroups]);
+    // mcs.id: re-fetch whenever the active MCS changes (#396), so activating
+    // a different measure engine in Settings refreshes the measure/group list
+    // this page's "New calculation" form is built from.
+  }, [loadJobs, loadMeasures, loadGroups, mcs.id]);
 
   useEffect(() => {
-    if (measures.length > 0 && !formData.measure_id) {
-      setFormData(prev => ({ ...prev, measure_id: measures[0].id || '' }));
+    // Before the first fetch resolves there's nothing to reconcile against —
+    // don't clear a selection (there shouldn't be one yet) just because the
+    // initial state happens to be an empty array.
+    if (!measuresLoaded) return;
+    // Default when empty, and ALSO reset when the current selection is no
+    // longer in the newly loaded list (e.g. after switching MCS) — otherwise
+    // a stale measure_id survives and POST /jobs rejects it (#396). This
+    // must also fire when the new list is itself empty (switching to an
+    // MCS with zero measures) — an empty list is the most literal case of
+    // "the current selection is absent from the newly loaded list", and
+    // leaving a stale id in that state is exactly the bug this issue exists
+    // to fix.
+    const stillPresent = measures.some(m => m.id === formData.measure_id);
+    if (!formData.measure_id || !stillPresent) {
+      const nextId = measures[0]?.id || '';
+      if (nextId !== formData.measure_id) {
+        setFormData(prev => ({ ...prev, measure_id: nextId }));
+      }
     }
-  }, [measures]);
+  }, [measures, measuresLoaded]);
 
   useEffect(() => {
     const hasActive = jobs.some(j => isRunning(j.status) || j.delete_requested);

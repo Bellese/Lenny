@@ -69,6 +69,21 @@ class Job(Base):
     )
     mcs_url: Mapped[Optional[str]] = mapped_column(String(1024), nullable=True)
     mcs_name: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    # Snapshot of the MCS auth type, mirroring cdr_auth_type. Required because
+    # mcs_id is ON DELETE SET NULL: once the config is deleted the id is gone,
+    # so mcs_id alone cannot distinguish "this job never had MCS auth" from
+    # "the credentials are unrecoverable". Without it a job whose connection was
+    # deleted would silently run unauthenticated against the snapshotted mcs_url.
+    mcs_auth_type: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Issue #392: snapshot of MCSConfig.wipe_before_job at job creation, so a job
+    # already in the queue keeps the wipe semantics it was created under even if
+    # the connection is edited before it runs.
+    #
+    # NOT nullable, defaulting False: legacy rows created before this column
+    # existed read as False and take the scoped wipe. That is the safe direction —
+    # scoping is never destructive, and it cannot corrupt results either, because
+    # evaluation is per-subject (see `wipe_patients_by_id`).
+    mcs_wipe_before_job: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     batches: Mapped[list["Batch"]] = relationship(
         "Batch", back_populates="job", cascade="all, delete-orphan", lazy="selectin"

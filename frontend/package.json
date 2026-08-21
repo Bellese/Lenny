@@ -1,6 +1,6 @@
 {
   "name": "lenny-frontend",
-  "version": "0.0.19.3",
+  "version": "0.0.22.0",
   "private": true,
   "license": "Apache-2.0",
   "dependencies": {
@@ -48,7 +48,7 @@
     "http-proxy-agent": "^7.0.0",
     "uuid": "^11.1.1",
     "form-data": "^3.0.5",
-    "js-yaml": "^4.2.0",
+    "js-yaml": "^4.3.1",
     "svgo": "^2.8.3",
     "ws": "^7.5.11",
     "webpack-dev-server": {

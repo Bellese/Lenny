@@ -2,11 +2,14 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import styles from './MeasuresPage.module.css';
 import { deleteMeasure, getMeasures, uploadMeasure } from '../api/client';
+import { parseFhirError } from '../api/fhirError';
 import { useToast } from '../components/Toast';
 import KebabMenu from '../components/KebabMenu';
 import ConfirmDialog from '../components/ConfirmDialog';
+import ErrorBanner from '../components/ErrorBanner';
 import { TrashIcon, PlusIcon, CheckIcon } from '../components/Icons';
 import { useSearch } from '../contexts/SearchContext';
+import { useConnection } from '../contexts/ConnectionContext';
 import { extractCmsId, cleanMeasureName, measureDisplayLabel } from '../utils/measureFormat';
 
 function getMeasureDisplayName(measure) {
@@ -47,6 +50,13 @@ function StatusBadge({ status }) {
 
 export default function MeasuresPage() {
   const [measures, setMeasures] = useState([]);
+  // The `mcs` block from the last successful GET /measures response — i.e.
+  // where the measures ON SCREEN actually came from. This is deliberately
+  // separate from the health-polled context's `mcs`: during a switch, a
+  // reload, or a failed refetch the two can differ, and the subtitle must
+  // describe the data on screen, not the currently-connected server —
+  // otherwise we'd recreate this exact bug one layer up (#396).
+  const [measuresMcs, setMeasuresMcs] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
@@ -54,6 +64,7 @@ export default function MeasuresPage() {
   const fileInputRef = useRef(null);
   const toast = useToast();
   const { query } = useSearch();
+  const { mcs } = useConnection();
 
   const loadMeasures = useCallback(async () => {
     setLoading(true);
@@ -61,14 +72,23 @@ export default function MeasuresPage() {
     try {
       const data = await getMeasures();
       setMeasures(Array.isArray(data) ? data : data.measures || data.entry || []);
+      setMeasuresMcs(Array.isArray(data) ? null : (data.mcs || null));
     } catch (err) {
-      setError(err.message || 'Cannot reach measure engine');
+      // Never render a stale list from a previous connection — the whole
+      // point of this fix is that an unreachable MCS shows empty, not old data.
+      setMeasures([]);
+      setMeasuresMcs(null);
+      const { issues, errorDetails } = parseFhirError(err.body);
+      setError({ message: err.message || 'Cannot reach measure engine', issues, errorDetails });
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useEffect(() => { loadMeasures(); }, [loadMeasures]);
+  // Re-fetch whenever the active MCS changes (#396) — otherwise the page
+  // keeps showing the previous connection's measures after activating a
+  // different one in Settings.
+  useEffect(() => { loadMeasures(); }, [loadMeasures, mcs.id]);
 
   const handleUploadClick = () => fileInputRef.current?.click();
 
@@ -119,11 +139,20 @@ export default function MeasuresPage() {
           <div className={styles.eyebrow}>Library</div>
           <h1 className={styles.title}>Measures</h1>
           {!loading && !error && (
-            <div className={styles.sub}>{visible.length} measure{visible.length !== 1 ? 's' : ''}</div>
+            <div className={styles.sub}>
+              {visible.length} measure{visible.length !== 1 ? 's' : ''} on{' '}
+              {measuresMcs?.name || mcs.name || 'the active connection'}
+            </div>
           )}
         </div>
         <div className={styles.headerActions}>
-          <button className={styles.btnPrimary} onClick={handleUploadClick} disabled={uploading} aria-busy={uploading}>
+          <button
+            className={styles.btnPrimary}
+            onClick={handleUploadClick}
+            disabled={uploading || mcs.isReadOnly}
+            aria-busy={uploading}
+            title={mcs.isReadOnly ? `${mcs.name || 'This connection'} is read-only` : undefined}
+          >
             <PlusIcon /> {uploading ? 'Uploading…' : 'Upload bundle'}
           </button>
           <input
@@ -161,9 +190,13 @@ export default function MeasuresPage() {
       )}
 
       {!loading && error && (
-        <div className={styles.errorState} role="alert">
-          <p className={styles.errorMessage}>Cannot reach measure engine</p>
-          <p className={styles.errorDetail}>{error}</p>
+        <div className={styles.errorState}>
+          <ErrorBanner
+            title={`Cannot reach ${mcs.name || 'the measure engine'}`}
+            message={error.message}
+            issues={error.issues}
+            errorDetails={error.errorDetails}
+          />
           <button className={styles.retryBtn} onClick={loadMeasures}>Retry</button>
         </div>
       )}
@@ -204,7 +237,8 @@ export default function MeasuresPage() {
                             label: 'Delete permanently',
                             icon: <TrashIcon />,
                             tone: 'destructive',
-                            disabled: !measure.id,
+                            disabled: !measure.id || mcs.isReadOnly,
+                            title: mcs.isReadOnly ? `${mcs.name || 'This connection'} is read-only` : undefined,
                             onClick: () => confirmDelete(measure),
                           },
                         ]} />

@@ -2,7 +2,8 @@
 
 These tests cover MCS-specific behavior:
 - The factory wires `MCSConfig` correctly at `/settings/mcs-connections`.
-- Schemas use `mcs_url` (not `cdr_url`) and don't include `is_read_only`.
+- Schemas use `mcs_url` (not `cdr_url`) and expose `is_read_only` (issue #396
+  moved it up to `ConnectionConfigMixin`, so it applies to MCS too).
 - Activation-race regression on `idx_one_active_mcs`.
 - Default-name and seed semantics.
 
@@ -54,8 +55,63 @@ async def test_mcs_create_connection(client):
     assert body["auth_type"] == "none"
     assert body["is_active"] is False
     assert body["is_default"] is False
-    # MCS schema does NOT expose is_read_only — that's CDR-specific.
-    assert "is_read_only" not in body
+    # is_read_only is shared across connection kinds as of issue #396 and
+    # defaults to writable.
+    assert body["is_read_only"] is False
+
+
+async def test_mcs_create_connection_read_only(client):
+    """is_read_only round-trips through the MCS create schema and response."""
+    resp = await client.post(
+        "/settings/mcs-connections",
+        json={
+            "name": "Someone Else's MCS",
+            "mcs_url": "https://not-mine.example.com/fhir",
+            "auth_type": "none",
+            "is_read_only": True,
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["is_read_only"] is True
+
+    listed = await client.get("/settings/mcs-connections")
+    assert listed.json()[0]["is_read_only"] is True
+
+
+async def test_mcs_create_defaults_to_scoped_wipe(client):
+    """A user-created MCS must not full-wipe by default (issue #392).
+
+    The default is the safety property: a connectathon attendee who adds a shared
+    server and runs a job must not delete everyone else's patients.
+    """
+    resp = await client.post(
+        "/settings/mcs-connections",
+        json={
+            "name": "Shared Connectathon MCS",
+            "mcs_url": "https://fhir-connectathon.example.gov/fhir",
+            "auth_type": "none",
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["wipe_before_job"] is False
+
+
+async def test_mcs_create_connection_wipe_before_job_opt_in(client):
+    """wipe_before_job round-trips through the MCS create schema and response."""
+    resp = await client.post(
+        "/settings/mcs-connections",
+        json={
+            "name": "My Own Dedicated MCS",
+            "mcs_url": "https://mine.example.com/fhir",
+            "auth_type": "none",
+            "wipe_before_job": True,
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["wipe_before_job"] is True
+
+    listed = await client.get("/settings/mcs-connections")
+    assert listed.json()[0]["wipe_before_job"] is True
 
 
 async def test_mcs_create_connection_does_not_accept_cdr_url(client):

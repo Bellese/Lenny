@@ -251,3 +251,117 @@ async def test_health_error_does_not_leak_internal_hostname(client, mock_fhir_me
     assert data["status"] == "degraded"
     assert data["measure_engine"]["status"] == "disconnected"
     assert "error" in data["measure_engine"]
+
+
+# ---------------------------------------------------------------------------
+# measure_engine identity block (issue #396)
+# ---------------------------------------------------------------------------
+
+
+async def _activate_mcs(test_session, *, name: str, url: str, read_only: bool = False):
+    from sqlalchemy import update as sa_update
+
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+
+    await test_session.execute(sa_update(MCSConfig).values(is_active=False))
+    cfg = MCSConfig(
+        name=name,
+        mcs_url=url,
+        auth_type=AuthType.none,
+        is_active=True,
+        is_default=False,
+        is_read_only=read_only,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+    return cfg
+
+
+async def test_health_measure_engine_connected_includes_id(client, test_session, mock_fhir_metadata):
+    """The connected branch carries the MCS id + read-only flag, not just the name."""
+    cfg = await _activate_mcs(test_session, name="Attendee MCS", url="https://attendee-mcs.example.com/fhir")
+
+    mock_response = httpx.Response(200, json=mock_fhir_metadata)
+    with patch("app.routes.health.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        resp = await client.get("/health")
+
+    me = resp.json()["measure_engine"]
+    assert me["status"] == "connected"
+    assert me["id"] == cfg.id
+    assert me["name"] == "Attendee MCS"
+    assert me["is_read_only"] is False
+
+
+async def test_health_measure_engine_http_error_includes_id(client, test_session, mock_fhir_metadata):
+    """The non-200 branch carries the id too, so the frontend can always key on it."""
+    cfg = await _activate_mcs(test_session, name="Read Only MCS", url="https://ro-mcs.example.com/fhir", read_only=True)
+
+    cdr_response = httpx.Response(200, json=mock_fhir_metadata)
+    call_count = 0
+
+    async def mock_get(url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return httpx.Response(503, json={"resourceType": "OperationOutcome", "issue": []})
+        return cdr_response
+
+    with patch("app.routes.health.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        resp = await client.get("/health")
+
+    me = resp.json()["measure_engine"]
+    assert me["status"] == "disconnected"
+    assert me["id"] == cfg.id
+    assert me["is_read_only"] is True
+
+
+async def test_health_measure_engine_exception_includes_id(client, test_session, mock_fhir_metadata):
+    """The exception branch carries the id too."""
+    cfg = await _activate_mcs(test_session, name="Attendee MCS", url="https://attendee-mcs.example.com/fhir")
+
+    cdr_response = httpx.Response(200, json=mock_fhir_metadata)
+    call_count = 0
+
+    async def mock_get(url, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise httpx.ConnectError("Connection refused")
+        return cdr_response
+
+    with patch("app.routes.health.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        resp = await client.get("/health")
+
+    me = resp.json()["measure_engine"]
+    assert me["status"] == "disconnected"
+    assert me["id"] == cfg.id
+    assert me["name"] == "Attendee MCS"
+
+
+async def test_health_measure_engine_id_present_without_mcs_row(client, mock_fhir_metadata):
+    """No MCS row → the fallback context still yields an id (0) and a writable flag."""
+    mock_response = httpx.Response(200, json=mock_fhir_metadata)
+    with patch("app.routes.health.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(return_value=mock_response)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        resp = await client.get("/health")
+
+    me = resp.json()["measure_engine"]
+    assert me["id"] == 0
+    assert me["is_read_only"] is False
