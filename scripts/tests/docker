@@ -1,13 +1,66 @@
 #!/usr/bin/env bash
-# docker stub — Fake `docker` CLI for reconcile-db-password.sh unit tests.
+# docker stub — Fake `docker` CLI for scripts/tests unit tests.
 #
-# Env vars:
+# Serves two callers. The check-pinned-images.sh branches below are checked
+# first and always `exit` — they never fall through to the
+# reconcile-db-password.sh logic at the bottom of this file, and vice versa.
+#
+# New env vars (check-pinned-images.sh / test_pinned_images.sh):
+#   STUB_RESOLVE_CDR       Image `config --images` should report for
+#                          hapi-fhir-cdr. Unset -> vanilla default.
+#                          Set to "" (empty) -> simulates an unresolved
+#                          service (check-pinned-images.sh's exit-2 case).
+#   STUB_RESOLVE_MEASURE   Same, for hapi-fhir-measure.
+#   STUB_PULL_SCENARIO     ok (default) | fail
+#   STUB_PULL_CALLS        If set, each `docker pull <ref>` call appends
+#                          <ref> to this file.
+#
+# Existing env vars (reconcile-db-password.sh / test_reconcile.sh):
 #   STUB_DOCKER_SCENARIO   ok (default) | fail
 #   STUB_DOCKER_CALLS      If set, each invocation appends "$@" to this file.
 #
-# On "fail": exits 1 and emits the PGPASSWORD value on stderr so the
-# redaction test can verify the script scrubs it from output.
+# On "fail" (reconcile path): exits 1 and emits the PGPASSWORD value on
+# stderr so the redaction test can verify the script scrubs it from output.
 
+readonly VANILLA_HAPI_IMAGE="hapiproject/hapi:v8.8.0-1"
+
+# ── docker pull <ref> ────────────────────────────────────────────────────────
+if [[ "${1:-}" == "pull" ]]; then
+    ref="${2:-}"
+    if [[ -n "${STUB_PULL_CALLS:-}" ]]; then
+        printf '%s\n' "$ref" >> "$STUB_PULL_CALLS"
+    fi
+    if [[ "${STUB_PULL_SCENARIO:-ok}" == "fail" ]]; then
+        printf 'Error response from daemon: denied: denied\n' >&2
+        exit 1
+    fi
+    printf 'Status: Downloaded newer image for %s\n' "$ref"
+    exit 0
+fi
+
+# ── docker compose ... config --images <svc> ─────────────────────────────────
+if [[ "${1:-}" == "compose" ]]; then
+    has_config=0
+    last=""
+    for a in "$@"; do
+        [[ "$a" == "config" ]] && has_config=1
+        last="$a"
+    done
+    if [[ "$has_config" -eq 1 ]]; then
+        svc="$last"
+        if [[ "$svc" == "hapi-fhir-cdr" ]]; then
+            resolved="${STUB_RESOLVE_CDR-$VANILLA_HAPI_IMAGE}"
+        elif [[ "$svc" == "hapi-fhir-measure" ]]; then
+            resolved="${STUB_RESOLVE_MEASURE-$VANILLA_HAPI_IMAGE}"
+        else
+            resolved=""
+        fi
+        [[ -n "$resolved" ]] && printf '%s\n' "$resolved"
+        exit 0
+    fi
+fi
+
+# ── fallback: reconcile-db-password.sh's `compose ... exec ...` call ────────
 # Record the call (args + any stdin) for assertion later.
 if [[ -n "${STUB_DOCKER_CALLS:-}" ]]; then
     printf '%s\n' "$*" >> "$STUB_DOCKER_CALLS"

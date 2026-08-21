@@ -52,6 +52,11 @@ services:
     image: ${HAPI_CDR_IMAGE:-hapiproject/hapi:v8.8.0-1}
     user: root
     restart: unless-stopped
+    # A ceiling, not a delay: SIGTERM still stops a clean HAPI in seconds.
+    # Without this, compose SIGKILLs at the 10s default before the JVM can
+    # flush H2 + Lucene on stop/recreate — the exact corruption
+    # docs/runbooks/measure-engine-h2-recovery.md exists to clean up after.
+    stop_grace_period: 120s
     ports: ["8081:8080"]
     volumes: ["cdrdata:/data/hapi"]
     mem_limit: 2g
@@ -85,6 +90,8 @@ services:
     image: ${HAPI_MEASURE_IMAGE:-hapiproject/hapi:v8.8.0-1}
     user: root
     restart: unless-stopped
+    # See hapi-fhir-cdr's stop_grace_period comment above — same reasoning.
+    stop_grace_period: 120s
     ports: ["8080:8080"]
     volumes: ["measuredata:/data/hapi"]
     mem_limit: 3g
