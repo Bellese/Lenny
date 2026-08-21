@@ -1359,7 +1359,9 @@ git add backend/app/services/orchestrator.py backend/tests/test_services_orchest
 git commit -m "feat(orchestrator): route phase-1 transfer through per-job submission workflows"
 ```
 
----### Task 6: Frontend — workflow selector + fallback warning
+---
+
+### Task 6: Frontend — workflow selector + fallback warning
 
 **Files:**
 - Modify: `frontend/src/pages/JobsPage.js` (form state line 58, `handleCreateJob` lines 158–178, modal JSX lines 470–489, status cell line 412)
