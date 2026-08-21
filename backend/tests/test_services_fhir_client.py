@@ -3065,9 +3065,13 @@ class TestSubmitData:
         assert base_url != stu5_url
 
     async def test_409_conflict_retries_and_succeeds(self):
-        """F12: concurrent patients upserting the same Organization/lenny-reporter
-        can race into a HAPI ResourceVersionConflictException (409). Retry the
-        same request rather than failing the patient outright."""
+        """F12: an incidental HAPI ResourceVersionConflictException (409) —
+        e.g. a patient's own resources racing a concurrent read/write on the
+        same server — is retried once rather than failing the patient
+        outright. (The primary source of these conflicts, every patient
+        upserting the same shared Organization/lenny-reporter, is fixed
+        upstream: that resource is now PUT once per job, not inlined per
+        patient — see workflows.build_submission_workflow.)"""
         post = AsyncMock(
             side_effect=[
                 _make_response(409, {"resourceType": "OperationOutcome"}),
@@ -3105,7 +3109,7 @@ class TestSubmitData:
         assert post.await_count == 2
 
     async def test_409_conflict_exhausts_retries_and_raises(self):
-        """After 2 retries (3 total attempts) a persistent 409 still raises."""
+        """After 1 retry (2 total attempts) a persistent 409 still raises."""
         post = AsyncMock(return_value=_make_response(409, {"resourceType": "OperationOutcome"}))
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, post=post)
@@ -3118,7 +3122,7 @@ class TestSubmitData:
                         measure_id="M1",
                     )
         assert exc_info.value.status_code == 409
-        assert post.await_count == 3
+        assert post.await_count == 2
 
     async def test_raises_fhir_operation_error_on_4xx(self):
         oo = {

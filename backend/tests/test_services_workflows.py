@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.config import settings
+from app.services.deqm import LENNY_REPORTER_ORG
 from app.services.fhir_client import BatchQueryStrategy, DataRequirementsStrategy, GatherResult
 from app.services.fhir_errors import FhirOperationError
 from app.services.workflows import (
@@ -112,8 +113,12 @@ class TestDeqmSubmitDataWorkflow:
         assert mr["type"] == "data-collection"
         assert mr["subject"] == {"reference": "Patient/p1"}
         assert mr["id"] == "deqm-7-p1"
+        # The reporter Organization is NOT re-sent per patient — it is PUT
+        # once per job by build_submission_workflow. Only the patient's own
+        # gathered resources travel in the per-patient payload.
         submitted_types = [p["resource"]["resourceType"] for p in params["parameter"][1:]]
-        assert submitted_types == ["Organization", "Patient", "Condition"]
+        assert submitted_types == ["Patient", "Condition"]
+        assert "Organization" not in submitted_types
 
     async def test_stu5_mode_uses_bundle_envelope(self):
         wf = _deqm_workflow(mode="stu5")
@@ -288,12 +293,13 @@ class TestDeqmSubmitDataWorkflow:
         assert len(base_mode_calls) == 2
         assert wf._mode == "base-fallback"
 
-    async def test_empty_gather_still_submits_reporter_org_only(self):
+    async def test_empty_gather_still_submits_measure_report_only(self):
         """Coverage-audit gap fill: DeqmSubmitDataWorkflow does not skip
         submission when gather returns zero resources (unlike DirectLoadWorkflow,
-        which skips the push entirely). The DEQM MeasureReport + reporter Org
-        must still be sent so the MCS gets a snapshot recording 'no data found'
-        for this patient/period."""
+        which skips the push entirely). The DEQM MeasureReport must still be
+        sent so the MCS gets a snapshot recording 'no data found' for this
+        patient/period — with no per-patient resources (and no inline
+        reporter Organization; that is PUT once per job separately)."""
         wf = _deqm_workflow()
         empty = GatherResult(resources=[])
         with (
@@ -305,7 +311,7 @@ class TestDeqmSubmitDataWorkflow:
         submit.assert_awaited_once()
         params = submit.call_args.kwargs["parameters"]
         submitted_types = [p["resource"]["resourceType"] for p in params["parameter"][1:]]
-        assert submitted_types == ["Organization"]
+        assert submitted_types == []
         mr = params["parameter"][0]["resource"]
         assert mr["evaluatedResource"] == []
 
@@ -331,7 +337,7 @@ class TestDeqmSubmitDataWorkflow:
         assert result is gather_with_bad_resource  # GatherResult passed through unfiltered to the caller
         params = submit.call_args.kwargs["parameters"]
         submitted_types = [p["resource"]["resourceType"] for p in params["parameter"][1:]]
-        assert submitted_types == ["Organization", "Patient", "Condition"]
+        assert submitted_types == ["Patient", "Condition"]
         mr = params["parameter"][0]["resource"]
         refs = [er["reference"] for er in mr["evaluatedResource"]]
         assert refs == ["Patient/p1", "Condition/c1"]
@@ -349,6 +355,31 @@ class TestDeqmSubmitDataWorkflow:
         assert exc_info.value.phase == "submit"
         assert wf._mode == "stu5"  # no downgrade attempted
         assert submit.await_count == 1
+
+    async def test_concurrent_patients_never_submit_organization_inline(self):
+        """Regression for the production defect: every patient's $submit-data
+        payload used to inline the SAME client-assigned
+        Organization/lenny-reporter, and batches run concurrently
+        (asyncio.Semaphore(MAX_WORKERS) + asyncio.gather in orchestrator.py).
+        HAPI saw multiple transactions upsert that one resource id at once
+        and raised ResourceVersionConflictException (HAPI-0550/HAPI-0823),
+        failing 100% of patients on the real stack. Drive several
+        transfer_patient() calls concurrently on ONE workflow instance and
+        assert NO submitted payload contains an Organization resource — the
+        shared resource must no longer travel in the per-patient path."""
+        wf = _deqm_workflow()
+        submit = AsyncMock()
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            await asyncio.gather(*[wf.transfer_patient("http://cdr", f"p{i}", {}) for i in range(8)])
+
+        assert submit.await_count == 8
+        for call in submit.call_args_list:
+            params = call.kwargs["parameters"]
+            submitted_types = [p["resource"]["resourceType"] for p in params["parameter"][1:]]
+            assert "Organization" not in submitted_types
 
 
 class TestAcquisitionStrategy:
@@ -398,10 +429,13 @@ class TestBuildSubmissionWorkflow:
         canon.assert_not_awaited()
 
     async def test_deqm_fetches_canonical_and_defaults_mode(self):
-        with patch(
-            "app.services.workflows.get_measure_canonical",
-            new=AsyncMock(return_value="http://ex.org/Measure/M1|1.0"),
-        ) as canon:
+        with (
+            patch(
+                "app.services.workflows.get_measure_canonical",
+                new=AsyncMock(return_value="http://ex.org/Measure/M1|1.0"),
+            ) as canon,
+            patch("app.services.workflows.push_resources", new=AsyncMock()) as push,
+        ):
             wf = await build_submission_workflow(
                 workflow="deqm_submit_data",
                 job_id=1,
@@ -415,6 +449,15 @@ class TestBuildSubmissionWorkflow:
         assert isinstance(wf, DeqmSubmitDataWorkflow)
         canon.assert_awaited_once_with("M1", mcs_url="http://mcs", auth_headers={})
         assert wf._mode == "base-fallback"
+        # The reporter Organization is PUT exactly once per job, here — not
+        # per patient (that is the fix for the HAPI-0823 version-conflict
+        # storm under concurrent batches).
+        push.assert_awaited_once()
+        push_args, push_kwargs = push.call_args
+        assert [r["resourceType"] for r in push_args[0]] == ["Organization"]
+        assert push_args[0][0]["id"] == LENNY_REPORTER_ORG["id"]
+        assert push_kwargs["target_url"] == "http://mcs"
+        assert push_kwargs["auth_headers"] == {}
 
     async def test_deqm_stu5_mode_raises_on_relative_canonical(self):
         """F4: in STU5 mode, MeasureReport.measure is the only identifier —
@@ -439,9 +482,12 @@ class TestBuildSubmissionWorkflow:
     async def test_deqm_base_mode_tolerates_relative_canonical(self):
         """F4: base-fallback mode is unaffected — the measure is already
         named in the instance-level submit URL."""
-        with patch(
-            "app.services.workflows.get_measure_canonical",
-            new=AsyncMock(return_value="Measure/M1"),
+        with (
+            patch(
+                "app.services.workflows.get_measure_canonical",
+                new=AsyncMock(return_value="Measure/M1"),
+            ),
+            patch("app.services.workflows.push_resources", new=AsyncMock()),
         ):
             wf = await build_submission_workflow(
                 workflow="deqm_submit_data",
@@ -455,6 +501,32 @@ class TestBuildSubmissionWorkflow:
             )
         assert isinstance(wf, DeqmSubmitDataWorkflow)
         assert wf._measure_canonical == "Measure/M1"
+
+    async def test_deqm_reporter_org_push_failure_raises(self):
+        """A failure PUTting the reporter Organization must fail the job fast
+        with a clear message, rather than deferring to every patient failing
+        later for the same reason (the original HAPI-0823 defect)."""
+        with (
+            patch(
+                "app.services.workflows.get_measure_canonical",
+                new=AsyncMock(return_value="http://ex.org/Measure/M1|1.0"),
+            ),
+            patch(
+                "app.services.workflows.push_resources",
+                new=AsyncMock(side_effect=RuntimeError("mcs down")),
+            ),
+        ):
+            with pytest.raises(ValueError, match="lenny-reporter"):
+                await build_submission_workflow(
+                    workflow="deqm_submit_data",
+                    job_id=1,
+                    measure_id="M1",
+                    mcs_url="http://mcs",
+                    mcs_auth_headers={},
+                    submit_data_mode=None,
+                    period_start="2025-01-01",
+                    period_end="2025-12-31",
+                )
 
     async def test_deqm_propagates_canonical_fetch_failure(self):
         """Coverage-audit gap fill: build_submission_workflow must let a

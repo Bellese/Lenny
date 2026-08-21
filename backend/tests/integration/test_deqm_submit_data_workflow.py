@@ -25,7 +25,14 @@ def _run_patches(integration_session_factory):
         patch("app.services.fhir_client.settings.MEASURE_ENGINE_URL", TEST_MEASURE_URL),
         patch("app.services.fhir_client.settings.DEFAULT_CDR_URL", TEST_CDR_URL),
         patch("app.services.orchestrator.settings.MAX_RETRIES", 1),
-        patch("app.services.orchestrator.settings.BATCH_SIZE", 100),
+        # 25, not 100: with a real 300+-patient connectathon panel this puts
+        # every patient into ONE batch at 100, so no concurrency ever occurs
+        # and the population-parity test can't catch concurrent-submission
+        # bugs (it didn't — see the reporter-Organization fix in this
+        # commit). A small batch size forces multiple batches to run under
+        # asyncio.Semaphore(MAX_WORKERS) + asyncio.gather concurrently
+        # against real HAPI.
+        patch("app.services.orchestrator.settings.BATCH_SIZE", 25),
         patch("app.services.orchestrator.async_session", integration_session_factory),
     )
 

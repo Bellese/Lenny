@@ -158,7 +158,13 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             resources=filtered_resources,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
-        submitted = [dict(LENNY_REPORTER_ORG)] + filtered_resources
+        # The reporter Organization is NOT re-sent here. build_submission_workflow
+        # PUTs it to the MCS once per job, before any batch starts; every
+        # patient's MeasureReport.reporter reference resolves against that
+        # server-side copy. See the comment there for why inlining a copy of
+        # the SAME client-assigned Organization/lenny-reporter into every
+        # patient's payload is unsafe under concurrent batches.
+        submitted = filtered_resources
         # Snapshot the mode used for THIS attempt. self._mode is shared,
         # mutable instance state: one DeqmSubmitDataWorkflow is built per job
         # (orchestrator.py) and its transfer_patient() runs concurrently
@@ -256,6 +262,37 @@ async def build_submission_workflow(
                 f"Measure '{measure_id}' has no absolute canonical URL (got {canonical!r}), "
                 "which is required for DEQM STU5 $deqm-submit-data submissions."
             )
+        # DEQM STU5 says a submission's references should resolve WITHIN the
+        # submission, which is why the reporter Organization used to travel
+        # inline in every patient's $submit-data payload. In practice that
+        # inline copy is the SAME client-assigned Organization/lenny-reporter
+        # on every patient in the job, and batches run concurrently
+        # (asyncio.Semaphore(settings.MAX_WORKERS) in orchestrator.py) — HAPI
+        # saw up to MAX_WORKERS transactions try to upsert that one resource
+        # id at the same time and answered every one of them with
+        # ResourceVersionConflictException (HAPI-0550/HAPI-0823), failing
+        # 100% of patients on the real stack (two 319-patient runs both
+        # status=failed, processed=0). Store the reporter ONCE per job here,
+        # before any batch starts, and let each patient's
+        # MeasureReport.reporter reference resolve against this server-side
+        # copy instead. Tradeoff: a strict-STU5 receiver that refuses to
+        # resolve references outside the submitted payload would need the
+        # inline per-patient copy back — and would then also need
+        # submissions serialized (not concurrent) to avoid reintroducing
+        # this same version conflict. Let failure here raise: it fails the
+        # job fast with one clear error instead of every patient failing
+        # later for the same reason.
+        try:
+            await push_resources(
+                [dict(LENNY_REPORTER_ORG)],
+                target_url=mcs_url,
+                auth_headers=mcs_auth_headers,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"Failed to store reporter Organization '{LENNY_REPORTER_ORG['id']}' on the MCS "
+                f"before starting job {job_id}: {exc}"
+            ) from exc
         return DeqmSubmitDataWorkflow(
             job_id=job_id,
             measure_id=measure_id,

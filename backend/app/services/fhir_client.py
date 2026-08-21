@@ -1081,15 +1081,14 @@ async def submit_data(
     Any 2xx is success; the response body (HAPI returns a transaction Bundle)
     carries no information the job needs.
 
-    Every patient's submission upserts the SAME client-assigned
-    Organization/lenny-reporter (DEQM requires `reporter` to resolve inside
-    the submission, so it must stay inline in the payload). Batches run
-    concurrently (asyncio.Semaphore(MAX_WORKERS)), so several transactions
-    can race to upsert that one id and HAPI can answer with a
-    ResourceVersionConflictException (409, or 412 for a failed
-    If-Match/version-aware update). Retry the SAME request up to 2 times
-    with a short backoff before giving up, mirroring evaluate_measure's
-    retry style.
+    The reporter Organization is no longer inlined per-patient (see
+    build_submission_workflow / DeqmSubmitDataWorkflow.transfer_patient) —
+    that was the primary source of ResourceVersionConflictException under
+    concurrent batches, since every patient upserted the same shared id. This
+    retry stays as insurance for incidental conflicts only (e.g. a patient's
+    own resources overlapping a concurrent evaluate-measure read/write on the
+    same server), one retry with a short backoff before giving up — not the
+    primary defense against the shared-Organization storm anymore.
     """
     if mode == SUBMIT_DATA_MODE_STU5:
         url = f"{mcs_url}/Measure/$deqm-submit-data"
@@ -1097,12 +1096,12 @@ async def submit_data(
         url = f"{mcs_url}/Measure/{measure_id}/$submit-data"
     headers = {"Content-Type": "application/fhir+json", **(auth_headers or {})}
     async with httpx.AsyncClient(timeout=120.0) as client:
-        for attempt in range(3):
+        for attempt in range(2):
             start_ms = int(time.monotonic() * 1000)
             resp = await client.post(url, json=parameters, headers=headers)
             latency_ms = int(time.monotonic() * 1000) - start_ms
             if resp.status_code >= 300:
-                if resp.status_code in (409, 412) and attempt < 2:
+                if resp.status_code in (409, 412) and attempt < 1:
                     logger.warning(
                         "Conflict submitting $submit-data (HTTP %s) — retrying",
                         resp.status_code,
