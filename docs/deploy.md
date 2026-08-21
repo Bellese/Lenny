@@ -133,6 +133,12 @@ Production's `/opt/leonard/.env` pins `HAPI_CDR_IMAGE` and `HAPI_MEASURE_IMAGE` 
 the **old package names**, from before the project was renamed from MCT2 to Lenny. Those
 packages return HTTP 403; the current ones are `lenny-hapi-*`.
 
+**How it happened.** PR #261 (2026-05-04) renamed `mct2-hapi-*` to `lenny-hapi-*` across
+`.env.example`, the bake workflow, and the docs. It could not rename `/opt/leonard/.env`,
+because that file is not in this repository — it lives only on the instance. The bake
+started publishing under the new name, the old packages stopped being accessible, and the
+instance kept asking for the old ones. Nothing failed loudly, so nothing got noticed.
+
 The result, visible in the `/leonard/deploy` CloudWatch logs on every deploy:
 
 ```
@@ -158,9 +164,28 @@ of them is:
   the `seed` service loaded into those volumes, and it persists across redeploys.
 - **The HAPI binary version** — this is the stale one. Weekly bakes never reach production.
 
-So the practical effect is narrow: production runs an old HAPI build, while its config and
-data are current. It is easy to miss precisely because the two things people check are both
-sourced from somewhere else.
+So today's runtime behavior is fine: production serves correctly, on current config and
+current data. It is easy to miss precisely because the two things anyone would check are
+both sourced from somewhere else.
+
+**The real cost is not the stale binary — it's that production is no longer reproducible.**
+The image production runs exists in exactly one place: the Docker image cache on that
+instance. It is not in any registry, and the `.env` that selects it is not in git. Three
+consequences follow:
+
+- **Disaster recovery has a hole.** If that instance is lost or replaced, the image cannot
+  be pulled from anywhere, and nothing in this repository describes how to rebuild it.
+  Standing up a replacement means first deciding what production should run.
+- **Nobody can say what production is running.** The cached image predates 2026-05-04, so
+  its HAPI version, IG set, and baked bundles are whatever the bake produced before then.
+  It cannot be reconstructed from a commit.
+- **The suppression is general, not specific.** `--ignore-pull-failures || true` is
+  deliberate — a registry hiccup shouldn't block a healthy deploy — but it means *any*
+  image-pull problem is silent, including one that does matter.
+
+What protects it in the meantime: a running container holds a reference to its own image, so
+the routine `docker image prune -f` in `deploy-prod.sh` (dangling images only) cannot remove
+it. The risk is an instance rebuild, not a normal deploy.
 
 Repointing the pin at `lenny-hapi-*` would fix the pull, but it is a decision rather than a
 cleanup: it would newly subject production to the weekly bake cycle. Tracked separately —
@@ -239,11 +264,19 @@ breaking it is tracked separately, below.
 Neither is fixable from this repository — both live on the instance — so they are recorded
 here as current state.
 
-**The HAPI image pins in `/opt/leonard/.env` are stale.** They reference
-`ghcr.io/bellese/mct2-hapi-*:latest`, which 403s, so `docker compose pull` fails on every
-deploy and production's HAPI binary never updates. Repointing them at `lenny-hapi-*` fixes
-the pull and also starts feeding the weekly bake into production, which has not been true
-until now — worth deciding deliberately rather than as a side effect.
+**The HAPI image pins in `/opt/leonard/.env` are stale, and production is not
+reproducible as a result.** They reference `ghcr.io/bellese/mct2-hapi-*:latest`, which 403s,
+so `docker compose pull` has failed on every deploy since PR #261 (2026-05-04) and the image
+production runs now exists only in that instance's local Docker cache — not in any registry,
+selected by a file that is not in git. An instance rebuild cannot restore it.
+
+Repointing the pins at `lenny-hapi-*` fixes the pull, but it is not purely a cleanup: it
+also starts feeding the weekly bake into production for the first time, and the current
+`:latest` is a different HAPI build from what production has been serving. Sequence it
+deliberately — pin a specific verified `:${seed-hash}` tag rather than `:latest`, so the
+change is a known quantity and prod stops tracking a moving tag. Note also that this only
+governs the HAPI **binary**: the named volumes still shadow `/data/hapi`, so switching
+images does not touch production's data.
 
 **`/run/leonard/CDR_FERNET_KEY` is world-readable (`0644`).** Any local account on the
 instance can read the key protecting every stored CDR/MCS credential. Exposure is
