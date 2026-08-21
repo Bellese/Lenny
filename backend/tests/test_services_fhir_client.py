@@ -2704,18 +2704,58 @@ class TestSubmitData:
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, post=post)
             await submit_data(
-                mcs_url="http://mcs", parameters={"resourceType": "Parameters"}, mode=SUBMIT_DATA_MODE_STU5
+                mcs_url="http://mcs",
+                parameters={"resourceType": "Parameters"},
+                mode=SUBMIT_DATA_MODE_STU5,
+                measure_id="M1",
             )
         assert post.call_args[0][0] == "http://mcs/Measure/$deqm-submit-data"
 
-    async def test_posts_to_base_operation_in_fallback_mode(self):
+    async def test_posts_to_instance_level_operation_in_base_mode(self):
+        # Empirically verified against a local prebaked HAPI measure server: the
+        # type-level POST /Measure/$submit-data returns 400 not-supported ("does
+        # not know how to handle POST operation[Measure/$submit-data]"), while the
+        # instance-level POST /Measure/{id}/$submit-data returns 200 and performs a
+        # real upsert. Base-fallback mode must use the instance-level shape.
         post = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle"}))
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, post=post)
             await submit_data(
-                mcs_url="http://mcs", parameters={"resourceType": "Parameters"}, mode=SUBMIT_DATA_MODE_BASE
+                mcs_url="http://mcs",
+                parameters={"resourceType": "Parameters"},
+                mode=SUBMIT_DATA_MODE_BASE,
+                measure_id="M1",
             )
-        assert post.call_args[0][0] == "http://mcs/Measure/$submit-data"
+        assert post.call_args[0][0] == "http://mcs/Measure/M1/$submit-data"
+
+    async def test_base_and_stu5_modes_produce_different_url_shapes(self):
+        # Regression guard for the ruling this test file encodes: base-fallback
+        # is instance-level (Measure/{id}/$submit-data) because that's the only
+        # shape HAPI accepts; STU5 is type-level (Measure/$deqm-submit-data)
+        # because STU5's OperationDefinition formally declares the operation
+        # type-level (`instance: false`). The two must never collapse to one shape.
+        post = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle"}))
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            await submit_data(
+                mcs_url="http://mcs",
+                parameters={"resourceType": "Parameters"},
+                mode=SUBMIT_DATA_MODE_BASE,
+                measure_id="M1",
+            )
+            base_url = post.call_args[0][0]
+
+            await submit_data(
+                mcs_url="http://mcs",
+                parameters={"resourceType": "Parameters"},
+                mode=SUBMIT_DATA_MODE_STU5,
+                measure_id="M1",
+            )
+            stu5_url = post.call_args[0][0]
+
+        assert base_url == "http://mcs/Measure/M1/$submit-data"
+        assert stu5_url == "http://mcs/Measure/$deqm-submit-data"
+        assert base_url != stu5_url
 
     async def test_raises_fhir_operation_error_on_4xx(self):
         oo = {
@@ -2727,7 +2767,10 @@ class TestSubmitData:
             _mock_async_client(mock_httpx, post=post)
             with pytest.raises(FhirOperationError) as exc_info:
                 await submit_data(
-                    mcs_url="http://mcs", parameters={"resourceType": "Parameters"}, mode=SUBMIT_DATA_MODE_BASE
+                    mcs_url="http://mcs",
+                    parameters={"resourceType": "Parameters"},
+                    mode=SUBMIT_DATA_MODE_BASE,
+                    measure_id="M1",
                 )
         assert exc_info.value.status_code == 400
         assert exc_info.value.operation == "submit-data"

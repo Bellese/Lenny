@@ -989,18 +989,35 @@ async def submit_data(
     mcs_url: str,
     parameters: dict[str, Any],
     mode: str,
+    measure_id: str,
     auth_headers: dict[str, str] | None = None,
 ) -> None:
     """POST a $submit-data Parameters payload to the MCS.
 
-    STU5 mode targets `Measure/$deqm-submit-data`; base mode targets
-    `Measure/$submit-data` (the shape HAPI clinical-reasoning implements —
-    it stores the MeasureReport and resources into the server). Any 2xx is
-    success; the response body (HAPI returns a transaction Bundle) carries
-    no information the job needs.
+    The two modes deliberately use DIFFERENT URL shapes — do not "simplify"
+    them into one:
+
+    - STU5 mode POSTs to the type-level `Measure/$deqm-submit-data`. STU5's
+      OperationDefinition formally declares this operation type-level
+      (`instance: false`), so a spec-compliant STU5 server only implements it
+      there.
+    - Base-fallback mode POSTs to the instance-level
+      `Measure/{measure_id}/$submit-data`. This is empirical, not spec-driven:
+      probed against a local prebaked HAPI measure server, the type-level
+      `POST Measure/$submit-data` returned 400 not-supported ("does not know
+      how to handle POST operation[Measure/$submit-data]"), while the
+      instance-level `POST Measure/{id}/$submit-data` returned 200 and
+      performed a real upsert (confirmed via `_history` after two identical
+      POSTs). HAPI's clinical-reasoning module simply doesn't register the
+      type-level operation, so base mode has to target the instance.
+
+    Any 2xx is success; the response body (HAPI returns a transaction Bundle)
+    carries no information the job needs.
     """
-    operation = "$deqm-submit-data" if mode == SUBMIT_DATA_MODE_STU5 else "$submit-data"
-    url = f"{mcs_url}/Measure/{operation}"
+    if mode == SUBMIT_DATA_MODE_STU5:
+        url = f"{mcs_url}/Measure/$deqm-submit-data"
+    else:
+        url = f"{mcs_url}/Measure/{measure_id}/$submit-data"
     headers = {"Content-Type": "application/fhir+json", **(auth_headers or {})}
     async with httpx.AsyncClient(timeout=120.0) as client:
         start_ms = int(time.monotonic() * 1000)
@@ -1016,7 +1033,7 @@ async def submit_data(
             )
     logger.info(
         "Submitted data via %s",
-        operation,
+        mode,
         extra={"mcs_url": sanitize_url(mcs_url), "latency_ms": latency_ms},
     )
 

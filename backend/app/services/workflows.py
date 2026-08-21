@@ -117,6 +117,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # of the env-configured default strategy.
         self._strategy = DataRequirementsStrategy(measure_id, mcs_url, mcs_auth_headers)
         self._job_id = job_id
+        self._measure_id = measure_id
         self._mcs_url = mcs_url
         self._mcs_auth_headers = mcs_auth_headers
         self._measure_canonical = measure_canonical
@@ -150,6 +151,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
                 mcs_url=self._mcs_url,
                 parameters=parameters,
                 mode=self._mode,
+                measure_id=self._measure_id,
                 auth_headers=self._mcs_auth_headers,
             )
         except Exception as exc:

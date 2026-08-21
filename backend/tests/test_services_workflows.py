@@ -90,6 +90,7 @@ class TestDeqmSubmitDataWorkflow:
         kwargs = submit.call_args.kwargs
         assert kwargs["mcs_url"] == "http://mcs"
         assert kwargs["mode"] == "base-fallback"
+        assert kwargs["measure_id"] == "M1"
         params = kwargs["parameters"]
         assert params["parameter"][0]["name"] == "measureReport"
         mr = params["parameter"][0]["resource"]
@@ -109,6 +110,7 @@ class TestDeqmSubmitDataWorkflow:
         params = submit.call_args.kwargs["parameters"]
         assert params["parameter"][0]["name"] == "bundle"
         assert submit.call_args.kwargs["mode"] == "stu5"
+        assert submit.call_args.kwargs["measure_id"] == "M1"
 
     async def test_submit_failure_raises_submit_phase(self):
         wf = _deqm_workflow()
