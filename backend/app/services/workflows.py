@@ -28,6 +28,9 @@ from app.services.fhir_client import (
     push_resources,
     submit_data,
 )
+from app.services.fhir_errors import FhirOperationError
+
+_DOWNGRADE_STATUS_CODES = {400, 404}
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +157,34 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
                 measure_id=self._measure_id,
                 auth_headers=self._mcs_auth_headers,
             )
+        except FhirOperationError as exc:
+            # A mis-probed capability stamps Job.submit_data_mode="stu5" for a
+            # server that doesn't actually implement $deqm-submit-data. Rather
+            # than fail every patient in the job, downgrade to base mode on the
+            # first 400/404 and retry once. Job.submit_data_mode still shows
+            # the probe's original verdict — reconciling the UI badge with a
+            # runtime downgrade is deliberately out of scope here.
+            if self._mode == SUBMIT_DATA_MODE_STU5 and exc.status_code in _DOWNGRADE_STATUS_CODES:
+                logger.warning(
+                    "STU5 $deqm-submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
+                    exc.status_code,
+                    self._job_id,
+                    extra={"job_id": self._job_id, "patient_id": patient_id, "status_code": exc.status_code},
+                )
+                self._mode = SUBMIT_DATA_MODE_BASE
+                retry_parameters = build_base_parameters(measure_report, submitted)
+                try:
+                    await submit_data(
+                        mcs_url=self._mcs_url,
+                        parameters=retry_parameters,
+                        mode=self._mode,
+                        measure_id=self._measure_id,
+                        auth_headers=self._mcs_auth_headers,
+                    )
+                except Exception as retry_exc:
+                    raise TransferPhaseError("submit", retry_exc) from retry_exc
+            else:
+                raise TransferPhaseError("submit", exc) from exc
         except Exception as exc:
             raise TransferPhaseError("submit", exc) from exc
         return gather

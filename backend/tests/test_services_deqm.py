@@ -68,6 +68,51 @@ class TestBuildDataExchangeMeasureReport:
         assert mr["evaluatedResource"] == []
 
 
+class TestMeasureReportIdTruncation:
+    """FHIR caps `id` at 64 chars; a long patient_id must not overflow it (M3)."""
+
+    def test_over_long_patient_id_is_truncated_to_64_chars(self):
+        long_patient_id = "p" * 200
+        mr = build_data_exchange_measure_report(
+            job_id=42,
+            patient_id=long_patient_id,
+            measure_canonical="http://example.org/Measure/CMS122|1.0.0",
+            period_start="2025-01-01",
+            period_end="2025-12-31",
+            resources=[],
+            timestamp="2026-08-21T12:00:00+00:00",
+        )
+        assert len(mr["id"]) <= 64
+        assert mr["id"].startswith("deqm-42-")
+
+    def test_over_long_patient_id_is_stable_across_calls(self):
+        long_patient_id = "q" * 200
+        kwargs = dict(
+            job_id=7,
+            patient_id=long_patient_id,
+            measure_canonical="http://example.org/Measure/CMS122|1.0.0",
+            period_start="2025-01-01",
+            period_end="2025-12-31",
+            resources=[],
+            timestamp="2026-08-21T12:00:00+00:00",
+        )
+        first = build_data_exchange_measure_report(**kwargs)
+        second = build_data_exchange_measure_report(**kwargs)
+        assert first["id"] == second["id"]
+
+    def test_short_patient_id_is_unaffected(self):
+        mr = build_data_exchange_measure_report(
+            job_id=1,
+            patient_id="p1",
+            measure_canonical="http://example.org/Measure/M",
+            period_start="2025-01-01",
+            period_end="2025-12-31",
+            resources=[],
+            timestamp="2026-08-21T12:00:00+00:00",
+        )
+        assert mr["id"] == "deqm-1-p1"
+
+
 class TestParameterEnvelopes:
     def test_stu5_parameters_single_bundle(self):
         mr = _mr()

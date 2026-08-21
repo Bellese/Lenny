@@ -216,6 +216,23 @@ async def run_job(job_id: int) -> None:
         patient_ids = list(patient_map.keys())
         batch_size = settings.BATCH_SIZE
 
+        # Build the submission workflow once per job, BEFORE the wipe below. For
+        # DEQM this reads the measure canonical off the MCS; failure aborts the
+        # job before any patient work — including before the wipe — so a
+        # canonical-fetch failure no longer wipes the MCS and then fails
+        # anyway. Everything this needs (mcs_url/auth, measure_id, period) was
+        # already resolved above; it doesn't need patient_ids.
+        workflow = await build_submission_workflow(
+            workflow=job_workflow,
+            job_id=job_id,
+            measure_id=job_measure_id,
+            mcs_url=mcs_url,
+            mcs_auth_headers=mcs_auth_headers,
+            submit_data_mode=job_submit_data_mode,
+            period_start=job_period_start,
+            period_end=job_period_end,
+        )
+
         # Step 4a: Clear the prior run's data off the MCS (issue #392).
         #
         # This sits after the gather and before the push, not at the top of the
@@ -231,20 +248,6 @@ async def run_job(job_id: int) -> None:
             mcs_url=mcs_url,
             mcs_auth_headers=mcs_auth_headers,
             patient_ids=patient_ids,
-        )
-
-        # Build the submission workflow once per job. For DEQM this reads the
-        # measure canonical off the MCS; failure aborts the job before any
-        # patient work, surfacing as job.error_message via the outer except.
-        workflow = await build_submission_workflow(
-            workflow=job_workflow,
-            job_id=job_id,
-            measure_id=job_measure_id,
-            mcs_url=mcs_url,
-            mcs_auth_headers=mcs_auth_headers,
-            submit_data_mode=job_submit_data_mode,
-            period_start=job_period_start,
-            period_end=job_period_end,
         )
 
         # The cancellation check that already guarded the batch-creation block
@@ -477,10 +480,14 @@ async def _process_single_batch(
 ) -> None:
     """Process a single batch in two phases.
 
-    Phase 1 — GATHER & PUSH: Fetch each patient's data from the CDR and push
-    it to the measure engine.  HAPI FHIR's synchronous indexing strategy
+    Phase 1 — TRANSFER: Delegate to `workflow.transfer_patient()` for each
+    patient. `direct_load` gathers from the CDR and pushes a Bundle of PUTs
+    straight to the measure engine; `deqm_submit_data` gathers via targeted
+    `$data-requirements` queries and delivers via `Measure/$submit-data`
+    instead. Either way, HAPI FHIR's synchronous indexing strategy
     (synchronization.strategy=sync) ensures resources are immediately
-    searchable after each push — no post-push wait needed.
+    searchable once the workflow's delivery step returns — no post-transfer
+    wait needed.
 
     Phase 2 — EVALUATE: Call $evaluate-measure for each patient.  Because all
     patient data is already indexed, CQL evaluation sees the correct resources.
@@ -513,7 +520,12 @@ async def _process_single_batch(
 
             logger.info(
                 "Using submission workflow",
-                extra={"workflow": workflow.name, "job_id": job_id, "batch_id": batch_id},
+                extra={
+                    "workflow": workflow.name,
+                    "strategy": settings.PATIENT_DATA_STRATEGY,
+                    "job_id": job_id,
+                    "batch_id": batch_id,
+                },
             )
 
             # ----------------------------------------------------------
@@ -569,7 +581,7 @@ async def _process_single_batch(
                     gather_failed_patients.add(patient_id)
                     patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
                     sanitized_msg = sanitize_error(push_exc)
-                    error_details: dict[str, Any] = {"operation": "gather", "error": sanitized_msg}
+                    error_details: dict[str, Any] = {"operation": error_phase, "error": sanitized_msg}
                     if isinstance(push_exc, FhirOperationError):
                         error_details["url"] = push_exc.url
                         error_details["status_code"] = push_exc.status_code
@@ -582,12 +594,13 @@ async def _process_single_batch(
                         push_exc.outcome.raw if isinstance(push_exc, FhirOperationError) and push_exc.outcome else None,
                     )
                     logger.warning(
-                        "Failed to gather/push patient data",
+                        "Failed to transfer patient data",
                         extra={
                             "job_id": job_id,
                             "batch_id": batch_id,
                             "patient_id": patient_id,
                             "error": sanitized_msg,
+                            "error_phase": error_phase,
                         },
                     )
                     if await _stop_or_delete_job(job_id):

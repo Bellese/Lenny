@@ -9,10 +9,14 @@ Spec: docs/superpowers/specs/2026-08-21-deqm-submit-data-workflow-design.md
 IG:   https://hl7.org/fhir/us/davinci-deqm/STU5/
 """
 
+import hashlib
 from typing import Any
 
 DEQM_DATA_EXCHANGE_PROFILE = "http://hl7.org/fhir/us/davinci-deqm/StructureDefinition/datax-measurereport-deqm"
 DEQM_UPDATE_TYPE_EXT = "http://hl7.org/fhir/us/davinci-deqm/StructureDefinition/extension-submitDataUpdateType"
+
+# FHIR's `id` element is capped at 64 characters (spec: Resource.id).
+_MAX_FHIR_ID_LENGTH = 64
 
 # DEQM requires MeasureReport.reporter 1..1 (Organization). Lenny is the
 # reporter; this fixed resource travels inside every submission so the
@@ -23,6 +27,25 @@ LENNY_REPORTER_ORG: dict[str, Any] = {
     "name": "Lenny Measure Calculation Tool",
     "active": True,
 }
+
+
+def _measure_report_id(job_id: int, patient_id: str) -> str:
+    """Build the `deqm-{job_id}-{patient_id}` id, truncated when it would
+    overflow FHIR's 64-char `id` limit.
+
+    A long patient_id can push the composed id past 64 chars; HAPI 400s the
+    whole submission when it does. When that happens, keep the short
+    `deqm-{job_id}-` prefix (useful for debugging) and replace patient_id with
+    a stable hash of it, so the result is deterministic across calls for the
+    same (job_id, patient_id) pair.
+    """
+    candidate = f"deqm-{job_id}-{patient_id}"
+    if len(candidate) <= _MAX_FHIR_ID_LENGTH:
+        return candidate
+    prefix = f"deqm-{job_id}-"
+    digest = hashlib.sha256(patient_id.encode("utf-8")).hexdigest()
+    available = max(_MAX_FHIR_ID_LENGTH - len(prefix), 1)
+    return f"{prefix}{digest[:available]}"[:_MAX_FHIR_ID_LENGTH]
 
 
 def build_data_exchange_measure_report(
@@ -46,7 +69,7 @@ def build_data_exchange_measure_report(
     """
     return {
         "resourceType": "MeasureReport",
-        "id": f"deqm-{job_id}-{patient_id}",
+        "id": _measure_report_id(job_id, patient_id),
         "meta": {"profile": [DEQM_DATA_EXCHANGE_PROFILE]},
         "extension": [{"url": DEQM_UPDATE_TYPE_EXT, "valueCode": "snapshot"}],
         "status": "complete",

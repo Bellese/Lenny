@@ -546,6 +546,7 @@ export default function ResultsPage() {
     const phaseLabel = errorPhase === 'gather'         ? "Couldn't fetch patient data"
       : errorPhase === 'gather_partial' ? 'Some data missing'
       : errorPhase === 'evaluate'       ? 'Calculation failed'
+      : errorPhase === 'submit'         ? "Couldn't submit patient data to the measure server"
       : (r.populations?.error === true || r.status === 'error') ? 'Unknown error'
       : null;
     return {

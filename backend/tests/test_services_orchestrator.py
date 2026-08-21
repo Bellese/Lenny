@@ -937,7 +937,8 @@ async def test_orchestrator_returns_empty_headers_when_auth_type_is_none_string(
 
 
 async def test_process_batch_uses_everything_strategy(test_session, session_factory, monkeypatch):
-    """_process_single_batch uses $everything by default for complete patient graphs."""
+    """DirectLoadWorkflow selects BatchQueryStrategy ($everything) by default;
+    _process_single_batch just drives the pre-built workflow it's handed."""
     from unittest.mock import MagicMock
 
     from app.models.job import Batch, BatchStatus
@@ -1017,7 +1018,8 @@ async def test_process_batch_uses_everything_strategy(test_session, session_fact
 async def test_process_batch_uses_data_requirements_strategy_when_configured(
     test_session, session_factory, monkeypatch
 ):
-    """_process_single_batch can be rolled back to DataRequirementsStrategy by env config."""
+    """DirectLoadWorkflow can be rolled back to DataRequirementsStrategy by env
+    config; _process_single_batch just drives the pre-built workflow it's handed."""
     from unittest.mock import MagicMock
 
     from app.models.job import Batch, BatchStatus

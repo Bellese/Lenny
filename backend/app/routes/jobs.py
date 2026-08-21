@@ -247,13 +247,14 @@ async def create_job(
     # the count query does and deserves the same 502 OperationOutcome rather
     # than a bare 500. (Unlike the measures routes, nothing in this `except`
     # chain special-cases a status code, so no mis-mapping is possible here.)
+    preflight_timeout = float(min(mcs.request_timeout_seconds, _PREFLIGHT_TIMEOUT_SECONDS))
     try:
         mcs_auth_headers = await _build_auth_headers(mcs.auth_type, mcs.auth_credentials)
         found = await measure_exists(
             body.measure_id,
             mcs.mcs_url,
             auth_headers=mcs_auth_headers,
-            timeout=float(min(mcs.request_timeout_seconds, _PREFLIGHT_TIMEOUT_SECONDS)),
+            timeout=preflight_timeout,
         )
     except Exception as exc:
         logger.warning(
@@ -304,7 +305,7 @@ async def create_job(
         submit_data_mode = await detect_submit_data_mode(
             mcs_url=mcs.mcs_url,
             auth_headers=mcs_auth_headers,
-            timeout=float(min(mcs.request_timeout_seconds, _PREFLIGHT_TIMEOUT_SECONDS)),
+            timeout=preflight_timeout,
         )
 
     job = Job(

@@ -5,12 +5,24 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services.fhir_client import GatherResult
+from app.services.fhir_errors import FhirOperationError
 from app.services.workflows import (
     DeqmSubmitDataWorkflow,
     DirectLoadWorkflow,
     TransferPhaseError,
     build_submission_workflow,
 )
+
+
+def _fhir_op_error(status_code: int) -> FhirOperationError:
+    return FhirOperationError(
+        operation="submit-data",
+        url="http://mcs/Measure/$deqm-submit-data",
+        status_code=status_code,
+        outcome=None,
+        latency_ms=5,
+    )
+
 
 pytestmark = pytest.mark.asyncio
 
@@ -128,6 +140,79 @@ class TestDeqmSubmitDataWorkflow:
             with pytest.raises(TransferPhaseError) as exc_info:
                 await wf.transfer_patient("http://cdr", "p1", {})
         assert exc_info.value.phase == "gather"
+
+    async def test_stu5_400_downgrades_to_base_and_retry_succeeds(self):
+        """I4: a mis-probed stu5 server 400s the STU5 shape; downgrade to base
+        and retry once rather than failing the whole job."""
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(side_effect=[_fhir_op_error(400), None])
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            result = await wf.transfer_patient("http://cdr", "p1", {})
+        assert result is _GATHER
+        assert wf._mode == "base-fallback"
+        assert submit.await_count == 2
+        first_kwargs, second_kwargs = submit.call_args_list[0].kwargs, submit.call_args_list[1].kwargs
+        assert first_kwargs["mode"] == "stu5"
+        assert first_kwargs["parameters"]["parameter"][0]["name"] == "bundle"
+        assert second_kwargs["mode"] == "base-fallback"
+        assert second_kwargs["parameters"]["parameter"][0]["name"] == "measureReport"
+
+    async def test_stu5_404_also_downgrades(self):
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(side_effect=[_fhir_op_error(404), None])
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+        assert wf._mode == "base-fallback"
+        assert submit.await_count == 2
+
+    async def test_stu5_downgrade_retry_also_fails_raises_submit_phase(self):
+        """If the base-mode retry also fails, raise TransferPhaseError as today."""
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(side_effect=[_fhir_op_error(400), _fhir_op_error(500)])
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            with pytest.raises(TransferPhaseError) as exc_info:
+                await wf.transfer_patient("http://cdr", "p1", {})
+        assert exc_info.value.phase == "submit"
+        assert wf._mode == "base-fallback"  # downgrade already flipped before the retry failed
+        assert submit.await_count == 2
+
+    async def test_base_mode_failure_does_not_retry_and_raises(self):
+        """A base-mode failure is not stu5, so no downgrade path applies — it
+        still raises immediately."""
+        wf = _deqm_workflow(mode="base-fallback")
+        submit = AsyncMock(side_effect=_fhir_op_error(400))
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            with pytest.raises(TransferPhaseError) as exc_info:
+                await wf.transfer_patient("http://cdr", "p1", {})
+        assert exc_info.value.phase == "submit"
+        assert wf._mode == "base-fallback"
+        assert submit.await_count == 1
+
+    async def test_stu5_non_downgrade_status_does_not_retry(self):
+        """A non-400/404 STU5 failure (e.g. 500) does NOT trigger a downgrade retry."""
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(side_effect=_fhir_op_error(500))
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            with pytest.raises(TransferPhaseError) as exc_info:
+                await wf.transfer_patient("http://cdr", "p1", {})
+        assert exc_info.value.phase == "submit"
+        assert wf._mode == "stu5"  # no downgrade attempted
+        assert submit.await_count == 1
 
 
 class TestBuildSubmissionWorkflow:

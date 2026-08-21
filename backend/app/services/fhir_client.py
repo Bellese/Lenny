@@ -427,37 +427,75 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
     ) -> GatherResult:
         """Translate dataRequirement entries to CDR REST queries and collect resources.
 
-        Translates codeFilter[].valueSet into code:in={valueSetUrl} search parameters.
+        Requirements are grouped by resource type first. A type with exactly one
+        distinct valueset across all its requirements is queried with a
+        `code:in=` filter, same as before. A type with MULTIPLE distinct
+        valuesets — or a mix of filtered and unfiltered requirements — drops
+        the code filter entirely and fetches all resources of that type for
+        the patient: `code:in=vs1&code:in=vs2` is an AND in FHIR search, so
+        unioning as repeated params would narrow the result rather than widen
+        it. Over-fetching is safe for measure evaluation (CQL filters again
+        anyway); under-fetching silently changes populations with no error
+        surfaced.
+
+        Patient is always fetched by direct read, whether or not it appears in
+        the dataRequirement list — `$everything` always includes it, and its
+        absence fails evaluation regardless.
+
         Per-type failures are captured in GatherResult.failed_types.
         Raises RuntimeError only when ALL types fail (triggers outer $everything fallback).
         """
         resources: list[dict[str, Any]] = []
-        seen_types: set[str] = set()
         failed_types: list[FailedResourceFetch] = []
         failed_type_names: set[str] = set()
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            for req in requirements:
-                resource_type = req.get("type", "")
-                if not resource_type or not re.match(r"^[A-Za-z][A-Za-z0-9]{0,127}$", resource_type):
-                    continue
-                if resource_type in seen_types:
-                    continue
-                seen_types.add(resource_type)
+        # Group requirements by resource type, preserving first-seen order,
+        # and collect each requirement's valueset (None when unfiltered).
+        types_in_order: list[str] = []
+        valuesets_by_type: dict[str, list[str | None]] = {}
+        for req in requirements:
+            resource_type = req.get("type", "")
+            if not resource_type or not re.match(r"^[A-Za-z][A-Za-z0-9]{0,127}$", resource_type):
+                continue
+            if resource_type not in valuesets_by_type:
+                valuesets_by_type[resource_type] = []
+                types_in_order.append(resource_type)
+            vs: str | None = None
+            for cf in req.get("codeFilter", []):
+                candidate = cf.get("valueSet")
+                if candidate:
+                    vs = candidate
+                    break
+            valuesets_by_type[resource_type].append(vs)
 
+        # `required_types` drives the "did everything we actually needed fail"
+        # check below. Patient is fetched unconditionally as a safety net (see
+        # docstring) but is not itself a declared data requirement, so a
+        # Patient-only failure must not, by itself, count as "all required
+        # types failed" and must not prevent that check from firing when the
+        # declared types genuinely all fail.
+        required_types: set[str] = set(types_in_order)
+        if "Patient" not in required_types:
+            types_in_order.append("Patient")
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            for resource_type in types_in_order:
                 try:
                     if resource_type == "Patient":
                         resp = await client.get(f"{cdr_url}/Patient/{patient_id}", headers=auth_headers)
                         if resp.status_code == 200:
                             resources.append(resp.json())
                     else:
-                        # Translate codeFilter[].valueSet to code:in search parameter
+                        # Only keep a code:in= filter when every requirement for
+                        # this type agrees on a single valueset. Otherwise
+                        # over-fetch the whole type — see docstring.
+                        type_valuesets = valuesets_by_type.get(resource_type, [])
+                        distinct_valuesets = {vs for vs in type_valuesets if vs}
+                        has_unfiltered = any(vs is None for vs in type_valuesets)
                         params = f"subject=Patient/{patient_id}&_count=100"
-                        for cf in req.get("codeFilter", []):
-                            vs = cf.get("valueSet")
-                            if vs:
-                                params += f"&code:in={vs}"
-                                break  # Use first valueSet codeFilter only
+                        if len(distinct_valuesets) == 1 and not has_unfiltered:
+                            (single_vs,) = distinct_valuesets
+                            params += f"&code:in={single_vs}"
                         page_url: Optional[str] = f"{cdr_url}/{resource_type}?{params}"
                         while page_url:
                             resp = await client.get(page_url, headers=auth_headers)
@@ -494,8 +532,9 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                         extra={"resource_type": resource_type, "patient_id": patient_id, "error": str(exc)},
                     )
 
-        # Only propagate failure (triggering outer $everything fallback) when all types fail
-        if seen_types and failed_type_names == seen_types:
+        # Only propagate failure (triggering outer $everything fallback) when all
+        # REQUIRED types fail — a forced Patient-fetch failure alone doesn't count.
+        if required_types and (failed_type_names & required_types) == required_types:
             raise RuntimeError(f"All resource types failed CDR fetch: {sorted(failed_type_names)}")
 
         if failed_types:
@@ -514,7 +553,7 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                     "measure_id": self._measure_id,
                     "patient_id": patient_id,
                     "resource_count": len(resources),
-                    "requirement_types": list(seen_types),
+                    "requirement_types": list(required_types),
                 },
             )
         return GatherResult(resources=resources, failed_types=failed_types)
@@ -974,7 +1013,15 @@ async def detect_submit_data_mode(
             for op in operations:
                 if op.get("name") == _DEQM_SUBMIT_DATA_OP_NAME:
                     return SUBMIT_DATA_MODE_STU5
-                if str(op.get("definition", "")).startswith(_DEQM_SUBMIT_DATA_CANONICAL):
+                definition = str(op.get("definition", ""))
+                # Exact match, or the canonical with a `|version` suffix — NOT any
+                # prefix. A loose startswith() let a server that merely cites the
+                # DEQM canonical (but implements only the base wire shape) get
+                # classified stu5, which then 400s on every $deqm-submit-data POST
+                # with no downgrade (see DeqmSubmitDataWorkflow.transfer_patient).
+                if definition == _DEQM_SUBMIT_DATA_CANONICAL or definition.startswith(
+                    f"{_DEQM_SUBMIT_DATA_CANONICAL}|"
+                ):
                     return SUBMIT_DATA_MODE_STU5
     except Exception as exc:
         logger.warning(
