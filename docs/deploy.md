@@ -234,17 +234,24 @@ breaking it is tracked separately, below.
 
 ---
 
-## Known issues, tracked separately
+## Two things in production that need changing
 
-Two items found while documenting this pipeline that need fixing outside a docs change:
+Neither is fixable from this repository — both live on the instance — so they are recorded
+here as current state.
 
-1. **The production HAPI image pins are stale** (`mct2-hapi-*` → 403), so `docker compose
-   pull` fails silently on every deploy and production's HAPI binary never updates. Fixing
-   it means deciding whether production should track the weekly bake at all.
-2. **`/run/leonard/CDR_FERNET_KEY` is world-readable** (`0644`) on the instance. The fix is
-   to grant the app user without granting everyone (`-g 1000 -m 0640`), or to read the key
-   as root in the entrypoint and pass it down the way the DB password already is. Not a
-   one-character change; it needs a redeploy to verify.
+**The HAPI image pins in `/opt/leonard/.env` are stale.** They reference
+`ghcr.io/bellese/mct2-hapi-*:latest`, which 403s, so `docker compose pull` fails on every
+deploy and production's HAPI binary never updates. Repointing them at `lenny-hapi-*` fixes
+the pull and also starts feeding the weekly bake into production, which has not been true
+until now — worth deciding deliberately rather than as a side effect.
+
+**`/run/leonard/CDR_FERNET_KEY` is world-readable (`0644`).** Any local account on the
+instance can read the key protecting every stored CDR/MCS credential. Exposure is
+host-local, not network-reachable. The fix is to grant the app user without granting
+everyone — `install -o root -g 1000 -m 0640` at `scripts/deploy-prod.sh:149` — or to read
+the key as root in the entrypoint and pass it down the way the DB password already is.
+Changing the mode to `0600` does **not** work; see the note in `docs/architecture.md`
+§ Prod secrets for why.
 
 ---
 
