@@ -6,6 +6,8 @@ import httpx
 import pytest
 
 from app.services.fhir_client import (
+    SUBMIT_DATA_MODE_BASE,
+    SUBMIT_DATA_MODE_STU5,
     BatchQueryStrategy,
     DataRequirementsStrategy,
     _acquire_smart_token,
@@ -13,11 +15,14 @@ from app.services.fhir_client import (
     _chunk_request_entries,
     _remap_valueset_ids_for_hapi,
     delete_measure,
+    detect_submit_data_mode,
     evaluate_measure,
+    get_measure_canonical,
     list_measures,
     measure_exists,
     push_resources,
     resolve_evaluated_resource,
+    submit_data,
     upload_measure_bundle,
     wait_for_valueset_expansion,
     wipe_measure_definitions,
@@ -2608,3 +2613,121 @@ def test_mcs_target_requires_every_field():
 
     with pytest.raises(TypeError):
         McsTarget(url="https://mcs.example.org/fhir")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# DEQM $submit-data support (spec: 2026-08-21-deqm-submit-data-workflow)
+# ---------------------------------------------------------------------------
+
+
+def _mock_async_client(mock_httpx, *, get=None, post=None):
+    """Wire an AsyncMock client into the patched httpx.AsyncClient ctor."""
+    ctx = AsyncMock()
+    if get is not None:
+        ctx.get = get
+    if post is not None:
+        ctx.post = post
+    mock_httpx.return_value.__aenter__ = AsyncMock(return_value=ctx)
+    mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+    return ctx
+
+
+class TestGetMeasureCanonical:
+    async def test_returns_url_pipe_version(self):
+        measure = {"resourceType": "Measure", "id": "m1", "url": "http://ex.org/Measure/m1", "version": "2.0"}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, measure)))
+            result = await get_measure_canonical("m1", mcs_url="http://mcs")
+        assert result == "http://ex.org/Measure/m1|2.0"
+
+    async def test_returns_bare_url_without_version(self):
+        measure = {"resourceType": "Measure", "id": "m1", "url": "http://ex.org/Measure/m1"}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, measure)))
+            result = await get_measure_canonical("m1", mcs_url="http://mcs")
+        assert result == "http://ex.org/Measure/m1"
+
+    async def test_falls_back_to_relative_reference_when_url_missing(self):
+        measure = {"resourceType": "Measure", "id": "m1"}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, measure)))
+            result = await get_measure_canonical("m1", mcs_url="http://mcs")
+        assert result == "Measure/m1"
+
+    async def test_raises_on_http_error(self):
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(
+                mock_httpx, get=AsyncMock(return_value=_make_response(404, {"resourceType": "OperationOutcome"}))
+            )
+            with pytest.raises(FhirOperationError):
+                await get_measure_canonical("m1", mcs_url="http://mcs")
+
+
+class TestDetectSubmitDataMode:
+    def _capability(self, operations: list[dict]) -> dict:
+        return {
+            "resourceType": "CapabilityStatement",
+            "rest": [{"mode": "server", "resource": [{"type": "Measure", "operation": operations}]}],
+        }
+
+    async def test_stu5_when_deqm_operation_name_present(self):
+        cap = self._capability([{"name": "deqm-submit-data", "definition": "http://x"}])
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, cap)))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_STU5
+
+    async def test_stu5_when_deqm_canonical_definition_present(self):
+        cap = self._capability(
+            [{"name": "whatever", "definition": "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/submit-data"}]
+        )
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, cap)))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_STU5
+
+    async def test_fallback_when_only_base_submit_data(self):
+        cap = self._capability(
+            [{"name": "submit-data", "definition": "http://hl7.org/fhir/OperationDefinition/Measure-submit-data"}]
+        )
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, cap)))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+
+    async def test_fallback_when_probe_raises(self):
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(side_effect=httpx.ConnectError("boom")))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+
+
+class TestSubmitData:
+    async def test_posts_to_deqm_operation_in_stu5_mode(self):
+        post = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle"}))
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            await submit_data(
+                mcs_url="http://mcs", parameters={"resourceType": "Parameters"}, mode=SUBMIT_DATA_MODE_STU5
+            )
+        assert post.call_args[0][0] == "http://mcs/Measure/$deqm-submit-data"
+
+    async def test_posts_to_base_operation_in_fallback_mode(self):
+        post = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle"}))
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            await submit_data(
+                mcs_url="http://mcs", parameters={"resourceType": "Parameters"}, mode=SUBMIT_DATA_MODE_BASE
+            )
+        assert post.call_args[0][0] == "http://mcs/Measure/$submit-data"
+
+    async def test_raises_fhir_operation_error_on_4xx(self):
+        oo = {
+            "resourceType": "OperationOutcome",
+            "issue": [{"severity": "error", "code": "invalid", "diagnostics": "bad payload"}],
+        }
+        post = AsyncMock(return_value=_make_response(400, oo))
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            with pytest.raises(FhirOperationError) as exc_info:
+                await submit_data(
+                    mcs_url="http://mcs", parameters={"resourceType": "Parameters"}, mode=SUBMIT_DATA_MODE_BASE
+                )
+        assert exc_info.value.status_code == 400
+        assert exc_info.value.operation == "submit-data"

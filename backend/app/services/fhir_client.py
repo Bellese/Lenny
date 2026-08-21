@@ -902,6 +902,125 @@ async def evaluate_measure(
     raise RuntimeError("Measure evaluation failed without a response")
 
 
+# --- DEQM $submit-data support (spec: 2026-08-21-deqm-submit-data-workflow) ---
+
+SUBMIT_DATA_MODE_STU5 = "stu5"
+SUBMIT_DATA_MODE_BASE = "base-fallback"
+
+_DEQM_SUBMIT_DATA_CANONICAL = "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/submit-data"
+_DEQM_SUBMIT_DATA_OP_NAME = "deqm-submit-data"
+
+
+async def get_measure_canonical(
+    measure_id: str,
+    *,
+    mcs_url: str,
+    auth_headers: dict[str, str] | None = None,
+) -> str:
+    """Read Measure/{id} off the MCS and return its canonical `url|version`.
+
+    The DEQM Data Exchange MeasureReport's `measure` element must carry the
+    measure's canonical URL, which only the MCS knows. Raises
+    FhirOperationError when the Measure can't be read — the job should fail
+    fast rather than submit reports pointing at nothing. A Measure without a
+    `url` (unusual but legal) degrades to the relative reference.
+    """
+    url = f"{mcs_url}/Measure/{measure_id}"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        start_ms = int(time.monotonic() * 1000)
+        resp = await client.get(url, headers=auth_headers or {})
+        latency_ms = int(time.monotonic() * 1000) - start_ms
+        if resp.status_code != 200:
+            raise FhirOperationError(
+                operation="read-measure",
+                url=url,
+                status_code=resp.status_code,
+                outcome=FhirOperationOutcome.from_response(resp),
+                latency_ms=latency_ms,
+            )
+        measure = resp.json()
+    canonical = measure.get("url")
+    if not canonical:
+        return f"Measure/{measure_id}"
+    version = measure.get("version")
+    return f"{canonical}|{version}" if version else canonical
+
+
+async def detect_submit_data_mode(
+    *,
+    mcs_url: str,
+    auth_headers: dict[str, str] | None = None,
+    timeout: float = 10.0,
+) -> str:
+    """Probe the MCS CapabilityStatement for DEQM STU5 $deqm-submit-data.
+
+    Returns SUBMIT_DATA_MODE_STU5 when the Measure resource advertises an
+    operation named `deqm-submit-data` or defined by the DEQM canonical.
+    Everything else — including an unreachable/unparseable /metadata — is
+    SUBMIT_DATA_MODE_BASE. Never raises: the probe decides the envelope,
+    it must not block job creation (the measure pre-flight already proved
+    the MCS reachable).
+    """
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{mcs_url}/metadata", headers=auth_headers or {})
+            resp.raise_for_status()
+            capability = resp.json()
+        for rest in capability.get("rest", []):
+            operations = list(rest.get("operation", []))
+            for res in rest.get("resource", []):
+                if res.get("type") == "Measure":
+                    operations.extend(res.get("operation", []))
+            for op in operations:
+                if op.get("name") == _DEQM_SUBMIT_DATA_OP_NAME:
+                    return SUBMIT_DATA_MODE_STU5
+                if str(op.get("definition", "")).startswith(_DEQM_SUBMIT_DATA_CANONICAL):
+                    return SUBMIT_DATA_MODE_STU5
+    except Exception as exc:
+        logger.warning(
+            "CapabilityStatement probe for $deqm-submit-data failed — assuming base $submit-data",
+            extra={"mcs_url": sanitize_url(mcs_url), "error": str(exc)},
+        )
+    return SUBMIT_DATA_MODE_BASE
+
+
+async def submit_data(
+    *,
+    mcs_url: str,
+    parameters: dict[str, Any],
+    mode: str,
+    auth_headers: dict[str, str] | None = None,
+) -> None:
+    """POST a $submit-data Parameters payload to the MCS.
+
+    STU5 mode targets `Measure/$deqm-submit-data`; base mode targets
+    `Measure/$submit-data` (the shape HAPI clinical-reasoning implements —
+    it stores the MeasureReport and resources into the server). Any 2xx is
+    success; the response body (HAPI returns a transaction Bundle) carries
+    no information the job needs.
+    """
+    operation = "$deqm-submit-data" if mode == SUBMIT_DATA_MODE_STU5 else "$submit-data"
+    url = f"{mcs_url}/Measure/{operation}"
+    headers = {"Content-Type": "application/fhir+json", **(auth_headers or {})}
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        start_ms = int(time.monotonic() * 1000)
+        resp = await client.post(url, json=parameters, headers=headers)
+        latency_ms = int(time.monotonic() * 1000) - start_ms
+        if resp.status_code >= 300:
+            raise FhirOperationError(
+                operation="submit-data",
+                url=url,
+                status_code=resp.status_code,
+                outcome=FhirOperationOutcome.from_response(resp),
+                latency_ms=latency_ms,
+            )
+    logger.info(
+        "Submitted data via %s",
+        operation,
+        extra={"mcs_url": sanitize_url(mcs_url), "latency_ms": latency_ms},
+    )
+
+
 async def _remap_valueset_ids_for_hapi(
     entries: list[dict[str, Any]],
     client: httpx.AsyncClient,
