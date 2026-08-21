@@ -1,5 +1,6 @@
 """Tests for the per-job submission workflow strategies (workflows.py)."""
 
+import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -199,6 +200,60 @@ class TestDeqmSubmitDataWorkflow:
         assert exc_info.value.phase == "submit"
         assert wf._mode == "base-fallback"
         assert submit.await_count == 1
+
+    async def test_concurrent_stu5_downgrade_does_not_strand_second_patient(self):
+        """Regression: self._mode is shared, mutable instance state, and one
+        DeqmSubmitDataWorkflow instance is reused concurrently across patients
+        in the same job (orchestrator batches under
+        asyncio.Semaphore(MAX_WORKERS) + asyncio.gather). If two patients
+        both send STU5 requests and both 400, the downgrade guard must judge
+        EACH attempt against the mode IT was sent under — not against
+        self._mode read after the await, which a concurrent sibling may
+        already have flipped to base-fallback. Otherwise whichever patient's
+        except-handler runs second reads the already-flipped mode, the guard
+        evaluates False, and that patient is stranded (raises
+        TransferPhaseError) despite having failed for the identical
+        mis-probed-STU5 reason as its sibling, which got rescued.
+
+        The mock below uses an asyncio.Event as a barrier so BOTH STU5 400s
+        are guaranteed to be in flight/raised before either patient's
+        downgrade-and-retry logic runs — this reproduces the race
+        deterministically instead of relying on scheduling luck.
+        """
+        wf = _deqm_workflow(mode="stu5")
+        stu5_call_count = 0
+        release_first_waiter = asyncio.Event()
+
+        async def submit_data_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            nonlocal stu5_call_count
+            if mode == "stu5":
+                stu5_call_count += 1
+                if stu5_call_count == 1:
+                    # First STU5 attempt to arrive: wait for its sibling so
+                    # both 400s exist before either except-handler (and thus
+                    # any self._mode mutation) runs.
+                    await release_first_waiter.wait()
+                else:
+                    release_first_waiter.set()
+                raise _fhir_op_error(400)
+            return None  # base-mode retries succeed
+
+        submit = AsyncMock(side_effect=submit_data_side_effect)
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            result_a, result_b = await asyncio.gather(
+                wf.transfer_patient("http://cdr", "p1", {}),
+                wf.transfer_patient("http://cdr", "p2", {}),
+            )
+
+        assert result_a is _GATHER
+        assert result_b is _GATHER
+        assert stu5_call_count == 2
+        base_mode_calls = [c for c in submit.call_args_list if c.kwargs["mode"] == "base-fallback"]
+        assert len(base_mode_calls) == 2
+        assert wf._mode == "base-fallback"
 
     async def test_stu5_non_downgrade_status_does_not_retry(self):
         """A non-400/404 STU5 failure (e.g. 500) does NOT trigger a downgrade retry."""

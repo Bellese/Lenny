@@ -144,7 +144,23 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
         submitted = [dict(LENNY_REPORTER_ORG)] + gather.resources
-        if self._mode == SUBMIT_DATA_MODE_STU5:
+        # Snapshot the mode used for THIS attempt. self._mode is shared,
+        # mutable instance state: one DeqmSubmitDataWorkflow is built per job
+        # (orchestrator.py) and its transfer_patient() runs concurrently
+        # across patients in different batches under
+        # asyncio.Semaphore(MAX_WORKERS) + asyncio.gather. Two patients can
+        # both read self._mode == stu5 here, both send STU5 requests, and
+        # both fail with a 400 — but by the time the SECOND one's except
+        # handler below runs, the FIRST one may already have flipped
+        # self._mode to base-fallback. The downgrade guard must judge this
+        # attempt against the mode it was actually sent under (attempt_mode),
+        # never against the live self._mode read after the `await` —
+        # otherwise the second patient's guard sees the sibling's flip, comes
+        # up False, and that patient is stranded (raises TransferPhaseError)
+        # instead of being rescued like its sibling. Do NOT "simplify" this
+        # back to `self._mode` in the guard below.
+        attempt_mode = self._mode
+        if attempt_mode == SUBMIT_DATA_MODE_STU5:
             parameters = build_stu5_parameters(measure_report, submitted)
         else:
             parameters = build_base_parameters(measure_report, submitted)
@@ -153,7 +169,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             await submit_data(
                 mcs_url=self._mcs_url,
                 parameters=parameters,
-                mode=self._mode,
+                mode=attempt_mode,
                 measure_id=self._measure_id,
                 auth_headers=self._mcs_auth_headers,
             )
@@ -164,20 +180,26 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             # first 400/404 and retry once. Job.submit_data_mode still shows
             # the probe's original verdict — reconciling the UI badge with a
             # runtime downgrade is deliberately out of scope here.
-            if self._mode == SUBMIT_DATA_MODE_STU5 and exc.status_code in _DOWNGRADE_STATUS_CODES:
+            if attempt_mode == SUBMIT_DATA_MODE_STU5 and exc.status_code in _DOWNGRADE_STATUS_CODES:
                 logger.warning(
                     "STU5 $deqm-submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
                     exc.status_code,
                     self._job_id,
                     extra={"job_id": self._job_id, "patient_id": patient_id, "status_code": exc.status_code},
                 )
+                # Flipping shared state here is the intended optimization —
+                # later patients (and later batches) skip straight to base
+                # mode instead of re-probing STU5 themselves. It's fine for
+                # this write to race with a concurrent sibling's own flip
+                # because it's idempotent (both write the same constant); the
+                # bug was only ever in a *guard* consulting this field.
                 self._mode = SUBMIT_DATA_MODE_BASE
                 retry_parameters = build_base_parameters(measure_report, submitted)
                 try:
                     await submit_data(
                         mcs_url=self._mcs_url,
                         parameters=retry_parameters,
-                        mode=self._mode,
+                        mode=SUBMIT_DATA_MODE_BASE,
                         measure_id=self._measure_id,
                         auth_headers=self._mcs_auth_headers,
                     )
