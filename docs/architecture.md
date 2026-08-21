@@ -2,7 +2,7 @@
 
 ## Service Map
 
-| Service | Image | Role | Exposed port |
+| Service | Image (compose default) | Role | Exposed port |
 |---------|-------|------|-------------|
 | frontend | local build | React web UI | 3001 |
 | backend | local build | FastAPI orchestrator | 8000 |
@@ -22,8 +22,10 @@ The CDR and Measure Engine are intentionally separate. Both are user-configurabl
 Two compose layouts share these services:
 
 - **Local dev (`docker-compose.yml` alone)** — pulls vanilla `hapiproject/hapi:v8.8.0-1`. HAPI loads QI-Core / US-Core / CQL IGs at runtime via `hapi.fhir.implementationguides.*` env vars (see *HAPI FHIR Configuration* below). Cold-start is slow because IG packages download from the HL7 registry on first boot.
-- **CI (`docker-compose.yml` + `docker-compose.prebaked.yml`)** — pulls pre-baked `ghcr.io/bellese/lenny-hapi-{cdr,measure}` images that already contain the IGs and connectathon bundles, skipping the runtime IG load (PR #199, Phase 3). GHCR auth is required to pull these — see `docs/runbooks/ghcr-pull-auth.md`.
-- **Production** — currently runs vanilla `hapiproject/hapi:v8.8.0-1` (same as local dev). `scripts/deploy-prod.sh` uses only `docker-compose.yml` + `docker-compose.prod.yml` and never appends `docker-compose.prebaked.yml`. The `seed` service runs on every deploy and POSTs the connectathon bundles into HAPI; the `cdrdata`/`measuredata` named volumes persist across redeploys so the re-POST is a no-op for already-loaded resources (`If-None-Exist`). Whether to switch prod to pre-baked is an open question — see `docs/decisions/prebaked-in-prod.md` (TBD) or ask Sutton.
+- **CI (`docker-compose.yml` + `docker-compose.prebaked.yml`)** — pulls pre-baked `ghcr.io/bellese/lenny-hapi-{cdr,measure}` images that already contain the IGs and connectathon bundles, skipping the runtime IG load (PR #199, Phase 3). No auth is required: both packages are public (issue #200) — see `docs/runbooks/ghcr-pull-auth.md`.
+- **Production** — `scripts/deploy-prod.sh` uses only `docker-compose.yml` + `docker-compose.prod.yml` and never appends `docker-compose.prebaked.yml`, so the `cdrdata`/`measuredata` named volumes mount over `/data/hapi` and shadow whatever H2 store the image carries. The `seed` service runs on every deploy and POSTs the connectathon bundles into HAPI; the volumes persist across redeploys so the re-POST is a no-op for already-loaded resources (`If-None-Exist`). Whether to switch prod to pre-baked is an open question — see `docs/decisions.md` or ask Sutton.
+
+  Production is **not** running vanilla `hapiproject/hapi:v8.8.0-1`, despite what this file said before 2026-08-21. `/opt/leonard/.env` pins `HAPI_CDR_IMAGE`/`HAPI_MEASURE_IMAGE` to the pre-rename `ghcr.io/bellese/mct2-hapi-*:latest` names, which return 403; `compose pull --ignore-pull-failures` swallows the error on every deploy (visible in the `/leonard/deploy` CloudWatch logs). Net effect: HAPI's **binary** is frozen on an image cached before PR #261 (2026-05-04, the rename that couldn't reach that file), while its configuration (from this repo's `environment:` blocks) and its data (from the named volumes) are both current. The consequence worth knowing: that image is not in any registry, so production cannot currently be rebuilt from this repo. See `docs/deploy.md` § Production and GHCR.
 
 The local fast path is to set `HAPI_CDR_IMAGE` and `HAPI_MEASURE_IMAGE` in `.env` so vanilla compose reuses prebaked images without the prebaked overlay (see `.env.example`).
 
@@ -229,7 +231,9 @@ Production secrets are stored in **AWS SSM Parameter Store** under `/leonard/pro
 
 **Instance profile:** `leonard-ec2-prod` (attached to the prod EC2 instance) grants `ssm:GetParametersByPath` on `/leonard/prod/*` with `kms:ViaService` scoped to SSM only.
 
-**Boot flow:** On every deploy, `scripts/fetch-prod-secrets.sh` reads SSM and writes values to `/run/leonard/env` (tmpfs, mode 0600, cleared on reboot). `deploy-prod.sh` extracts `POSTGRES_PASSWORD` to `/run/leonard/POSTGRES_PASSWORD` (mode 0600) and `CDR_FERNET_KEY` to `/run/leonard/CDR_FERNET_KEY` (mode 0600). `docker-compose.prod.yml` mounts both as Docker secrets — the `backend` service reads `POSTGRES_PASSWORD` via `/run/secrets/postgres_password` (assembled into `DATABASE_URL` by `backend/docker-entrypoint.sh`) and `CDR_FERNET_KEY` via `/run/secrets/cdr_fernet_key` (read by `credential_crypto.py` at startup). The `db` service reads `POSTGRES_PASSWORD` via `POSTGRES_PASSWORD_FILE`. `scripts/reconcile-db-password.sh` then runs `ALTER ROLE mct2 PASSWORD :'newpw'` to synchronize the DB volume's embedded password.
+**Boot flow:** On every deploy, `scripts/fetch-prod-secrets.sh` reads SSM and writes values to `/run/leonard/env` (tmpfs, mode 0600, cleared on reboot). `deploy-prod.sh` extracts `POSTGRES_PASSWORD` to `/run/leonard/POSTGRES_PASSWORD` (mode 0600) and `CDR_FERNET_KEY` to `/run/leonard/CDR_FERNET_KEY` (mode **0644** — see the note below). `docker-compose.prod.yml` mounts both as Docker secrets — the `backend` service reads `POSTGRES_PASSWORD` via `/run/secrets/postgres_password` (assembled into `DATABASE_URL` by `backend/docker-entrypoint.sh`) and `CDR_FERNET_KEY` via `/run/secrets/cdr_fernet_key` (read by `credential_crypto.py` at startup). The `db` service reads `POSTGRES_PASSWORD` via `POSTGRES_PASSWORD_FILE`. `scripts/reconcile-db-password.sh` then runs `ALTER ROLE mct2 PASSWORD :'newpw'` to synchronize the DB volume's embedded password.
+
+**Why the two secret files have different modes.** `POSTGRES_PASSWORD` is read by `backend/docker-entrypoint.sh` **as root**, before `exec gosu app` drops to uid 1000, so `0600` is readable at the moment it matters. `CDR_FERNET_KEY` is read later — by `services/credential_crypto.py` at application startup, i.e. *after* the privilege drop. Compose bind-mounts file-based secrets with host permissions intact, so `0600 root:root` would be unreadable to the app user and the backend would fail to start. The `0644` at `deploy-prod.sh:149` is therefore load-bearing, not an oversight: changing it to `0600` breaks prod. It is still looser than it should be (world-readable on the host); tightening it means granting uid 1000 without granting everyone (`-g 1000 -m 0640`) or reading the key as root in the entrypoint the way the DB password already is.
 
 **Rotation:** Update the SSM param, then run `scripts/deploy-prod.sh`. The backend must be restarted for the new `DATABASE_URL` to take effect (deploy-prod.sh handles this). See `docs/runbooks/rotate-db-password.md`.
 
