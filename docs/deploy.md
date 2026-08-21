@@ -126,74 +126,20 @@ made public (issue #200, `docs/runbooks/ghcr-pull-auth.md`).
 in `.env` (see `.env.example`) plus the `docker-compose.prebaked.yml` overlay, which strips
 the named volume mounts so the baked data inside the image is visible.
 
-### Production and GHCR: a known problem
+### Production and GHCR
 
-Production's `/opt/leonard/.env` pins `HAPI_CDR_IMAGE` and `HAPI_MEASURE_IMAGE` to
-`ghcr.io/bellese/mct2-hapi-cdr:latest` and `ghcr.io/bellese/mct2-hapi-measure:latest` —
-the **old package names**, from before the project was renamed from MCT2 to Lenny. Those
-packages return HTTP 403; the current ones are `lenny-hapi-*`.
+Production does not consume GHCR images. It runs the compose default,
+`hapiproject/hapi:v8.8.0-1`, pulled unauthenticated from Docker Hub — the same vanilla base
+image the `lenny-hapi-*` GHCR packages are built from. GHCR serves local dev and CI only
+(§ What GHCR is for, above).
 
-**How it happened.** PR #261 (2026-05-04) renamed `mct2-hapi-*` to `lenny-hapi-*` across
-`.env.example`, the bake workflow, and the docs. It could not rename `/opt/leonard/.env`,
-because that file is not in this repository — it lives only on the instance. The bake
-started publishing under the new name, the old packages stopped being accessible, and the
-instance kept asking for the old ones. Nothing failed loudly, so nothing got noticed.
-
-The result, visible in the `/leonard/deploy` CloudWatch logs on every deploy:
-
-```
-hapi-fhir-cdr Error Head "https://ghcr.io/v2/bellese/mct2-hapi-cdr/manifests/latest": denied: denied
-hapi-fhir-measure Error Head "https://ghcr.io/v2/bellese/mct2-hapi-measure/manifests/latest": denied: denied
-```
-
-`deploy-prod.sh` runs `docker compose pull --ignore-pull-failures || true` by design, so a
-registry hiccup can't block an otherwise-healthy deploy. That also means this failure is
-silent: the pull fails, the deploy continues, and the HAPI containers keep running on
-whatever image is already cached on the instance.
-
-**What this does and does not affect.** Three things could plausibly be stale, and only one
-of them is:
-
-- **HAPI Spring configuration** — not stale. It comes from the `environment:` blocks in
-  `docker-compose.yml`, which is refreshed from git on every deploy. This includes
-  `synchronization.strategy=sync`, the IG variables, and the memory settings.
-- **FHIR data** — not stale, and not from the image at all. Production does *not* apply
-  `docker-compose.prebaked.yml` (`deploy-prod.sh:42-44` uses only `docker-compose.yml` +
-  `docker-compose.prod.yml`), so the `cdrdata` and `measuredata` named volumes mount over
-  `/data/hapi` and shadow whatever H2 store the image contains. Production's data is what
-  the `seed` service loaded into those volumes, and it persists across redeploys.
-- **The HAPI binary version** — this is the stale one. Weekly bakes never reach production.
-
-So today's runtime behavior is fine: production serves correctly, on current config and
-current data. It is easy to miss precisely because the two things anyone would check are
-both sourced from somewhere else.
-
-**The real cost is not the stale binary — it's that production is no longer reproducible.**
-The image production runs exists in exactly one place: the Docker image cache on that
-instance. It is not in any registry, and the `.env` that selects it is not in git. Three
-consequences follow:
-
-- **Disaster recovery has a hole.** If that instance is lost or replaced, the image cannot
-  be pulled from anywhere, and nothing in this repository describes how to rebuild it.
-  Standing up a replacement means first deciding what production should run.
-- **What production is running had to be established forensically.** The cached image
-  predates 2026-05-04, so its IG set and baked bundles are whatever the bake produced before
-  then and cannot be reconstructed from a commit. The HAPI *version* was pinned down by
-  inspecting the instance directly (2026-08-21): all 35 base layers of the cached images
-  match `hapiproject/hapi:v8.8.0-1` byte-for-byte — they are that image plus a config layer
-  compose overrides and a data layer the volumes shadow. Knowable, but only because the
-  instance still exists to inspect.
-- **The suppression is general, not specific.** `--ignore-pull-failures || true` is
-  deliberate — a registry hiccup shouldn't block a healthy deploy — but it means *any*
-  image-pull problem is silent, including one that does matter.
-
-What protects it in the meantime: a running container holds a reference to its own image, so
-the routine `docker image prune -f` in `deploy-prod.sh` (dangling images only) cannot remove
-it. The risk is an instance rebuild, not a normal deploy.
-
-Repointing the pin at `lenny-hapi-*` would fix the pull, but it is a decision rather than a
-cleanup: it would newly subject production to the weekly bake cycle. Tracked in issue #407 —
-see the note at the end of this document for the decided direction.
+From PR #261 (2026-05-04) until issue #407, `/opt/leonard/.env` pinned
+`HAPI_CDR_IMAGE`/`HAPI_MEASURE_IMAGE` at the pre-rename `mct2-hapi-*` package names, and
+`docker compose pull --ignore-pull-failures` silently ate the resulting 403 on every deploy
+— the image production ran existed only in that instance's local cache, selected by a file
+not in git. `scripts/check-pinned-images.sh` now runs before that pull and fails the deploy
+loudly if a deliberately pinned image can't be pulled, closing the failure class, not just
+this one instance of it. Full history and decision rationale: `docs/decisions.md` ADR-015.
 
 ---
 
@@ -264,28 +210,11 @@ breaking it is tracked separately, below.
 
 ---
 
-## Two things in production that need changing
+## What still needs changing in production
 
-Neither is fixable from this repository — both live on the instance — so they are recorded
-here as current state.
-
-**The HAPI image pins in `/opt/leonard/.env` are stale, and production is not
-reproducible as a result.** Tracked in issue #407. They reference `ghcr.io/bellese/mct2-hapi-*:latest`, which 403s,
-so `docker compose pull` has failed on every deploy since PR #261 (2026-05-04) and the image
-production runs now exists only in that instance's local Docker cache — not in any registry,
-selected by a file that is not in git. An instance rebuild cannot restore it.
-
-The decided fix (issue #407 — see the implementation plan in its comments) is to **remove
-the pins** so prod falls through to the compose default `hapiproject/hapi:v8.8.0-1`.
-Verified on the instance (2026-08-21) to be a same-version swap: the cached images are
-v8.8.0-1 plus a config layer that compose's `environment:` blocks already override and a
-data layer the named volumes already shadow — all 35 base layers match, OCI labels confirm
-`v8.8.0-1`. Repointing at `lenny-hapi-*` was rejected: `:latest` would silently feed the
-weekly bake into production (the same moving-tag failure mode that caused this), and a
-pinned `:${seed-hash}` recreates the untracked-drift problem — a value living only in the
-instance's `.env` that a human must remember to bump. Note this only governs the HAPI
-**binary**: the named volumes still shadow `/data/hapi`, so switching images does not touch
-production's data.
+Not fixable from this repository — it lives on the instance — so it's recorded here as
+current state. (The HAPI image pin, formerly the other item here, is fixed — see
+§ Production and GHCR, above, and `docs/decisions.md` ADR-015 for the history.)
 
 **`/run/leonard/CDR_FERNET_KEY` is world-readable (`0644`).** Any local account on the
 instance can read the key protecting every stored CDR/MCS credential. Exposure is

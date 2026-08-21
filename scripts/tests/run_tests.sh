@@ -49,6 +49,7 @@ run_file() {
 
 run_file "$SCRIPT_DIR/test_fetch.sh"
 run_file "$SCRIPT_DIR/test_reconcile.sh"
+run_file "$SCRIPT_DIR/test_pinned_images.sh"
 
 printf '=== Summary: %d file(s) passed, %d file(s) failed ===\n' "$PASS_FILES" "$FAIL_FILES"
 [[ "$FAIL_FILES" -eq 0 ]]

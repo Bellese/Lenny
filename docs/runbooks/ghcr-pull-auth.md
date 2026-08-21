@@ -22,13 +22,10 @@ No GHCR login step is needed. `docker compose pull` will pull from
 
 ## Verification
 
-> **Note (superseded 2026-08-21):** the earlier note here said production runs vanilla `hapiproject/hapi:v8.8.0-1` rather than GHCR images. That was wrong. `/opt/leonard/.env` pins `HAPI_CDR_IMAGE`/`HAPI_MEASURE_IMAGE` to `ghcr.io/bellese/mct2-hapi-*:latest` — the **pre-rename** package names, which return 403. Every prod deploy logs:
->
-> ```
-> hapi-fhir-cdr Error Head "https://ghcr.io/v2/bellese/mct2-hapi-cdr/manifests/latest": denied: denied
-> ```
->
-> `--ignore-pull-failures` swallows it, so prod keeps running a stale cached image and the weekly bake never lands there. Note this is *not* a pull-auth problem — `lenny-hapi-*` is public and pulls fine unauthenticated; the pinned names are simply obsolete. Tracked separately; see `docs/deploy.md` § Production and GHCR.
+> **Note:** production does not consume GHCR images at all — it runs the compose default,
+> `hapiproject/hapi:v8.8.0-1`, from Docker Hub. This runbook covers local dev and CI, both of
+> which use `lenny-hapi-*` and remain accurate below. (History: production briefly pinned a
+> stale, renamed-away GHCR package name; see `docs/decisions.md` ADR-015.)
 
 After deploy (if using prebaked images), confirm images are present:
 
