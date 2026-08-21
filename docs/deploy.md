@@ -176,9 +176,13 @@ consequences follow:
 - **Disaster recovery has a hole.** If that instance is lost or replaced, the image cannot
   be pulled from anywhere, and nothing in this repository describes how to rebuild it.
   Standing up a replacement means first deciding what production should run.
-- **Nobody can say what production is running.** The cached image predates 2026-05-04, so
-  its HAPI version, IG set, and baked bundles are whatever the bake produced before then.
-  It cannot be reconstructed from a commit.
+- **What production is running had to be established forensically.** The cached image
+  predates 2026-05-04, so its IG set and baked bundles are whatever the bake produced before
+  then and cannot be reconstructed from a commit. The HAPI *version* was pinned down by
+  inspecting the instance directly (2026-08-21): all 35 base layers of the cached images
+  match `hapiproject/hapi:v8.8.0-1` byte-for-byte — they are that image plus a config layer
+  compose overrides and a data layer the volumes shadow. Knowable, but only because the
+  instance still exists to inspect.
 - **The suppression is general, not specific.** `--ignore-pull-failures || true` is
   deliberate — a registry hiccup shouldn't block a healthy deploy — but it means *any*
   image-pull problem is silent, including one that does matter.
@@ -188,8 +192,8 @@ the routine `docker image prune -f` in `deploy-prod.sh` (dangling images only) c
 it. The risk is an instance rebuild, not a normal deploy.
 
 Repointing the pin at `lenny-hapi-*` would fix the pull, but it is a decision rather than a
-cleanup: it would newly subject production to the weekly bake cycle. Tracked separately —
-see the note at the end of this document.
+cleanup: it would newly subject production to the weekly bake cycle. Tracked in issue #407 —
+see the note at the end of this document for the decided direction.
 
 ---
 
@@ -270,13 +274,17 @@ so `docker compose pull` has failed on every deploy since PR #261 (2026-05-04) a
 production runs now exists only in that instance's local Docker cache — not in any registry,
 selected by a file that is not in git. An instance rebuild cannot restore it.
 
-Repointing the pins at `lenny-hapi-*` fixes the pull, but it is not purely a cleanup: it
-also starts feeding the weekly bake into production for the first time, and the current
-`:latest` is a different HAPI build from what production has been serving. Sequence it
-deliberately — pin a specific verified `:${seed-hash}` tag rather than `:latest`, so the
-change is a known quantity and prod stops tracking a moving tag. Note also that this only
-governs the HAPI **binary**: the named volumes still shadow `/data/hapi`, so switching
-images does not touch production's data.
+The decided fix (issue #407 — see the implementation plan in its comments) is to **remove
+the pins** so prod falls through to the compose default `hapiproject/hapi:v8.8.0-1`.
+Verified on the instance (2026-08-21) to be a same-version swap: the cached images are
+v8.8.0-1 plus a config layer that compose's `environment:` blocks already override and a
+data layer the named volumes already shadow — all 35 base layers match, OCI labels confirm
+`v8.8.0-1`. Repointing at `lenny-hapi-*` was rejected: `:latest` would silently feed the
+weekly bake into production (the same moving-tag failure mode that caused this), and a
+pinned `:${seed-hash}` recreates the untracked-drift problem — a value living only in the
+instance's `.env` that a human must remember to bump. Note this only governs the HAPI
+**binary**: the named volumes still shadow `/data/hapi`, so switching images does not touch
+production's data.
 
 **`/run/leonard/CDR_FERNET_KEY` is world-readable (`0644`).** Any local account on the
 instance can read the key protecting every stored CDR/MCS credential. Exposure is
