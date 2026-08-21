@@ -21,18 +21,17 @@ from app.models.config import CDRConfig
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
 from app.services.fhir_client import (
     BatchQueryStrategy,
-    DataRequirementsStrategy,
     FhirOperationError,
     _build_auth_headers,
     evaluate_measure,
     get_group_members,
-    push_resources,
     snapshot_evaluated_resources,
     wipe_patient_data,
     wipe_patients_by_id,
 )
 from app.services.fhir_errors import redact_outcome, sanitize_url
 from app.services.validation import sanitize_error
+from app.services.workflows import SubmissionWorkflow, TransferPhaseError, build_submission_workflow
 
 logger = logging.getLogger(__name__)
 
@@ -132,18 +131,6 @@ def _error_measure_report(
     }
 
 
-def _patient_data_strategy(measure_id: str, mcs_url: str, mcs_auth_headers: dict[str, str] | None = None):
-    """Create the configured patient data acquisition strategy.
-
-    `mcs_url`/`mcs_auth_headers` are threaded through to DataRequirementsStrategy so
-    `$data-requirements` asks the job's own measure engine rather than the env-var
-    default (issue #397). BatchQueryStrategy ignores them — it only talks to the CDR.
-    """
-    if settings.PATIENT_DATA_STRATEGY == "data_requirements":
-        return DataRequirementsStrategy(measure_id, mcs_url, mcs_auth_headers)
-    return BatchQueryStrategy()
-
-
 async def _stop_or_delete_job(job_id: int) -> bool:
     """Return True when work should stop because the job was cancelled or deleted."""
     async with async_session() as session:
@@ -193,8 +180,15 @@ async def run_job(job_id: int) -> None:
 
         # Step 3: Fetch patients from CDR (optionally filtered by Group)
         async with async_session() as session:
-            job_for_group = await session.get(Job, job_id)
-            group_id = job_for_group.group_id if job_for_group else None
+            job_row = await session.get(Job, job_id)
+            if not job_row:
+                return
+            group_id = job_row.group_id
+            job_workflow = job_row.workflow
+            job_submit_data_mode = job_row.submit_data_mode
+            job_measure_id = job_row.measure_id
+            job_period_start = job_row.period_start
+            job_period_end = job_row.period_end
 
         if group_id:
             logger.info("Gathering patients from Group", extra={"job_id": job_id, "group_id": group_id})
@@ -239,6 +233,20 @@ async def run_job(job_id: int) -> None:
             patient_ids=patient_ids,
         )
 
+        # Build the submission workflow once per job. For DEQM this reads the
+        # measure canonical off the MCS; failure aborts the job before any
+        # patient work, surfacing as job.error_message via the outer except.
+        workflow = await build_submission_workflow(
+            workflow=job_workflow,
+            job_id=job_id,
+            measure_id=job_measure_id,
+            mcs_url=mcs_url,
+            mcs_auth_headers=mcs_auth_headers,
+            submit_data_mode=job_submit_data_mode,
+            period_start=job_period_start,
+            period_end=job_period_end,
+        )
+
         # The cancellation check that already guarded the batch-creation block
         # below now also covers the wipe above — no second check needed.
         if await _stop_or_delete_job(job_id):
@@ -278,6 +286,7 @@ async def run_job(job_id: int) -> None:
                     auth_headers=auth_headers,
                     mcs_url=mcs_url,
                     mcs_auth_headers=mcs_auth_headers,
+                    workflow=workflow,
                 )
 
         # Check for cancellation before starting
@@ -463,6 +472,8 @@ async def _process_single_batch(
     auth_headers: dict[str, str],
     mcs_url: str,
     mcs_auth_headers: dict[str, str] | None = None,
+    *,
+    workflow: SubmissionWorkflow,
 ) -> None:
     """Process a single batch in two phases.
 
@@ -500,10 +511,9 @@ async def _process_single_batch(
                 period_start = job.period_start
                 period_end = job.period_end
 
-            strategy = _patient_data_strategy(measure_id, mcs_url, mcs_auth_headers)
             logger.info(
-                "Using patient data strategy",
-                extra={"strategy": settings.PATIENT_DATA_STRATEGY, "job_id": job_id, "batch_id": batch_id},
+                "Using submission workflow",
+                extra={"workflow": workflow.name, "job_id": job_id, "batch_id": batch_id},
             )
 
             # ----------------------------------------------------------
@@ -522,15 +532,9 @@ async def _process_single_batch(
                     return
 
                 try:
-                    gather_result = await strategy.gather_patient_data(cdr_url, patient_id, auth_headers)
-                    if gather_result.resources:
-                        await push_resources(
-                            gather_result.resources,
-                            target_url=mcs_url,
-                            auth_headers=mcs_auth_headers,
-                        )
+                    gather_result = await workflow.transfer_patient(cdr_url, patient_id, auth_headers)
                     logger.info(
-                        f"Pushed {len(gather_result.resources)} resources for {patient_id[:8]}",
+                        f"Transferred {len(gather_result.resources)} resources for {patient_id[:8]}",
                         extra={"job_id": job_id, "patient_id": patient_id},
                     )
 
@@ -555,7 +559,13 @@ async def _process_single_batch(
                             },
                         )
 
-                except Exception as push_exc:
+                except Exception as transfer_exc:
+                    if isinstance(transfer_exc, TransferPhaseError):
+                        error_phase = transfer_exc.phase
+                        push_exc: Exception = transfer_exc.cause
+                    else:
+                        error_phase = "gather"
+                        push_exc = transfer_exc
                     gather_failed_patients.add(patient_id)
                     patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
                     sanitized_msg = sanitize_error(push_exc)
@@ -601,10 +611,10 @@ async def _process_single_batch(
                                 "numerator_exclusion": False,
                                 "error": True,
                                 "error_message": sanitized_msg,
-                                "error_phase": "gather",
+                                "error_phase": error_phase,
                             }
                             existing_row.error_details = error_details
-                            existing_row.error_phase = "gather"
+                            existing_row.error_phase = error_phase
                         else:
                             result = MeasureResult(
                                 job_id=job_id,
@@ -619,10 +629,10 @@ async def _process_single_batch(
                                     "numerator_exclusion": False,
                                     "error": True,
                                     "error_message": sanitized_msg,
-                                    "error_phase": "gather",
+                                    "error_phase": error_phase,
                                 },
                                 error_details=error_details,
-                                error_phase="gather",
+                                error_phase=error_phase,
                             )
                             session.add(result)
                         await session.commit()
