@@ -9,6 +9,8 @@
 #   4. docker compose up -d db
 #   5. Wait for db healthcheck to pass (12 × 5s = 60s max)
 #   6. scripts/reconcile-db-password.sh
+#   6.5 scripts/check-pinned-images.sh — fail the deploy if a deliberately
+#       pinned HAPI image can't be pulled (issue #407)
 #   7. docker compose pull (pre-built images)
 #   8. docker compose up -d --build (remaining services)
 #   9. Health check: curl https://api.lenny.bellese.dev/health (24 × 5s = 2 min max)
@@ -41,7 +43,11 @@ export LEONARD_DIR
 
 COMPOSE_BASE="${LEONARD_DIR}/docker-compose.yml"
 COMPOSE_PROD="${LEONARD_DIR}/docker-compose.prod.yml"
-COMPOSE=( docker compose -f "$COMPOSE_BASE" -f "$COMPOSE_PROD" )
+# --project-directory makes the .env lookup explicit rather than relying on
+# it being inferred from the first -f path — no behavior change (same
+# directory either way), but check-pinned-images.sh depends on this same
+# lookup resolving consistently, so it's stated here too.
+COMPOSE=( docker compose --project-directory "$LEONARD_DIR" -f "$COMPOSE_BASE" -f "$COMPOSE_PROD" )
 
 readonly ENV_DIR="/run/leonard"
 readonly ENV_FILE="${ENV_DIR}/env"
@@ -49,6 +55,7 @@ readonly SECRET_FILE="${ENV_DIR}/POSTGRES_PASSWORD"
 readonly FERNET_SECRET_FILE="${ENV_DIR}/CDR_FERNET_KEY"
 readonly FETCH_SCRIPT="${LEONARD_DIR}/scripts/fetch-prod-secrets.sh"
 readonly RECONCILE_SCRIPT="${LEONARD_DIR}/scripts/reconcile-db-password.sh"
+readonly CHECK_PINS_SCRIPT="${LEONARD_DIR}/scripts/check-pinned-images.sh"
 readonly HEALTH_URL="https://api.lenny.bellese.dev/health"
 
 # ── argument parsing ───────────────────────────────────────────────────────────
@@ -85,6 +92,12 @@ if [[ ! -f "$RECONCILE_SCRIPT" ]]; then
 fi
 if [[ ! -x "$RECONCILE_SCRIPT" ]]; then
     die 1 "reconcile-db-password.sh is not executable at '${RECONCILE_SCRIPT}'"
+fi
+if [[ ! -f "$CHECK_PINS_SCRIPT" ]]; then
+    die 1 "check-pinned-images.sh not found at '${CHECK_PINS_SCRIPT}'"
+fi
+if [[ ! -x "$CHECK_PINS_SCRIPT" ]]; then
+    die 1 "check-pinned-images.sh is not executable at '${CHECK_PINS_SCRIPT}'"
 fi
 
 # ── step 1.5: reclaim disk before deploy (full deploy only; self-healing) ─────
@@ -186,6 +199,15 @@ done
 # ── step 6: reconcile DB password ─────────────────────────────────────────────
 printf '[+] Reconciling DB password...\n'
 LEONARD_DIR="$LEONARD_DIR" "$RECONCILE_SCRIPT"
+
+# ── step 6.5: fail loud on a broken pinned image (issue #407) ─────────────────
+# A pin (HAPI_CDR_IMAGE / HAPI_MEASURE_IMAGE in .env) is deliberate — a pin
+# that can't be pulled is a broken deploy, not a blip, and must not be
+# swallowed the way step 7's --ignore-pull-failures swallows an unpinned
+# registry hiccup. This ran silently wrong for months (mct2-hapi-* 403s)
+# because nothing distinguished "pinned and broken" from "not pinned".
+printf '[+] Checking for pinned HAPI images...\n'
+LEONARD_DIR="$LEONARD_DIR" "$CHECK_PINS_SCRIPT"
 
 # ── step 7: pull pre-built images from registries ─────────────────────────────
 # Without an explicit pull, `up --build` uses any locally-cached image even when

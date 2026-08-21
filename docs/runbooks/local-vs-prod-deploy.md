@@ -4,9 +4,7 @@
 
 **Local dev (and CI) uses "prebaked" HAPI images** — Docker images that already have the connectathon bundles and FHIR IGs baked into their embedded H2 database. Cold-start completes in under 60 seconds because there's nothing to download or seed.
 
-**Production mounts named volumes over `/data/hapi`, so it behaves as if the image had no pre-loaded data.** On first boot, HAPI downloads the required IGs from the HL7 registry (~5–10 min) and the `seed` service POSTs all the connectathon bundles into the running server (~5–10 min more). After that the data lives in named Docker volumes and survives every subsequent redeploy.
-
-> **Correction (2026-08-21):** this runbook previously said production pulls vanilla `hapiproject/hapi:v8.8.0-1`. It does not. `/opt/leonard/.env` pins the pre-rename `ghcr.io/bellese/mct2-hapi-*:latest` images, which 403 on every pull; the failure is swallowed by `--ignore-pull-failures`, so prod runs a stale cached baked image. The volume-shadowing argument below is unaffected and still correct — it is *why* prod sees none of the baked data regardless of which image it runs. See `docs/deploy.md` § Production and GHCR.
+**Production runs vanilla `hapiproject/hapi:v8.8.0-1`** (the compose default, pulled from Docker Hub) with named volumes mounted over `/data/hapi`, so it behaves as if the image had no pre-loaded data regardless of which image it runs — the volume shadows it either way. On first boot, HAPI downloads the required IGs from the HL7 registry (~5–10 min) and the `seed` service POSTs all the connectathon bundles into the running server (~5–10 min more). After that the data lives in named Docker volumes and survives every subsequent redeploy.
 
 ### Why production can't adopt the prebaked *overlay*
 
@@ -23,7 +21,7 @@ That's the fundamental mismatch: **"image-baked H2" and "persistent user data" a
 | Aspect | Local dev (default) | CI | Production |
 |--------|--------------------|----|------------|
 | `COMPOSE_FILE` | `docker-compose.yml:docker-compose.prebaked.yml` (`.env.example` default) | `docker-compose.yml:docker-compose.prebaked.yml` | `docker-compose.yml:docker-compose.prod.yml` |
-| HAPI images | `ghcr.io/bellese/lenny-hapi-{cdr,measure}:latest` **(prebaked)** | Same prebaked images | `ghcr.io/bellese/mct2-hapi-{cdr,measure}:latest` pinned but **403 — pull fails silently**; runs a stale cached image |
+| HAPI images | `ghcr.io/bellese/lenny-hapi-{cdr,measure}:latest` **(prebaked)** | Same prebaked images | `hapiproject/hapi:v8.8.0-1` **(vanilla, compose default)** |
 | IGs pre-installed? | Yes — baked into the image H2 store | Yes | No — the volume shadows the image's H2 store, so HAPI downloads them at first boot (~5–10 min cold start) |
 | Seed bundles pre-loaded? | Yes — baked into the image | Yes | No (same reason) — the `seed` service POSTs them on first boot |
 | Named volumes | `leonard_cdrdata`, `leonard_measuredata`, `leonard_pgdata` | Ephemeral (CI uses `--volumes` on teardown) | `leonard_cdrdata`, `leonard_measuredata`, `leonard_pgdata` |
@@ -62,7 +60,7 @@ Use this mode when you need to verify prod-equivalent behavior (e.g., first-boot
 
 ## Differences that matter for debugging
 
-- **Env vars for HAPI config** are identical between local and prod (`docker-compose.yml` defines them, refreshed from git every deploy). The only differences are memory caps and the reverse proxy. Note this is why prod's stale HAPI image is easy to miss: config and data are both sourced outside the image.
+- **Env vars for HAPI config** are identical between local and prod (`docker-compose.yml` defines them, refreshed from git every deploy). The only differences are memory caps and the reverse proxy.
 - **`synchronization.strategy=sync`** is set on both local and prod HAPI services. Writes block until the Lucene index is refreshed — search-after-write is consistent in both environments.
 - **Postgres password** is a fixed `.env` value locally; in prod it's read from AWS SSM at each deploy via `scripts/fetch-prod-secrets.sh`.
 - **`ALLOWED_ORIGINS`** defaults to `"*"` locally; prod sets it to `https://${CADDY_HOST}` via `docker-compose.prod.yml`.
