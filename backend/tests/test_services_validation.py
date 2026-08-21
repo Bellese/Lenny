@@ -2,8 +2,10 @@
 
 import base64
 import json
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 from sqlalchemy import func, select
 
@@ -514,7 +516,7 @@ class TestTriageTestBundle:
         ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         # Measure + Library = 2 measure defs → push_resources called once for defs
         assert result["measures_loaded"] == 1  # only Measure type counts
@@ -542,7 +544,7 @@ class TestTriageTestBundle:
         with patch(
             "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
         ) as mock_push:
-            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         assert result["patients_loaded"] == 1
         assert result.get("warning_message") is None
@@ -578,7 +580,7 @@ class TestTriageTestBundle:
         # fires before push_resources is called for clinical data.
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             with pytest.raises(ValueError, match="read-only"):
-                await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+                await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
     async def test_external_cdr_with_auth_forwards_headers(self, test_session, mock_test_bundle_with_expected):
         """When an external CDR has basic auth configured, auth headers are forwarded."""
@@ -599,7 +601,7 @@ class TestTriageTestBundle:
         ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+                result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         # clinical data pushed with auth headers
         assert result["patients_loaded"] == 1
@@ -613,14 +615,14 @@ class TestTriageTestBundle:
         assert "Authorization" in auth_headers
         assert auth_headers["Authorization"] == "Basic dXNlcjpwYXNz"
 
-        # Measure-def push must NOT carry CDR auth headers
+        # Measure-def push must carry the MCS's own auth headers, not the CDR's
         def_push_calls = [
             call
             for call in mock_push.call_args_list
             if call.kwargs.get("target_url") != "http://external-cdr.example.com/fhir"
         ]
         for def_call in def_push_calls:
-            assert "Authorization" not in (def_call.kwargs.get("auth_headers") or {})
+            assert def_call.kwargs.get("auth_headers") == {"Authorization": "Bearer tok-397"}
 
     async def test_bundle_with_only_measure_defs(self, test_session):
         """Bundle containing only measure defs: no expected results, no clinical push."""
@@ -651,7 +653,7 @@ class TestTriageTestBundle:
         ) as mock_push:
             with patch("app.services.validation.settings") as mock_settings:
                 mock_settings.DEFAULT_CDR_URL = "http://hapi-fhir-cdr:8080/fhir"
-                result = await triage_test_bundle(bundle, "defs-only.json", test_session)
+                result = await triage_test_bundle(bundle, "defs-only.json", test_session, mcs=_mcs())
 
         assert result["measures_loaded"] == 1
         assert result["expected_results_loaded"] == 0
@@ -679,10 +681,10 @@ class TestTriageTestBundle:
                 new_callable=AsyncMock,
                 return_value=[stub],
             ) as mock_prepare:
-                result = await triage_test_bundle(bundle, "defs-only.json", test_session)
+                result = await triage_test_bundle(bundle, "defs-only.json", test_session, mcs=_mcs())
 
         assert result["measures_loaded"] == 1
-        mock_prepare.assert_awaited_once_with([], bundle)
+        mock_prepare.assert_awaited_once_with([], bundle, mcs=_mcs())
         assert mock_push.call_count == 2
         assert mock_push.call_args_list[0].args[0] == [stub]
 
@@ -715,7 +717,7 @@ class TestTriageTestBundle:
         await test_session.commit()
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
-            await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+            await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         rows = (
             (
@@ -753,7 +755,7 @@ class TestTriageTestBundle:
         await test_session.commit()
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
-            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         refreshed_count = await test_session.scalar(
             select(func.count()).select_from(ExpectedResult).where(ExpectedResult.source_bundle == "test.json")
@@ -795,7 +797,7 @@ class TestTriageTestBundle:
         await test_session.commit()
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
-            await triage_test_bundle(mock_test_bundle_with_expected, "bundle_v2.json", test_session)
+            await triage_test_bundle(mock_test_bundle_with_expected, "bundle_v2.json", test_session, mcs=_mcs())
 
         all_rows = (
             (await test_session.execute(select(ExpectedResult).order_by(ExpectedResult.patient_ref))).scalars().all()
@@ -822,7 +824,7 @@ class TestTriageTestBundle:
 
         with patch("app.services.validation.push_resources", side_effect=fail_on_clinical):
             with pytest.raises(ValueError, match="CDR unreachable"):
-                await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+                await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         # Roll back the session — this is what process_bundle_upload's `async with async_session()`
         # block does when triage_test_bundle raises.
@@ -842,7 +844,7 @@ class TestTriageTestBundle:
 
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
             await triage_test_bundle(
-                mock_test_bundle_with_expected, "test.json", test_session, progress_fn=record_progress
+                mock_test_bundle_with_expected, "test.json", test_session, progress_fn=record_progress, mcs=_mcs()
             )
 
         fields_called = [c[0] for c in calls]
@@ -860,7 +862,7 @@ class TestTriageTestBundle:
     async def test_progress_fn_none_does_not_raise(self, test_session, mock_test_bundle_with_expected):
         """Omitting progress_fn (None) does not raise and returns correct summary."""
         with patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()):
-            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+            result = await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
 
         assert result["measures_loaded"] == 1
         assert result["patients_loaded"] == 1
@@ -877,7 +879,70 @@ class TestTriageTestBundle:
                 "app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()
             ):
                 with pytest.raises(ValueError, match="Failed to upload measures to HAPI measure engine"):
-                    await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session)
+                    await triage_test_bundle(mock_test_bundle_with_expected, "test.json", test_session, mcs=_mcs())
+
+
+# ---------------------------------------------------------------------------
+# triage_test_bundle resolves and threads its MCS target (issue #397 slice 3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_triage_test_bundle_refuses_a_read_only_mcs(test_session):
+    """A validation upload must write Measures/Libraries/ValueSets, so a read-only
+    target cannot work. Refuse before writing anything rather than partway through."""
+    from app.services.fhir_client import McsTarget
+    from app.services.validation import triage_test_bundle
+
+    read_only = McsTarget(
+        url="https://shared.example.org/fhir", auth_headers={}, is_read_only=True, wipe_before_job=False
+    )
+    bundle = {"resourceType": "Bundle", "entry": []}
+
+    with patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push:
+        with pytest.raises(ValueError, match="read-only"):
+            await triage_test_bundle(bundle, "b.json", test_session, mcs=read_only)
+
+    mock_push.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_triage_test_bundle_pushes_measures_to_the_given_mcs(test_session):
+    """Every measure-engine write names its target explicitly.
+
+    These push_resources calls previously passed no target_url and silently used the
+    env-var default — invisible to the AST inventory guard.
+    """
+    from app.services.validation import triage_test_bundle
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [
+            {"resource": {"resourceType": "Measure", "id": "m1", "url": "http://cms.gov/M1"}},
+            {"resource": {"resourceType": "Library", "id": "l1"}},
+        ],
+    }
+
+    with (
+        patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push,
+        patch("app.services.validation._assert_no_canonical_url_clash", new_callable=AsyncMock),
+        patch("app.services.validation._prepare_measure_support_resources", new_callable=AsyncMock, return_value=[]),
+        patch("app.services.validation.wait_for_valueset_expansion", return_value=[]),
+    ):
+        await triage_test_bundle(bundle, "b.json", test_session, mcs=_mcs())
+
+    assert mock_push.await_count >= 1
+    for call in mock_push.await_args_list:
+        assert call.kwargs.get("target_url") == "https://mcs.example.org/fhir", call.kwargs
+        assert call.kwargs.get("auth_headers") == {"Authorization": "Bearer tok-397"}
+
+
+@pytest.mark.asyncio
+async def test_triage_test_bundle_requires_an_mcs(test_session):
+    from app.services.validation import triage_test_bundle
+
+    with pytest.raises(TypeError):
+        await triage_test_bundle({"resourceType": "Bundle", "entry": []}, "b.json", test_session)  # type: ignore[call-arg]
 
 
 # ---------------------------------------------------------------------------
@@ -1062,7 +1127,15 @@ class TestRunValidation:
         def make_ctx():
             return self._make_session_ctx(test_session)
 
-        async def resolve_measure_side_effect(measure_url):
+        # Captured, not asserted inside the closure: validation.py wraps
+        # _resolve_measure_id in `except Exception -> unresolved_errors[...]`, so an
+        # AssertionError raised here would surface as an "error" result rather than a
+        # test failure pointing at the wrong target. Asserted after the run returns.
+        resolve_targets: list[str] = []
+
+        async def resolve_measure_side_effect(measure_url, *, mcs):
+            # `mcs` is required (#397): run_validation must name the server it resolves against.
+            resolve_targets.append(mcs.url)
             if measure_url.endswith("/resolved"):
                 return "measure-1"
             return None
@@ -1080,10 +1153,16 @@ class TestRunValidation:
                             new_callable=AsyncMock,
                             return_value=BundleUploadResult(),
                         ) as mock_push:
-                            with patch(
-                                "app.services.validation.wipe_patient_data",
-                                new_callable=AsyncMock,
-                            ) as mock_wipe:
+                            with (
+                                patch(
+                                    "app.services.validation.wipe_patient_data",
+                                    new_callable=AsyncMock,
+                                ) as mock_wipe,
+                                patch(
+                                    "app.services.validation.wipe_patients_by_id",
+                                    new_callable=AsyncMock,
+                                ) as mock_scoped_wipe,
+                            ):
                                 with patch(
                                     "app.services.validation.evaluate_measure",
                                     new_callable=AsyncMock,
@@ -1116,6 +1195,8 @@ class TestRunValidation:
             .all()
         )
 
+        assert resolve_targets, "_resolve_measure_id was never called"
+        assert set(resolve_targets) == {settings.MEASURE_ENGINE_URL}, resolve_targets
         assert run.status == ValidationStatus.complete
         assert run.measures_tested == 2
         assert run.patients_tested == 2
@@ -1127,12 +1208,14 @@ class TestRunValidation:
         assert rows[1].patient_ref == "patient-2"
         assert rows[1].status == "error"
         assert "Measure not found on engine after reload attempt" in rows[1].error_message
-        mock_wipe.assert_awaited_once()
-        # Regression guard: the pre-push wipe must target the measure engine explicitly
-        # (wipe_patient_data requires the keyword-only base_url argument).
-        _, wipe_kwargs = mock_wipe.await_args
-        assert wipe_kwargs.get("base_url") == settings.MEASURE_ENGINE_URL
-        assert wipe_kwargs.get("strict") is False
+        # Regression guard (#397 task 8): the pre-push wipe is scoped by default — the
+        # unfiltered wipe_patient_data must NOT run, and the scoped wipe must target the
+        # measure engine explicitly with only this run's resolved patient(s).
+        mock_wipe.assert_not_awaited()
+        mock_scoped_wipe.assert_awaited_once()
+        _, scoped_wipe_kwargs = mock_scoped_wipe.await_args
+        assert scoped_wipe_kwargs.get("base_url") == settings.MEASURE_ENGINE_URL
+        assert scoped_wipe_kwargs.get("patient_ids") == ["patient-1"]
         mock_push.assert_awaited_once()
         # Warmup burst adds 1 call per measure + 1 main eval = 2 total
         assert mock_evaluate.await_count == 2
@@ -1190,7 +1273,13 @@ class TestRunValidation:
         def make_ctx():
             return self._make_session_ctx(test_session)
 
-        async def resolve_measure_side_effect(measure_url):
+        # See the sibling test: assertions inside this closure would be swallowed by
+        # run_validation's `except Exception -> unresolved_errors[...]`.
+        resolve_targets: list[str] = []
+
+        async def resolve_measure_side_effect(measure_url, *, mcs):
+            # `mcs` is required (#397): run_validation must name the server it resolves against.
+            resolve_targets.append(mcs.url)
             if "CMS124" in measure_url:
                 return "measure-1"
             if "CMS816" in measure_url:
@@ -1227,7 +1316,10 @@ class TestRunValidation:
                             new_callable=AsyncMock,
                             return_value=BundleUploadResult(),
                         ):
-                            with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock):
+                            with (
+                                patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+                                patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock),
+                            ):
                                 with patch(
                                     "app.services.validation.evaluate_measure",
                                     new_callable=AsyncMock,
@@ -1240,6 +1332,9 @@ class TestRunValidation:
                                         await run_validation(run.id)
 
         await test_session.refresh(run)
+
+        assert resolve_targets, "_resolve_measure_id was never called"
+        assert set(resolve_targets) == {"http://measure/fhir"}, resolve_targets
 
         # Verify 5 total evaluate_measure calls:
         # - 2 warmup calls (one per measure)
@@ -1309,6 +1404,7 @@ class TestRunValidation:
             patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
             patch("app.services.validation.push_resources", new_callable=AsyncMock, return_value=BundleUploadResult()),
             patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+            patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock),
             patch(
                 "app.services.validation.evaluate_measure",
                 new_callable=AsyncMock,
@@ -1418,7 +1514,10 @@ class TestRunValidation:
                             new_callable=AsyncMock,
                             return_value=BundleUploadResult(),
                         ):
-                            with patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock):
+                            with (
+                                patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+                                patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock),
+                            ):
                                 with patch(
                                     "app.services.validation.evaluate_measure",
                                     side_effect=evaluate_measure_side_effect,
@@ -1467,7 +1566,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("http://example.com/Measure/CMS124")
+            result = await _resolve_measure_id("http://example.com/Measure/CMS124", mcs=_mcs())
 
         assert result == "hapi-measure-123"
 
@@ -1487,7 +1586,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("http://example.com/Measure/CMS124")
+            result = await _resolve_measure_id("http://example.com/Measure/CMS124", mcs=_mcs())
 
         assert result is None
 
@@ -1507,7 +1606,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("http://example.com/Measure/CMS124")
+            result = await _resolve_measure_id("http://example.com/Measure/CMS124", mcs=_mcs())
 
         assert result is None
 
@@ -1533,7 +1632,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000")
+            result = await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000", mcs=_mcs())
 
         assert result == "measure-EXM130-FHIR4-7.2.000"
         # Must fetch by ID path, NOT by ?url= query
@@ -1555,7 +1654,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000")
+            result = await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000", mcs=_mcs())
 
         assert result is None
 
@@ -1567,7 +1666,7 @@ class TestResolveMeasureId:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            result = await _resolve_measure_id("not-a-valid-ref")
+            result = await _resolve_measure_id("not-a-valid-ref", mcs=_mcs())
 
         assert result is None
 
@@ -1589,7 +1688,7 @@ class TestResolveMeasureId:
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             with pytest.raises(httpx.HTTPStatusError):
-                await _resolve_measure_id("http://example.com/Measure/CMS124")
+                await _resolve_measure_id("http://example.com/Measure/CMS124", mcs=_mcs())
 
     async def test_relative_ref_http_error_raises(self):
         """Non-404 errors from HAPI for relative reference lookups propagate as exceptions."""
@@ -1610,7 +1709,7 @@ class TestResolveMeasureId:
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             with pytest.raises(httpx.HTTPStatusError):
-                await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000")
+                await _resolve_measure_id("Measure/measure-EXM130-FHIR4-7.2.000", mcs=_mcs())
 
     async def test_resolve_measure_id_retries_on_empty_bundle(self):
         """Verify that _resolve_measure_id retries when HAPI returns an empty bundle (lag/cache)."""
@@ -1640,7 +1739,7 @@ class TestResolveMeasureId:
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             with patch("app.services.validation.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-                result = await _resolve_measure_id("http://example.com/Measure/123")
+                result = await _resolve_measure_id("http://example.com/Measure/123", mcs=_mcs())
 
                 assert result == "hapi-id-123"
                 assert mock_client.get.call_count == 3
@@ -1669,7 +1768,7 @@ class TestResolveMeasureId:
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             with patch("app.services.validation.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-                result = await _resolve_measure_id("http://example.com/Measure/456")
+                result = await _resolve_measure_id("http://example.com/Measure/456", mcs=_mcs())
 
                 assert result == "hapi-id-456"
                 assert mock_client.get.call_count == 2
@@ -1873,7 +1972,7 @@ class TestMissingValueSetStubs:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            prepared = await _prepare_measure_support_resources([resource], bundle)
+            prepared = await _prepare_measure_support_resources([resource], bundle, mcs=_mcs())
 
         assert resource in prepared
         assert any(r.get("resourceType") == "ValueSet" and r.get("url") == missing_url for r in prepared)
@@ -1895,7 +1994,7 @@ class TestMissingValueSetStubs:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            prepared = await _prepare_measure_support_resources([], bundle)
+            prepared = await _prepare_measure_support_resources([], bundle, mcs=_mcs())
 
         assert prepared == []
 
@@ -1932,7 +2031,7 @@ class TestMissingValueSetStubs:
         mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            prepared = await _prepare_measure_support_resources([valueset], bundle)
+            prepared = await _prepare_measure_support_resources([valueset], bundle, mcs=_mcs())
 
         if delete_called:
             mock_client.delete.assert_awaited_once()
@@ -1977,16 +2076,18 @@ class TestDeleteExistingValueset:
         """409 must not raise, must not call raise_for_status, and must DELETE the right URL."""
         mock_client, mock_response = _make_delete_mock(409)
 
-        await _delete_existing_valueset("vs-in-use", mock_client)
+        await _delete_existing_valueset("vs-in-use", mock_client, mcs=_mcs())
 
-        mock_client.delete.assert_awaited_once_with("http://hapi-fhir-measure:8080/fhir/ValueSet/vs-in-use")
+        mock_client.delete.assert_awaited_once_with(
+            "https://mcs.example.org/fhir/ValueSet/vs-in-use", headers=_mcs().auth_headers
+        )
         mock_response.raise_for_status.assert_not_called()
 
     @pytest.mark.parametrize("status_code", _ACCEPTED_DELETE_STATUSES)
     async def test_accepted_status_codes_do_not_raise(self, status_code):
         mock_client, mock_response = _make_delete_mock(status_code)
 
-        await _delete_existing_valueset("some-id", mock_client)
+        await _delete_existing_valueset("some-id", mock_client, mcs=_mcs())
 
         mock_client.delete.assert_awaited_once()
         mock_response.raise_for_status.assert_not_called()
@@ -1996,7 +2097,7 @@ class TestDeleteExistingValueset:
         mock_client, mock_response = _make_delete_mock(500, raise_side_effect=RuntimeError("HAPI error"))
 
         with pytest.raises(RuntimeError, match="HAPI error"):
-            await _delete_existing_valueset("some-id", mock_client)
+            await _delete_existing_valueset("some-id", mock_client, mcs=_mcs())
         mock_client.delete.assert_awaited_once()
         mock_response.raise_for_status.assert_called_once()
 
@@ -2038,7 +2139,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
     async def test_clash_detected_raises(self):
         """HAPI has the abbreviated ID; incoming bundle has the full ID — ValueError raised."""
@@ -2063,7 +2164,7 @@ class TestAssertNoCanonicalUrlClash:
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
             with pytest.raises(ValueError, match="Canonical URL clash"):
-                await _assert_no_canonical_url_clash(measures)
+                await _assert_no_canonical_url_clash(measures, mcs=_mcs())
 
     async def test_empty_hapi_response_passes(self):
         """No existing Measure in HAPI — no clash possible."""
@@ -2082,7 +2183,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
     async def test_hapi_error_is_non_fatal(self):
         """Network error during probe is swallowed — upload is not blocked."""
@@ -2100,7 +2201,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
     async def test_non_measure_resources_are_skipped(self):
         """Library resources are not checked — only Measure resources."""
@@ -2115,7 +2216,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(libraries)
+            await _assert_no_canonical_url_clash(libraries, mcs=_mcs())
 
         mock_client.get.assert_not_awaited()
 
@@ -2129,7 +2230,7 @@ class TestAssertNoCanonicalUrlClash:
             {"resourceType": "Measure", "url": "https://madie.cms.gov/Measure/SomeMeasure"},  # missing id
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
         mock_client.get.assert_not_awaited()
 
@@ -2149,7 +2250,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
     async def test_malformed_json_response_is_non_fatal(self):
         """HAPI returning HTTP 200 with non-JSON body is silently ignored."""
@@ -2168,7 +2269,7 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
 
     async def test_entry_with_empty_existing_id_no_raise(self):
         """HAPI entry with empty id is not treated as a clash — empty string is ignored."""
@@ -2190,4 +2291,710 @@ class TestAssertNoCanonicalUrlClash:
             }
         ]
         with patch("app.services.validation.httpx.AsyncClient", return_value=mock_ctx):
-            await _assert_no_canonical_url_clash(measures)  # must not raise
+            await _assert_no_canonical_url_clash(measures, mcs=_mcs())  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Terminology helpers follow the given MCS (issue #397 slice 3)
+# ---------------------------------------------------------------------------
+
+
+def _mcs(url: str = "https://mcs.example.org/fhir", headers: dict | None = None):
+    from app.services.fhir_client import McsTarget
+
+    return McsTarget(
+        url=url,
+        auth_headers=headers if headers is not None else {"Authorization": "Bearer tok-397"},
+        is_read_only=False,
+        wipe_before_job=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_existing_valueset_id_uses_the_given_mcs():
+    from app.services.validation import _find_existing_valueset_id
+
+    seen: dict[str, object] = {}
+
+    async def _get(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return httpx.Response(200, json={"entry": []}, request=httpx.Request("GET", url))
+
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=_get)
+
+    await _find_existing_valueset_id("http://vs.example/1", client, mcs=_mcs())
+
+    assert seen["url"] == "https://mcs.example.org/fhir/ValueSet"
+    assert seen["headers"]["Authorization"] == "Bearer tok-397"
+
+
+@pytest.mark.asyncio
+async def test_find_existing_codesystem_id_uses_the_given_mcs():
+    from app.services.validation import _find_existing_codesystem_id
+
+    seen: dict[str, object] = {}
+
+    async def _get(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return httpx.Response(200, json={"entry": []}, request=httpx.Request("GET", url))
+
+    client = AsyncMock()
+    client.get = AsyncMock(side_effect=_get)
+
+    await _find_existing_codesystem_id("http://cs.example/1", "1.0.0", client, mcs=_mcs())
+
+    assert seen["url"] == "https://mcs.example.org/fhir/CodeSystem"
+    assert seen["headers"]["Authorization"] == "Bearer tok-397"
+
+
+@pytest.mark.asyncio
+async def test_delete_existing_valueset_uses_the_given_mcs():
+    """Destructive: this deletes a ValueSet, so on a shared engine it removes
+    another participant's terminology. It must never guess its target."""
+    from app.services.validation import _delete_existing_valueset
+
+    seen: dict[str, object] = {}
+
+    async def _delete(url, **kwargs):
+        seen["url"] = url
+        seen["headers"] = kwargs.get("headers")
+        return httpx.Response(200, json={}, request=httpx.Request("DELETE", url))
+
+    client = AsyncMock()
+    client.delete = AsyncMock(side_effect=_delete)
+
+    await _delete_existing_valueset("vs-1", client, mcs=_mcs())
+
+    assert seen["url"] == "https://mcs.example.org/fhir/ValueSet/vs-1"
+    assert seen["headers"]["Authorization"] == "Bearer tok-397"
+
+
+@pytest.mark.asyncio
+async def test_terminology_helpers_require_an_mcs():
+    """No default target — the #397 mechanism is a target the caller did not choose."""
+    from app.services.validation import (
+        _delete_existing_valueset,
+        _find_existing_codesystem_id,
+        _find_existing_valueset_id,
+    )
+
+    client = AsyncMock()
+    with pytest.raises(TypeError):
+        await _find_existing_valueset_id("http://vs.example/1", client)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        await _find_existing_codesystem_id("http://cs.example/1", None, client)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        await _delete_existing_valueset("vs-1", client)  # type: ignore[call-arg]
+
+
+@pytest.mark.asyncio
+async def test_assert_no_canonical_url_clash_probes_the_given_mcs():
+    """The clash probe must ask the server the bundle is being pushed to.
+
+    Probing a different server means it either misses a real clash or invents one.
+    """
+    from app.services.validation import _assert_no_canonical_url_clash
+
+    seen: list[str] = []
+
+    async def _get(url, **kwargs):
+        seen.append(url)
+        return httpx.Response(200, json={"entry": []}, request=httpx.Request("GET", url))
+
+    with patch("app.services.validation.httpx.AsyncClient") as mock_httpx:
+        ctx = AsyncMock()
+        ctx.get = AsyncMock(side_effect=_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        await _assert_no_canonical_url_clash(
+            [{"resourceType": "Measure", "url": "http://cms.gov/M1", "id": "m1"}], mcs=_mcs()
+        )
+
+    assert seen == ["https://mcs.example.org/fhir/Measure"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_measure_id_uses_the_given_mcs_by_relative_ref():
+    from app.services.validation import _resolve_measure_id
+
+    seen: list[str] = []
+
+    async def _get(url, **kwargs):
+        seen.append(url)
+        return httpx.Response(200, json={"id": "m1"}, request=httpx.Request("GET", url))
+
+    with patch("app.services.validation.httpx.AsyncClient") as mock_httpx:
+        ctx = AsyncMock()
+        ctx.get = AsyncMock(side_effect=_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _resolve_measure_id("Measure/m1", mcs=_mcs())
+
+    assert result == "m1"
+    assert seen == ["https://mcs.example.org/fhir/Measure/m1"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_measure_id_uses_the_given_mcs_by_canonical_url():
+    from app.services.validation import _resolve_measure_id
+
+    seen: list[str] = []
+
+    async def _get(url, **kwargs):
+        seen.append(url)
+        return httpx.Response(
+            200,
+            json={"entry": [{"resource": {"id": "m1"}}]},
+            request=httpx.Request("GET", url),
+        )
+
+    with patch("app.services.validation.httpx.AsyncClient") as mock_httpx:
+        ctx = AsyncMock()
+        ctx.get = AsyncMock(side_effect=_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        result = await _resolve_measure_id("http://cms.gov/M1", mcs=_mcs())
+
+    assert result == "m1"
+    assert seen == ["https://mcs.example.org/fhir/Measure"]
+
+
+@pytest.mark.asyncio
+async def test_measure_resolution_helpers_require_an_mcs():
+    from app.services.validation import _assert_no_canonical_url_clash, _resolve_measure_id
+
+    with pytest.raises(TypeError):
+        await _assert_no_canonical_url_clash([])  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        await _resolve_measure_id("Measure/m1")  # type: ignore[call-arg]
+
+
+# ---------------------------------------------------------------------------
+# run_validation targets its snapshotted MCS (issue #397 slice 3)
+# ---------------------------------------------------------------------------
+
+
+def make_session_patcher(test_session):
+    """Return a context-manager patcher that routes async_session() calls to test_session."""
+
+    @asynccontextmanager
+    async def _fake_session():
+        yield test_session
+
+    return _fake_session
+
+
+@pytest.mark.asyncio
+async def test_run_validation_targets_the_snapshotted_mcs(test_session, session_factory):
+    """Every measure-engine call in one run must hit the SAME server.
+
+    This is the anti-divergence guard. Pushing to one server and evaluating on
+    another produces confidently wrong pass/fail numbers rather than an error, which
+    is ADR-011's bug. A missed call site is exactly how that returns.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    # Bearer, not none: `auth_headers` is half of what McsTarget carries, and with
+    # AuthType.none every site's headers are `{}` — indistinguishable from a
+    # regression that dropped them and sent unauthenticated requests.
+    cfg = MCSConfig(
+        name="Remote MCS",
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok"},
+        is_active=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_id=cfg.id,
+        mcs_url=cfg.mcs_url,
+        mcs_name=cfg.name,
+        mcs_auth_type="bearer",
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    test_session.add(
+        ExpectedResult(
+            measure_url="http://cms.gov/M1",
+            patient_ref="p1",
+            expected_populations={"initial-population": 1},
+            period_start="2024-01-01",
+            period_end="2024-12-31",
+            source_bundle="m1.json",
+        )
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    # (site label, target URL, auth headers) per call. Labelled rather than a bare list
+    # of URLs because a count plus a URL set cannot say WHICH sites were observed: a
+    # regression where push stops being called while evaluate is called twice keeps both
+    # of those assertions true and leaves the push site — the divergence this test exists
+    # to catch — unobserved.
+    calls: list[tuple[str, str, dict]] = []
+
+    async def _record_push(resources, **kwargs):
+        calls.append(("push", kwargs.get("target_url"), kwargs.get("auth_headers")))
+        from app.services.fhir_client import BundleUploadResult
+
+        return BundleUploadResult()
+
+    async def _record_eval(measure_id, patient_id, ps, pe, **kwargs):
+        calls.append(("eval", kwargs.get("measure_engine_url"), kwargs.get("auth_headers")))
+        # An evaluatedResource Patient reference is what drives the patient-name
+        # lookup, the fourth measure-engine call site this run makes.
+        return {
+            "resourceType": "MeasureReport",
+            "group": [],
+            "evaluatedResource": [{"reference": "Patient/p1"}],
+        }
+
+    async def _record_patient_lookup(url, **kwargs):
+        calls.append(("name_lookup", url.removesuffix("/Patient/p1"), kwargs.get("headers")))
+        return httpx.Response(404, request=httpx.Request("GET", url))
+
+    # The CDR gather must succeed, or `push_resources` is never reached and the
+    # divergence this test exists to catch (push to one server, evaluate on
+    # another) would go unobserved.
+    strategy = MagicMock()
+    strategy.gather_patient_data = AsyncMock(
+        return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}])
+    )
+    name_client = AsyncMock()
+    name_client.get = AsyncMock(side_effect=_record_patient_lookup)
+    name_client_ctx = MagicMock()
+    name_client_ctx.__aenter__ = AsyncMock(return_value=name_client)
+    name_client_ctx.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
+        patch("app.services.validation.httpx.AsyncClient", return_value=name_client_ctx),
+        patch("app.services.validation.push_resources", side_effect=_record_push),
+        patch("app.services.validation.evaluate_measure", side_effect=_record_eval),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
+    ):
+        await run_validation(run.id)
+
+    assert calls, "no measure-engine calls were recorded"
+    # Every *evaluation* site was observed. The wipe is a fourth `mcs.url`-targeting call
+    # site, but it is patched out above with a bare AsyncMock, so it sits outside both
+    # conjunctions here by design; its URL and auth_headers are pinned separately in
+    # test_run_validation_scoped_wipe_by_default (see :2896-2900).
+    assert {label for label, _, _ in calls} == {"push", "eval", "name_lookup"}, calls
+    # ...and every one of them hit the same server. That conjunction is the guard.
+    assert {url for _, url, _ in calls} == {"https://mcs.example.org/fhir"}, calls
+    # Credentials travel with the target: dropping auth_headers at any site would send
+    # unauthenticated requests to a bearer-auth MCS without changing a single URL.
+    for label, _, headers in calls:
+        assert headers == {"Authorization": "Bearer tok"}, (label, headers)
+    # Supplementary: push + warmup evaluate + main evaluate + patient-name lookup.
+    assert len(calls) == 4, calls
+
+
+@pytest.mark.asyncio
+async def test_run_validation_refuses_a_read_only_mcs(test_session, session_factory):
+    """Read-only is read LIVE, not from the snapshot: it answers "may I write now"."""
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.validation import ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    cfg = MCSConfig(
+        name="Protected MCS",
+        mcs_url="https://shared.example.org/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        is_read_only=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_id=cfg.id,
+        mcs_url=cfg.mcs_url,
+        mcs_auth_type="none",
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push,
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+    ):
+        await run_validation(run.id)
+
+    mock_push.assert_not_awaited()
+    mock_wipe.assert_not_awaited()
+    await test_session.refresh(run)
+    assert run.status == ValidationStatus.failed
+    assert "read-only" in (run.error_message or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_run_validation_refuses_a_connection_marked_read_only_after_queueing(test_session, session_factory):
+    """Controller ruling R15 — the spec's actual claim, which the test above does not make.
+
+    The spec (§5, and its Testing bullet "Read-only checked at execution time, not queue
+    time") requires that a run queued while the connection was WRITABLE still refuses if the
+    connection was marked read-only before it executed. The test above creates a
+    connection that was already read-only, which cannot distinguish "read live" from
+    "snapshotted" — nothing was ever written down to be stale. This one flips the flag
+    after the run row exists, so it fails if is_read_only is ever snapshotted.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.validation import ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    cfg = MCSConfig(
+        name="Later Protected MCS",
+        mcs_url="https://shared.example.org/fhir",
+        auth_type=AuthType.none,
+        is_active=True,
+        is_read_only=False,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_id=cfg.id,
+        mcs_url=cfg.mcs_url,
+        mcs_auth_type="none",
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    # The user protects the server AFTER the run was queued.
+    cfg.is_read_only = True
+    await test_session.commit()
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push,
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+    ):
+        await run_validation(run.id)
+
+    mock_push.assert_not_awaited()
+    mock_wipe.assert_not_awaited()
+    await test_session.refresh(run)
+    assert run.status == ValidationStatus.failed
+    assert "read-only" in (run.error_message or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_run_validation_fails_when_the_config_was_repointed(test_session, session_factory):
+    """Controller ruling R16 — covers the try/except this task adds, and a spec item.
+
+    Step 3 wraps `resolve_mcs_auth_headers` in `except RuntimeError -> _fail_validation_run`,
+    and nothing in the original brief exercised that path. The spec's Testing section also
+    asks for the URL-drift guard firing "for a ValidationRun snapshot the same way" it does
+    for a Job. Credentials are read live while the URL comes from the snapshot, so a config
+    repointed at a different host must not have its token sent to the snapshotted host.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.validation import ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    cfg = MCSConfig(
+        name="Repointed MCS",
+        mcs_url="https://mcs-a.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok-a"},
+        is_active=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_id=cfg.id,
+        mcs_url="https://mcs-a.example.org/fhir",
+        mcs_auth_type="bearer",
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    # The config is repointed at a different server after the run was queued.
+    cfg.mcs_url = "https://mcs-b.example.org/fhir"
+    await test_session.commit()
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock) as mock_push,
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_wipe,
+    ):
+        await run_validation(run.id)
+
+    mock_push.assert_not_awaited()
+    mock_wipe.assert_not_awaited()
+    await test_session.refresh(run)
+    assert run.status == ValidationStatus.failed
+    assert "different server" in (run.error_message or "")
+
+
+@pytest.mark.asyncio
+async def test_run_validation_legacy_null_mcs_url_falls_back(test_session, session_factory):
+    """Runs created before the snapshot column must remain runnable."""
+    from app.config import settings as app_settings
+    from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    run = ValidationRun(status=ValidationStatus.queued, mcs_url=None, mcs_auth_type=None)
+    test_session.add(run)
+    # Controller ruling R10: this row is required. Without an expected result the run
+    # short-circuits before any measure-engine call, `targets` stays empty, and the
+    # `for t in targets` loop below asserts nothing — the test passes while verifying
+    # no fallback at all.
+    test_session.add(
+        ExpectedResult(
+            measure_url="http://cms.gov/M1",
+            patient_ref="p1",
+            expected_populations={"initial-population": 1},
+            period_start="2024-01-01",
+            period_end="2024-12-31",
+            source_bundle="m1.json",
+        )
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    targets: list[str] = []
+
+    async def _record_push(resources, **kwargs):
+        targets.append(kwargs.get("target_url"))
+        from app.services.fhir_client import BundleUploadResult
+
+        return BundleUploadResult()
+
+    async def _record_eval(measure_id, patient_id, ps, pe, **kwargs):
+        targets.append(kwargs.get("measure_engine_url"))
+        return {"resourceType": "MeasureReport", "group": []}
+
+    # As above: without a succeeding CDR gather the push site is never reached.
+    strategy = MagicMock()
+    strategy.gather_patient_data = AsyncMock(
+        return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}])
+    )
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.BatchQueryStrategy", return_value=strategy),
+        patch("app.services.validation.push_resources", side_effect=_record_push),
+        patch("app.services.validation.evaluate_measure", side_effect=_record_eval),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
+    ):
+        await run_validation(run.id)
+
+    assert targets, "no measure-engine calls were recorded — the fallback is unverified"
+    for t in targets:
+        assert t == app_settings.MEASURE_ENGINE_URL
+
+
+# ---------------------------------------------------------------------------
+# run_validation scopes its pre-run wipe to the run's own patients (#397 task 8,
+# second copy of #392)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_validation_scoped_wipe_by_default(test_session, session_factory):
+    """The second copy of the #392 bug. Unfiltered here too until now.
+
+    #392 scoped run_job's wipe and never touched this path. Re-pointing it at the
+    active MCS without scoping would have deleted every participant's data on a
+    shared server.
+
+    Configured with bearer auth, not `none`: the wipe is the fourth `mcs.url`-targeting
+    call and the destructive one, and with `AuthType.none` its `auth_headers` would be
+    `{}` — indistinguishable from a regression that dropped them and issued an
+    unauthenticated DELETE.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    cfg = MCSConfig(
+        name="Remote MCS",
+        mcs_url="https://mcs.example.org/fhir",
+        auth_type=AuthType.bearer,
+        auth_credentials={"token": "tok"},
+        is_active=True,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_id=cfg.id,
+        mcs_url=cfg.mcs_url,
+        mcs_name=cfg.name,
+        mcs_auth_type="bearer",
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    for ref in ("p1", "p2"):
+        test_session.add(
+            ExpectedResult(
+                measure_url="http://cms.gov/M1",
+                patient_ref=ref,
+                expected_populations={"initial-population": 1},
+                period_start="2024-01-01",
+                period_end="2024-12-31",
+                source_bundle="m1.json",
+            )
+        )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock),
+        patch("app.services.validation.evaluate_measure", new_callable=AsyncMock, return_value={"group": []}),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_full,
+        patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped,
+    ):
+        await run_validation(run.id)
+
+    mock_full.assert_not_awaited()
+    mock_scoped.assert_awaited_once()
+    kwargs = mock_scoped.await_args.kwargs
+    assert kwargs["base_url"] == "https://mcs.example.org/fhir"
+    assert sorted(kwargs["patient_ids"]) == ["p1", "p2"]
+    # Credentials travel with the target here too. The anti-divergence test above patches
+    # this call out, so this is the only place on the branch that pins it.
+    assert kwargs["auth_headers"] == {"Authorization": "Bearer tok"}
+
+
+@pytest.mark.asyncio
+async def test_run_validation_full_wipe_when_connection_opted_in(test_session, session_factory):
+    from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_url="https://mcs.example.org/fhir",
+        mcs_auth_type=None,
+        mcs_wipe_before_job=True,
+    )
+    test_session.add(run)
+    test_session.add(
+        ExpectedResult(
+            measure_url="http://cms.gov/M1",
+            patient_ref="p1",
+            expected_populations={"initial-population": 1},
+            period_start="2024-01-01",
+            period_end="2024-12-31",
+            source_bundle="m1.json",
+        )
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock),
+        patch("app.services.validation.evaluate_measure", new_callable=AsyncMock, return_value={"group": []}),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value="m1"),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_full,
+        patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped,
+    ):
+        await run_validation(run.id)
+
+    mock_scoped.assert_not_awaited()
+    mock_full.assert_awaited_once()
+    assert mock_full.await_args.kwargs["base_url"] == "https://mcs.example.org/fhir"
+
+
+@pytest.mark.asyncio
+async def test_run_validation_with_no_resolved_patients_wipes_nothing(test_session, session_factory):
+    """Controller ruling R14 — a spec Testing item the original brief omitted.
+
+    The spec's §4 states "A run with zero resolved expected results wipes nothing,
+    consistent with #392's zero-patient job behavior", and its Testing section lists
+    "zero-patient run wipes nothing" alongside both wipe modes. Neither of the two tests
+    above covers it. This matters because the scoped branch would otherwise be free to call
+    `wipe_patients_by_id(patient_ids=[])`, whose behavior against a real server on an empty
+    id list is not something this slice should be relying on.
+
+    `_resolve_measure_id` returning None leaves `measure_info` empty, so no expected result
+    resolves and `resolved_expected_results` is empty.
+    """
+    from app.models.validation import ExpectedResult, ValidationRun, ValidationStatus
+    from app.services.validation import run_validation
+
+    run = ValidationRun(
+        status=ValidationStatus.queued,
+        mcs_url="https://mcs.example.org/fhir",
+        mcs_auth_type=None,
+        mcs_wipe_before_job=False,
+    )
+    test_session.add(run)
+    test_session.add(
+        ExpectedResult(
+            measure_url="http://cms.gov/M1",
+            patient_ref="p1",
+            expected_populations={"initial-population": 1},
+            period_start="2024-01-01",
+            period_end="2024-12-31",
+            source_bundle="m1.json",
+        )
+    )
+    await test_session.commit()
+    await test_session.refresh(run)
+
+    with (
+        patch("app.services.validation.async_session", make_session_patcher(test_session)),
+        patch("app.services.validation.push_resources", new_callable=AsyncMock),
+        patch("app.services.validation.evaluate_measure", new_callable=AsyncMock, return_value={"group": []}),
+        patch("app.services.validation._resolve_measure_id", new_callable=AsyncMock, return_value=None),
+        # Unresolved measures send run_validation down the seed-bundle reload path. Left
+        # unpatched, that walks the on-disk connectathon bundles and opens a real
+        # httpx.AsyncClient against https://mcs.example.org/fhir once per bundle. The
+        # assertions below hold either way, but a unit test must not touch the network.
+        patch(
+            "app.services.validation._reload_measures_from_seed_bundles",
+            new_callable=AsyncMock,
+            return_value={"measures_loaded": 0, "libraries_loaded": 0, "failed": 0},
+        ),
+        patch("app.services.validation.wipe_patient_data", new_callable=AsyncMock) as mock_full,
+        patch("app.services.validation.wipe_patients_by_id", new_callable=AsyncMock) as mock_scoped,
+    ):
+        await run_validation(run.id)
+
+    mock_full.assert_not_awaited()
+    mock_scoped.assert_not_awaited()
