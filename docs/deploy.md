@@ -208,7 +208,8 @@ creates it, so this table doubles as a disaster-recovery checklist.
 | **AWS SSM Document** | `leonard-deploy` — the commands the instance runs on deploy | `scripts/bootstrap-ssm-document.sh`, from `ssm/leonard-deploy-document.json` |
 | **AWS IAM** | The GitHub OIDC provider; the `leonard-github-deploy` role (assumed by CI); the `leonard-ec2-prod` role and instance profile; the `leonard-prod-ssm-read` policy; an inline `CloudWatchLogsWrite` policy | `scripts/bootstrap-github-deploy.sh` and `scripts/bootstrap-aws.sh`, from the JSON in `iam/` |
 | **EC2 instance** | The `/opt/leonard` git checkout; `/opt/leonard/.env` (**not in git** — holds `CADDY_HOST` and the HAPI image pins); `/run/leonard/*` secret files (tmpfs, rewritten every deploy); the `cdrdata`, `measuredata`, and `pgdata` named volumes; Caddy's TLS certificates in `caddy_data` | manual instance setup, then `scripts/deploy-prod.sh` |
-| **CloudWatch** | Five log groups — `/leonard/{caddy,backend,hapi-cdr,hapi-measure,frontend}`, 90-day retention — plus `/leonard/deploy` for SSM output, two metric filters, and two alarms | `scripts/bootstrap-aws.sh` |
+| **CloudWatch** | Five log groups — `/leonard/{caddy,backend,hapi-cdr,hapi-measure,frontend}`, 90-day retention — two metric filters, and two alarms | `scripts/bootstrap-aws.sh` |
+| **CloudWatch** | `/leonard/deploy` — SSM command output. No retention policy set | auto-created by SSM via `--cloud-watch-output-config` in `deploy.yml` |
 | **SNS** | The `leonard-alerts` topic and its email subscription, which the alarms publish to | `scripts/bootstrap-aws.sh` |
 | **GHCR** | The two baked HAPI packages (public) | `.github/workflows/bake-hapi-image.yml` |
 | **GitHub** | Branch protection on `main`; the `github-pages` environment; the Actions secret `AWS_DEPLOY_ROLE_ARN` — which is **vestigial**: no workflow reads it, `deploy.yml` hardcodes the role ARN directly | manual |

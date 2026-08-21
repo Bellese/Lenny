@@ -2,7 +2,7 @@
 
 ## Service Map
 
-| Service | Image | Role | Exposed port |
+| Service | Image (compose default) | Role | Exposed port |
 |---------|-------|------|-------------|
 | frontend | local build | React web UI | 3001 |
 | backend | local build | FastAPI orchestrator | 8000 |
