@@ -71,7 +71,13 @@ If the change is documentation-only (`*.md`, no code), steps 1–4 are not requi
 
 ## Architecture
 
-5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (bundles + IGs baked into the image, PR #199). Production currently runs vanilla `hapiproject/hapi:v8.8.0-1` — the `seed` service POSTs the connectathon bundles into a persistent H2 volume on first boot, and the volume keeps them warm across redeploys. Whether to switch prod to prebaked is an open question; see `docs/decisions.md`. Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`.
+5 Docker services (frontend :3001, backend :8000, db, hapi-fhir-cdr, hapi-fhir-measure). Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (bundles + IGs baked into the image, PR #199).
+
+**Production does NOT use the prebaked overlay** — `deploy-prod.sh` runs `docker-compose.yml` + `docker-compose.prod.yml` only, so the `cdrdata`/`measuredata` volumes mount over `/data/hapi` and shadow any baked H2 store. Prod data is what the `seed` service loaded into those volumes; it persists across redeploys.
+
+Prod's `/opt/leonard/.env` *does* pin `HAPI_CDR_IMAGE`/`HAPI_MEASURE_IMAGE`, but at the pre-rename `ghcr.io/bellese/mct2-hapi-*:latest` names, which 403. `compose pull --ignore-pull-failures` swallows the error every deploy, so prod's HAPI **binary** is frozen on a stale cached image while its config (from `docker-compose.yml`, refreshed from git) and data (from the volumes) stay current. Don't describe prod as running vanilla `hapiproject/hapi` — it isn't, and don't assume a bake reaches prod — it doesn't.
+
+Full service map, data flow, HAPI configuration, and environment variables in `docs/architecture.md`. **End-to-end prod CI/CD pipeline, GHCR's role, and the inventory of everything outside this repo: `docs/deploy.md`.**
 
 ## Code Conventions
 

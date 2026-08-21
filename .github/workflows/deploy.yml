@@ -26,8 +26,11 @@ jobs:
       # the same tests here adds ~5 min and zero marginal safety. The post-deploy
       # `Health check` step is the real production smoke test.
 
-      # Break-glass: SSH secrets (EC2_HOST, EC2_USER, EC2_SSH_KEY) retained for
-      # manual access — not used in automated deploy.
+      # No SSH path here. The EC2_HOST / EC2_USER / EC2_SSH_KEY secrets this
+      # comment used to describe as "retained" were deleted 2026-04-23; the only
+      # repo secret left is AWS_DEPLOY_ROLE_ARN, which no workflow reads (the role
+      # ARN is hardcoded below). Break-glass SSH is a human path using a key held
+      # on the instance and maintainer laptops — see docs/workflow.md.
 
       - name: Configure AWS credentials (OIDC)
         if: success()

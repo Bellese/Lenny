@@ -79,7 +79,7 @@ scripts/deploy-prod.sh
 | `EC2_USER` | ✅ Deleted (2026-04-23) — no longer used by the deploy workflow |
 | `EC2_SSH_KEY` | ✅ Deleted (2026-04-23) — GitHub secret removed; SSH key remains on instance and on maintainer laptops for break-glass use |
 | `POSTGRES_PASSWORD` | ✅ Deleted (2026-04-23) — now sourced from SSM |
-| `AWS_DEPLOY_ROLE_ARN` | Active — used by the OIDC deploy workflow |
+| `AWS_DEPLOY_ROLE_ARN` | **Vestigial** (verified 2026-08-21) — still present in the repo's Actions secrets, but no workflow references it. `deploy.yml` hardcodes the role ARN in the `configure-aws-credentials` step. Safe to delete; kept only to avoid breaking a future workflow that expects it. |
 
 ## Reference Docs
 
@@ -87,5 +87,6 @@ scripts/deploy-prod.sh
 |-----|----------|
 | `CLAUDE.md` | Build commands, conventions, workflow shortcuts |
 | `docs/architecture.md` | Service map, data flow, HAPI config, environment variables |
+| `docs/deploy.md` | Prod CI/CD pipeline end to end, GHCR's role, inventory of everything outside the repo |
 | `docs/testing.md` | Testing strategy, CI gate, integration test setup, golden file patterns |
 | `docs/decisions.md` | ADR log — significant technical and process choices with rationale |
