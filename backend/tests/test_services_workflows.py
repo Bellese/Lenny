@@ -174,6 +174,37 @@ class TestDeqmSubmitDataWorkflow:
         assert wf._mode == "base-fallback"
         assert submit.await_count == 2
 
+    @pytest.mark.parametrize("status_code", [405, 501])
+    async def test_stu5_405_and_501_also_downgrade(self, status_code):
+        """F3: a server that advertises $deqm-submit-data but doesn't
+        implement the type-level POST commonly answers 405 or 501."""
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(side_effect=[_fhir_op_error(status_code), None])
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+        assert wf._mode == "base-fallback"
+        assert submit.await_count == 2
+
+    @pytest.mark.parametrize("status_code", [401, 403, 429, 500])
+    async def test_stu5_auth_and_transient_failures_do_not_downgrade(self, status_code):
+        """F3: auth failures (401/403) must not be masked as a capability
+        downgrade, and transient/overload signals (429/5xx) must not be
+        treated as a permanent capability verdict."""
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(side_effect=_fhir_op_error(status_code))
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            with pytest.raises(TransferPhaseError) as exc_info:
+                await wf.transfer_patient("http://cdr", "p1", {})
+        assert exc_info.value.phase == "submit"
+        assert wf._mode == "stu5"  # no downgrade attempted
+        assert submit.await_count == 1
+
     async def test_stu5_downgrade_retry_also_fails_raises_submit_phase(self):
         """If the base-mode retry also fails, raise TransferPhaseError as today."""
         wf = _deqm_workflow(mode="stu5")
@@ -278,6 +309,33 @@ class TestDeqmSubmitDataWorkflow:
         mr = params["parameter"][0]["resource"]
         assert mr["evaluatedResource"] == []
 
+    async def test_id_less_resource_excluded_from_submission_and_evaluated_resource(self):
+        """F1: an id-less resource must not disagree between the MeasureReport's
+        evaluatedResource and the submitted Parameters — both are derived from
+        the SAME filtered list, so a resource missing `id` (or `resourceType`)
+        is excluded from both."""
+        wf = _deqm_workflow()
+        gather_with_bad_resource = GatherResult(
+            resources=[
+                {"resourceType": "Patient", "id": "p1"},
+                {"resourceType": "Condition", "id": "c1"},
+                {"resourceType": "Observation"},  # no id — must be dropped
+                {"id": "no-type"},  # no resourceType — must be dropped
+            ]
+        )
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=gather_with_bad_resource)),
+            patch("app.services.workflows.submit_data", new=AsyncMock()) as submit,
+        ):
+            result = await wf.transfer_patient("http://cdr", "p1", {})
+        assert result is gather_with_bad_resource  # GatherResult passed through unfiltered to the caller
+        params = submit.call_args.kwargs["parameters"]
+        submitted_types = [p["resource"]["resourceType"] for p in params["parameter"][1:]]
+        assert submitted_types == ["Organization", "Patient", "Condition"]
+        mr = params["parameter"][0]["resource"]
+        refs = [er["reference"] for er in mr["evaluatedResource"]]
+        assert refs == ["Patient/p1", "Condition/c1"]
+
     async def test_stu5_non_downgrade_status_does_not_retry(self):
         """A non-400/404 STU5 failure (e.g. 500) does NOT trigger a downgrade retry."""
         wf = _deqm_workflow(mode="stu5")
@@ -357,6 +415,46 @@ class TestBuildSubmissionWorkflow:
         assert isinstance(wf, DeqmSubmitDataWorkflow)
         canon.assert_awaited_once_with("M1", mcs_url="http://mcs", auth_headers={})
         assert wf._mode == "base-fallback"
+
+    async def test_deqm_stu5_mode_raises_on_relative_canonical(self):
+        """F4: in STU5 mode, MeasureReport.measure is the only identifier —
+        a relative reference (degraded from a Measure with no `url`) is not a
+        resolvable canonical there. Fail fast at job build."""
+        with patch(
+            "app.services.workflows.get_measure_canonical",
+            new=AsyncMock(return_value="Measure/M1"),  # degraded relative reference
+        ):
+            with pytest.raises(ValueError, match="absolute canonical URL"):
+                await build_submission_workflow(
+                    workflow="deqm_submit_data",
+                    job_id=1,
+                    measure_id="M1",
+                    mcs_url="http://mcs",
+                    mcs_auth_headers={},
+                    submit_data_mode="stu5",
+                    period_start="2025-01-01",
+                    period_end="2025-12-31",
+                )
+
+    async def test_deqm_base_mode_tolerates_relative_canonical(self):
+        """F4: base-fallback mode is unaffected — the measure is already
+        named in the instance-level submit URL."""
+        with patch(
+            "app.services.workflows.get_measure_canonical",
+            new=AsyncMock(return_value="Measure/M1"),
+        ):
+            wf = await build_submission_workflow(
+                workflow="deqm_submit_data",
+                job_id=1,
+                measure_id="M1",
+                mcs_url="http://mcs",
+                mcs_auth_headers={},
+                submit_data_mode="base-fallback",
+                period_start="2025-01-01",
+                period_end="2025-12-31",
+            )
+        assert isinstance(wf, DeqmSubmitDataWorkflow)
+        assert wf._measure_canonical == "Measure/M1"
 
     async def test_deqm_propagates_canonical_fetch_failure(self):
         """Coverage-audit gap fill: build_submission_workflow must let a

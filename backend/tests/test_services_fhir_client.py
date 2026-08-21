@@ -2241,6 +2241,49 @@ async def test_data_requirements_strategy_non_200_patient_not_appended():
     assert resources == []
 
 
+async def test_data_requirements_strategy_patient_failure_reports_partial_gather():
+    """F2: a non-200 Patient read must be recorded as a FailedResourceFetch so
+    the gather is reported as partial (has_partial_failure) — previously it
+    was swallowed with no failure record and no way to attribute a later
+    failure to the missing Patient. Patient must still NOT be added to
+    required_types: the declared Condition requirement succeeds, so no
+    $everything fallback should fire."""
+    data_req_response = {
+        "resourceType": "Library",
+        "dataRequirement": [{"type": "Condition"}],
+    }
+    cond_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Condition", "id": "c1"}}],
+        "link": [],
+    }
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        if "/Patient/p1" in url:
+            return _make_response(404, {"resourceType": "OperationOutcome"})
+        if "Condition" in url:
+            return _make_response(200, cond_bundle)
+        return _make_response(200, {"resourceType": "Bundle", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        gather_result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    assert gather_result.resources == [{"resourceType": "Condition", "id": "c1"}]
+    assert gather_result.has_partial_failure is True
+    assert [f.resource_type for f in gather_result.failed_types] == ["Patient"]
+    everything_calls = [c for c in mock_ctx.get.call_args_list if "$everything" in str(c)]
+    assert len(everything_calls) == 0  # Condition (the only declared requirement) succeeded
+
+
 async def test_data_requirements_strategy_non_200_resource_entries_skipped():
     """When ALL required types return non-200, the $everything fallback is triggered."""
     data_req_response = {
@@ -3020,6 +3063,62 @@ class TestSubmitData:
         assert base_url == "http://mcs/Measure/M1/$submit-data"
         assert stu5_url == "http://mcs/Measure/$deqm-submit-data"
         assert base_url != stu5_url
+
+    async def test_409_conflict_retries_and_succeeds(self):
+        """F12: concurrent patients upserting the same Organization/lenny-reporter
+        can race into a HAPI ResourceVersionConflictException (409). Retry the
+        same request rather than failing the patient outright."""
+        post = AsyncMock(
+            side_effect=[
+                _make_response(409, {"resourceType": "OperationOutcome"}),
+                _make_response(200, {"resourceType": "Bundle"}),
+            ]
+        )
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            with patch("app.services.fhir_client.asyncio.sleep", new=AsyncMock()) as sleep:
+                await submit_data(
+                    mcs_url="http://mcs",
+                    parameters={"resourceType": "Parameters"},
+                    mode=SUBMIT_DATA_MODE_BASE,
+                    measure_id="M1",
+                )
+        assert post.await_count == 2
+        sleep.assert_awaited_once()
+
+    async def test_412_conflict_also_retries(self):
+        post = AsyncMock(
+            side_effect=[
+                _make_response(412, {"resourceType": "OperationOutcome"}),
+                _make_response(200, {"resourceType": "Bundle"}),
+            ]
+        )
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            with patch("app.services.fhir_client.asyncio.sleep", new=AsyncMock()):
+                await submit_data(
+                    mcs_url="http://mcs",
+                    parameters={"resourceType": "Parameters"},
+                    mode=SUBMIT_DATA_MODE_BASE,
+                    measure_id="M1",
+                )
+        assert post.await_count == 2
+
+    async def test_409_conflict_exhausts_retries_and_raises(self):
+        """After 2 retries (3 total attempts) a persistent 409 still raises."""
+        post = AsyncMock(return_value=_make_response(409, {"resourceType": "OperationOutcome"}))
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            with patch("app.services.fhir_client.asyncio.sleep", new=AsyncMock()):
+                with pytest.raises(FhirOperationError) as exc_info:
+                    await submit_data(
+                        mcs_url="http://mcs",
+                        parameters={"resourceType": "Parameters"},
+                        mode=SUBMIT_DATA_MODE_BASE,
+                        measure_id="M1",
+                    )
+        assert exc_info.value.status_code == 409
+        assert post.await_count == 3
 
     async def test_raises_fhir_operation_error_on_4xx(self):
         oo = {

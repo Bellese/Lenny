@@ -69,6 +69,20 @@ async def test_create_job_missing_fields(client):
     assert resp.status_code == 422
 
 
+async def test_create_job_path_bearing_measure_id_rejected(client):
+    """F7: measure_id is interpolated into CDR/MCS URL paths (e.g.
+    Measure/{measure_id}/$submit-data) — a value that could rewrite that path
+    must be rejected with 422, mirroring the existing group_id validator."""
+    payload = {
+        "measure_id": "../../etc/passwd",
+        "period_start": "2024-01-01",
+        "period_end": "2024-12-31",
+        "cdr_url": "https://example.com/fhir",
+    }
+    resp = await client.post("/jobs", json=payload)
+    assert resp.status_code == 422
+
+
 async def test_create_job_uses_default_cdr_url(client):
     """POST /jobs without cdr_url falls back to default."""
     payload = {

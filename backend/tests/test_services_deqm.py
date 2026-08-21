@@ -1,5 +1,7 @@
 """Tests for the DEQM data-exchange payload builders (deqm.py)."""
 
+import re
+
 from app.services.deqm import (
     DEQM_DATA_EXCHANGE_PROFILE,
     DEQM_UPDATE_TYPE_EXT,
@@ -91,6 +93,39 @@ class TestMeasureReportIdTruncation:
             job_id=7,
             patient_id=long_patient_id,
             measure_canonical="http://example.org/Measure/CMS122|1.0.0",
+            period_start="2025-01-01",
+            period_end="2025-12-31",
+            resources=[],
+            timestamp="2026-08-21T12:00:00+00:00",
+        )
+        first = build_data_exchange_measure_report(**kwargs)
+        second = build_data_exchange_measure_report(**kwargs)
+        assert first["id"] == second["id"]
+
+    def test_illegal_charset_patient_id_falls_back_to_hash(self):
+        """F6: FHIR's `id` element is [A-Za-z0-9\\-.]{1,64} — an underscore,
+        colon, or non-ASCII character in patient_id (plausible from a
+        third-party CDR) must not flow through into an invalid MeasureReport
+        id even when the composed id is well within the 64-char limit."""
+        mr = build_data_exchange_measure_report(
+            job_id=1,
+            patient_id="p1_illegal:chars",
+            measure_canonical="http://example.org/Measure/M",
+            period_start="2025-01-01",
+            period_end="2025-12-31",
+            resources=[],
+            timestamp="2026-08-21T12:00:00+00:00",
+        )
+        assert mr["id"].startswith("deqm-1-")
+        assert re.match(r"^[A-Za-z0-9\-.]{1,64}$", mr["id"])
+        assert "_" not in mr["id"]
+        assert ":" not in mr["id"]
+
+    def test_illegal_charset_patient_id_is_stable_across_calls(self):
+        kwargs = dict(
+            job_id=3,
+            patient_id="p2:bad_id",
+            measure_canonical="http://example.org/Measure/M",
             period_start="2025-01-01",
             period_end="2025-12-31",
             resources=[],

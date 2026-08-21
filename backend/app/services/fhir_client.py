@@ -485,6 +485,22 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                         resp = await client.get(f"{cdr_url}/Patient/{patient_id}", headers=auth_headers)
                         if resp.status_code == 200:
                             resources.append(resp.json())
+                        else:
+                            # Recorded in `failed_types` only (drives has_partial_failure /
+                            # partial-gather reporting) — deliberately NOT added to
+                            # `failed_type_names`, which drives the "all REQUIRED types
+                            # failed" check below. That check must fire only on declared
+                            # dataRequirement types genuinely all failing; a forced
+                            # Patient-read failure must never trip it, since Patient is
+                            # always fetched via this special-cased direct read (never
+                            # the generic per-type loop) regardless of whether it also
+                            # happens to appear in the dataRequirement list.
+                            failed_types.append(
+                                FailedResourceFetch(
+                                    resource_type=resource_type,
+                                    error=f"CDR returned {resp.status_code} for Patient/{patient_id}",
+                                )
+                            )
                     else:
                         # Only keep a code:in= filter when every requirement for
                         # this type agrees on a single valueset. Otherwise
@@ -1024,9 +1040,13 @@ async def detect_submit_data_mode(
                 ):
                     return SUBMIT_DATA_MODE_STU5
     except Exception as exc:
+        # Deferred import: app.services.validation imports from this module at
+        # module load time, so a top-level import here would be circular.
+        from app.services.validation import sanitize_error
+
         logger.warning(
             "CapabilityStatement probe for $deqm-submit-data failed — assuming base $submit-data",
-            extra={"mcs_url": sanitize_url(mcs_url), "error": str(exc)},
+            extra={"mcs_url": sanitize_url(mcs_url), "error": sanitize_error(exc)},
         )
     return SUBMIT_DATA_MODE_BASE
 
@@ -1060,6 +1080,16 @@ async def submit_data(
 
     Any 2xx is success; the response body (HAPI returns a transaction Bundle)
     carries no information the job needs.
+
+    Every patient's submission upserts the SAME client-assigned
+    Organization/lenny-reporter (DEQM requires `reporter` to resolve inside
+    the submission, so it must stay inline in the payload). Batches run
+    concurrently (asyncio.Semaphore(MAX_WORKERS)), so several transactions
+    can race to upsert that one id and HAPI can answer with a
+    ResourceVersionConflictException (409, or 412 for a failed
+    If-Match/version-aware update). Retry the SAME request up to 2 times
+    with a short backoff before giving up, mirroring evaluate_measure's
+    retry style.
     """
     if mode == SUBMIT_DATA_MODE_STU5:
         url = f"{mcs_url}/Measure/$deqm-submit-data"
@@ -1067,22 +1097,36 @@ async def submit_data(
         url = f"{mcs_url}/Measure/{measure_id}/$submit-data"
     headers = {"Content-Type": "application/fhir+json", **(auth_headers or {})}
     async with httpx.AsyncClient(timeout=120.0) as client:
-        start_ms = int(time.monotonic() * 1000)
-        resp = await client.post(url, json=parameters, headers=headers)
-        latency_ms = int(time.monotonic() * 1000) - start_ms
-        if resp.status_code >= 300:
-            raise FhirOperationError(
-                operation="submit-data",
-                url=url,
-                status_code=resp.status_code,
-                outcome=FhirOperationOutcome.from_response(resp),
-                latency_ms=latency_ms,
+        for attempt in range(3):
+            start_ms = int(time.monotonic() * 1000)
+            resp = await client.post(url, json=parameters, headers=headers)
+            latency_ms = int(time.monotonic() * 1000) - start_ms
+            if resp.status_code >= 300:
+                if resp.status_code in (409, 412) and attempt < 2:
+                    logger.warning(
+                        "Conflict submitting $submit-data (HTTP %s) — retrying",
+                        resp.status_code,
+                        extra={
+                            "mcs_url": sanitize_url(mcs_url),
+                            "status_code": resp.status_code,
+                            "attempt": attempt + 1,
+                        },
+                    )
+                    await asyncio.sleep(0.5 * (attempt + 1))
+                    continue
+                raise FhirOperationError(
+                    operation="submit-data",
+                    url=url,
+                    status_code=resp.status_code,
+                    outcome=FhirOperationOutcome.from_response(resp),
+                    latency_ms=latency_ms,
+                )
+            logger.info(
+                "Submitted data via %s",
+                mode,
+                extra={"mcs_url": sanitize_url(mcs_url), "latency_ms": latency_ms},
             )
-    logger.info(
-        "Submitted data via %s",
-        mode,
-        extra={"mcs_url": sanitize_url(mcs_url), "latency_ms": latency_ms},
-    )
+            return
 
 
 async def _remap_valueset_ids_for_hapi(

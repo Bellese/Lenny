@@ -10,6 +10,7 @@ IG:   https://hl7.org/fhir/us/davinci-deqm/STU5/
 """
 
 import hashlib
+import re
 from typing import Any
 
 DEQM_DATA_EXCHANGE_PROFILE = "http://hl7.org/fhir/us/davinci-deqm/StructureDefinition/datax-measurereport-deqm"
@@ -17,6 +18,12 @@ DEQM_UPDATE_TYPE_EXT = "http://hl7.org/fhir/us/davinci-deqm/StructureDefinition/
 
 # FHIR's `id` element is capped at 64 characters (spec: Resource.id).
 _MAX_FHIR_ID_LENGTH = 64
+
+# FHIR's `id` element is also restricted to this charset (spec: Resource.id).
+# patient_id comes from a third-party CDR, so an underscore/colon/non-ASCII id
+# would otherwise flow straight into the composed id below and yield an
+# invalid MeasureReport id — a 400 for every patient with such an id.
+_FHIR_ID_CHARSET_RE = re.compile(r"^[A-Za-z0-9\-.]+$")
 
 # DEQM requires MeasureReport.reporter 1..1 (Organization). Lenny is the
 # reporter; this fixed resource travels inside every submission so the
@@ -30,17 +37,18 @@ LENNY_REPORTER_ORG: dict[str, Any] = {
 
 
 def _measure_report_id(job_id: int, patient_id: str) -> str:
-    """Build the `deqm-{job_id}-{patient_id}` id, truncated when it would
-    overflow FHIR's 64-char `id` limit.
+    """Build the `deqm-{job_id}-{patient_id}` id, falling back to a stable
+    hash of patient_id when the composed id would overflow FHIR's 64-char
+    `id` limit OR contain characters outside `[A-Za-z0-9\\-.]`.
 
-    A long patient_id can push the composed id past 64 chars; HAPI 400s the
-    whole submission when it does. When that happens, keep the short
-    `deqm-{job_id}-` prefix (useful for debugging) and replace patient_id with
-    a stable hash of it, so the result is deterministic across calls for the
-    same (job_id, patient_id) pair.
+    A long or illegally-charset patient_id can otherwise produce an invalid
+    `id`; HAPI 400s the whole submission when it does. When that happens,
+    keep the short `deqm-{job_id}-` prefix (useful for debugging) and replace
+    patient_id with a stable hash of it, so the result is deterministic
+    across calls for the same (job_id, patient_id) pair.
     """
     candidate = f"deqm-{job_id}-{patient_id}"
-    if len(candidate) <= _MAX_FHIR_ID_LENGTH:
+    if len(candidate) <= _MAX_FHIR_ID_LENGTH and _FHIR_ID_CHARSET_RE.match(candidate):
         return candidate
     prefix = f"deqm-{job_id}-"
     digest = hashlib.sha256(patient_id.encode("utf-8")).hexdigest()

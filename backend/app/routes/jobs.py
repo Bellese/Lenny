@@ -44,6 +44,7 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
 _GROUP_ID_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,256}$")
+_MEASURE_ID_RE = re.compile(r"^[A-Za-z0-9_\-\.]{1,256}$")
 
 # Ceiling for the `measure_exists` pre-flight on POST /jobs. The connection's own
 # `request_timeout_seconds` (up to 1800s) is sized for measure evaluation, not for
@@ -69,6 +70,14 @@ class JobCreate(BaseModel):
         """Reject group_id values that could rewrite the CDR URL path."""
         if v is not None and not _GROUP_ID_RE.match(v):
             raise ValueError("group_id must be alphanumeric with hyphens, underscores, or dots only")
+        return v
+
+    @field_validator("measure_id")
+    @classmethod
+    def validate_measure_id(cls, v: str) -> str:
+        """Reject measure_id values that could rewrite the CDR/MCS URL path."""
+        if not _MEASURE_ID_RE.match(v):
+            raise ValueError("measure_id must be alphanumeric with hyphens, underscores, or dots only")
         return v
 
     @field_validator("workflow")

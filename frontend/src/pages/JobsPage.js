@@ -393,6 +393,7 @@ export default function JobsPage() {
                   const running = isRunning(job.status);
                   const complete = isComplete(job.status);
                   const deleting = job.delete_requested || deletingJobIds.includes(job.id);
+                  const isFallback = job.submit_data_mode === 'base-fallback';
                   return (
                     <tr
                       key={job.id}
@@ -417,15 +418,15 @@ export default function JobsPage() {
                         <StatusBadge status={job.status} />
                         {job.workflow === 'deqm_submit_data' && (
                           <span
-                            className={`${styles.workflowTag} ${job.submit_data_mode === 'base-fallback' ? styles.workflowTagWarn : ''}`}
-                            title={job.submit_data_mode === 'base-fallback'
+                            className={`${styles.workflowTag} ${isFallback ? styles.workflowTagWarn : ''}`}
+                            title={isFallback
                               ? 'MCS does not support DEQM STU5 $deqm-submit-data — base $submit-data fallback used.'
                               : 'DEQM STU5 $deqm-submit-data'}
-                            aria-label={job.submit_data_mode === 'base-fallback'
+                            aria-label={isFallback
                               ? 'DEQM — MCS does not support DEQM STU5 $deqm-submit-data — base $submit-data fallback used.'
                               : 'DEQM — DEQM STU5 $deqm-submit-data'}
                           >
-                            DEQM{job.submit_data_mode === 'base-fallback' ? ' ⚠' : ''}
+                            DEQM{isFallback ? ' ⚠' : ''}
                           </span>
                         )}
                       </td>

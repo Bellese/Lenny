@@ -30,7 +30,14 @@ from app.services.fhir_client import (
 )
 from app.services.fhir_errors import FhirOperationError
 
-_DOWNGRADE_STATUS_CODES = {400, 404}
+# Capability-mismatch signals only: a server that advertises $deqm-submit-data
+# but doesn't actually implement the type-level POST commonly answers with one
+# of these. 401/403 are deliberately excluded — those are auth failures, not
+# a capability mismatch, and must not be masked as a silent downgrade.
+# 429/5xx are deliberately excluded too — those are transient/overload
+# signals, not "this operation doesn't exist here", and downgrading on them
+# would paper over a retry-able failure as a permanent capability verdict.
+_DOWNGRADE_STATUS_CODES = {400, 404, 405, 501}
 
 logger = logging.getLogger(__name__)
 
@@ -134,16 +141,24 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         except Exception as exc:
             raise TransferPhaseError("gather", exc) from exc
 
+        # Filter once, and derive BOTH the MeasureReport (evaluatedResource)
+        # and the submitted Parameters from the SAME filtered list. Without
+        # this, an id-less resource is silently excluded from
+        # evaluatedResource (build_data_exchange_measure_report has its own
+        # filter) but still shipped as a `resource` parameter — the
+        # MeasureReport and the payload disagree, and under HAPI's
+        # transaction semantics one bad entry can 400 the whole patient.
+        filtered_resources = [r for r in gather.resources if "resourceType" in r and "id" in r]
         measure_report = build_data_exchange_measure_report(
             job_id=self._job_id,
             patient_id=patient_id,
             measure_canonical=self._measure_canonical,
             period_start=self._period_start,
             period_end=self._period_end,
-            resources=gather.resources,
+            resources=filtered_resources,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
-        submitted = [dict(LENNY_REPORTER_ORG)] + gather.resources
+        submitted = [dict(LENNY_REPORTER_ORG)] + filtered_resources
         # Snapshot the mode used for THIS attempt. self._mode is shared,
         # mutable instance state: one DeqmSubmitDataWorkflow is built per job
         # (orchestrator.py) and its transfer_patient() runs concurrently
@@ -177,9 +192,10 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             # A mis-probed capability stamps Job.submit_data_mode="stu5" for a
             # server that doesn't actually implement $deqm-submit-data. Rather
             # than fail every patient in the job, downgrade to base mode on the
-            # first 400/404 and retry once. Job.submit_data_mode still shows
-            # the probe's original verdict — reconciling the UI badge with a
-            # runtime downgrade is deliberately out of scope here.
+            # first capability-mismatch status (_DOWNGRADE_STATUS_CODES) and
+            # retry once. Job.submit_data_mode still shows the probe's
+            # original verdict — reconciling the UI badge with a runtime
+            # downgrade is deliberately out of scope here.
             if attempt_mode == SUBMIT_DATA_MODE_STU5 and exc.status_code in _DOWNGRADE_STATUS_CODES:
                 logger.warning(
                     "STU5 $deqm-submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
@@ -224,9 +240,22 @@ async def build_submission_workflow(
     period_end: str,
 ) -> SubmissionWorkflow:
     """Build the job's workflow. For DEQM, fetches the measure canonical from
-    the MCS — raising (job fails fast) when the Measure can't be read."""
+    the MCS — raising (job fails fast) when the Measure can't be read, or when
+    the resolved mode is STU5 and the canonical isn't an absolute URL."""
     if workflow == "deqm_submit_data":
         canonical = await get_measure_canonical(measure_id, mcs_url=mcs_url, auth_headers=mcs_auth_headers or {})
+        resolved_mode = submit_data_mode or SUBMIT_DATA_MODE_BASE
+        if resolved_mode == SUBMIT_DATA_MODE_STU5 and not canonical.startswith("http"):
+            # In STU5 mode the type-level POST makes MeasureReport.measure the
+            # ONLY identifier for the submitted measure — a relative reference
+            # (degraded from a Measure with no `url`) is not a resolvable
+            # canonical there. Fail fast at job build rather than emitting an
+            # unattributable submission. Base-fallback mode is unaffected: the
+            # measure is already named in the instance-level submit URL.
+            raise ValueError(
+                f"Measure '{measure_id}' has no absolute canonical URL (got {canonical!r}), "
+                "which is required for DEQM STU5 $deqm-submit-data submissions."
+            )
         return DeqmSubmitDataWorkflow(
             job_id=job_id,
             measure_id=measure_id,
@@ -235,6 +264,6 @@ async def build_submission_workflow(
             measure_canonical=canonical,
             period_start=period_start,
             period_end=period_end,
-            mode=submit_data_mode or SUBMIT_DATA_MODE_BASE,
+            mode=resolved_mode,
         )
     return DirectLoadWorkflow(measure_id, mcs_url, mcs_auth_headers)

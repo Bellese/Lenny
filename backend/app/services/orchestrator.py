@@ -309,29 +309,47 @@ async def run_job(job_id: int) -> None:
                 return
             if job.total_patients and job.processed_patients == 0 and job.failed_patients > 0:
                 job.status = JobStatus.failed
+                # Aggregate over every phase that can fail a patient, not just
+                # "evaluate" — a DEQM job where every patient fails at submit
+                # was previously reported as an evaluation failure with no
+                # diagnostic at all (F5).
                 error_rows = (
-                    (
-                        await session.execute(
-                            select(MeasureResult.populations).where(
-                                MeasureResult.job_id == job_id,
-                                MeasureResult.error_phase == "evaluate",
-                            )
+                    await session.execute(
+                        select(MeasureResult.error_phase, MeasureResult.populations).where(
+                            MeasureResult.job_id == job_id,
+                            MeasureResult.error_phase.in_(("evaluate", "submit", "gather")),
                         )
                     )
-                    .scalars()
-                    .all()
-                )
+                ).all()
+                phase_counts: dict[str, int] = {}
+                for phase, _pop in error_rows:
+                    if phase:
+                        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+                dominant_phase = max(phase_counts, key=phase_counts.get) if phase_counts else "evaluate"
                 patient_errors = [
-                    r["error_message"] for r in error_rows if isinstance(r, dict) and r.get("error_message")
+                    pop["error_message"]
+                    for phase, pop in error_rows
+                    if phase == dominant_phase and isinstance(pop, dict) and pop.get("error_message")
                 ]
-                vs_urls = _extract_unknown_valueset_urls(patient_errors) if patient_errors else []
-                if vs_urls:
-                    vs_list = ", ".join(vs_urls)
-                    job.error_message = (
-                        f"All {job.failed_patients} patient evaluations failed: unknown ValueSet(s): {vs_list}"
-                    )
+                if dominant_phase == "evaluate":
+                    # Keep the existing unknown-ValueSet special case working
+                    # for the evaluate phase only.
+                    vs_urls = _extract_unknown_valueset_urls(patient_errors) if patient_errors else []
+                    if vs_urls:
+                        vs_list = ", ".join(vs_urls)
+                        job.error_message = (
+                            f"All {job.failed_patients} patient evaluations failed: unknown ValueSet(s): {vs_list}"
+                        )
+                    else:
+                        job.error_message = f"All {job.failed_patients} patient evaluations failed"
                 else:
-                    job.error_message = f"All {job.failed_patients} patient evaluations failed"
+                    phase_word = {"submit": "submissions", "gather": "data gathers"}[dominant_phase]
+                    if patient_errors:
+                        job.error_message = (
+                            f"All {job.failed_patients} patient {phase_word} failed: {patient_errors[0]}"
+                        )
+                    else:
+                        job.error_message = f"All {job.failed_patients} patient {phase_word} failed"
             else:
                 job.status = JobStatus.complete
             job.completed_at = datetime.now(timezone.utc)
@@ -518,18 +536,24 @@ async def _process_single_batch(
                 period_start = job.period_start
                 period_end = job.period_end
 
+            # DEQM jobs always use DataRequirementsStrategy regardless of the
+            # env-configured default (see workflows._acquisition_strategy) —
+            # only direct_load's strategy is actually chosen by that setting.
+            strategy_label = settings.PATIENT_DATA_STRATEGY if workflow.name == "direct_load" else "data_requirements"
             logger.info(
                 "Using submission workflow",
                 extra={
                     "workflow": workflow.name,
-                    "strategy": settings.PATIENT_DATA_STRATEGY,
+                    "strategy": strategy_label,
                     "job_id": job_id,
                     "batch_id": batch_id,
                 },
             )
 
             # ----------------------------------------------------------
-            # Phase 1: Gather all patient data and push to measure engine
+            # Phase 1: Gather this batch's patient data and deliver it to
+            # the MCS via workflow.transfer_patient() — direct_load pushes a
+            # Bundle of PUTs; deqm_submit_data POSTs a $submit-data envelope.
             # ----------------------------------------------------------
             # Track patients that FULLY failed gather so they are skipped in evaluate.
             # Partial-gather patients proceed to evaluate with available data (AT-2).
