@@ -265,7 +265,7 @@ Neither is fixable from this repository — both live on the instance — so the
 here as current state.
 
 **The HAPI image pins in `/opt/leonard/.env` are stale, and production is not
-reproducible as a result.** They reference `ghcr.io/bellese/mct2-hapi-*:latest`, which 403s,
+reproducible as a result.** Tracked in issue #407. They reference `ghcr.io/bellese/mct2-hapi-*:latest`, which 403s,
 so `docker compose pull` has failed on every deploy since PR #261 (2026-05-04) and the image
 production runs now exists only in that instance's local Docker cache — not in any registry,
 selected by a file that is not in git. An instance rebuild cannot restore it.
