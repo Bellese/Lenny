@@ -14,9 +14,16 @@ from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL
 pytestmark = pytest.mark.integration
 
 MEASURE_ID = "CMS122FHIRDiabetesAssessGreaterThan9Percent"
+DEFAULT_PERIOD = ("2025-01-01", "2025-12-31")
+
 # Carries a denominator-exclusion behind a ValueSet the CDR cannot resolve --
-# the case that exposed the silent under-fetch in targeted gathering.
+# the case that exposed the silent under-fetch in targeted gathering. The
+# period is 2026 deliberately: the hospice ServiceRequest driving the exclusion
+# is authoredOn 2026-01-02, so under the default 2025 period it falls outside
+# the measurement period, the exclusion never fires, and this case passes just
+# as happily with the bug present as without it.
 EXCLUSION_MEASURE_ID = "CMS130FHIRColorectalCancerScreening"
+EXCLUSION_PERIOD = ("2026-01-01", "2026-12-31")
 
 
 def _run_patches(integration_session_factory):
@@ -41,14 +48,18 @@ def _run_patches(integration_session_factory):
 
 
 async def _create_and_run(
-    integration_client, integration_session_factory, workflow: str, measure_id: str = MEASURE_ID
+    integration_client,
+    integration_session_factory,
+    workflow: str,
+    measure_id: str = MEASURE_ID,
+    period: tuple[str, str] = DEFAULT_PERIOD,
 ) -> dict:
     resp = await integration_client.post(
         "/jobs",
         json={
             "measure_id": measure_id,
-            "period_start": "2025-01-01",
-            "period_end": "2025-12-31",
+            "period_start": period[0],
+            "period_end": period[1],
             "cdr_url": TEST_CDR_URL,
             "workflow": workflow,
         },
@@ -83,8 +94,13 @@ async def test_deqm_job_records_base_fallback_mode(integration_client, integrati
     assert body["submit_data_mode"] == "base-fallback"
 
 
-@pytest.mark.parametrize("measure_id", [MEASURE_ID, EXCLUSION_MEASURE_ID])
-async def test_deqm_job_matches_direct_load_populations(integration_client, integration_session_factory, measure_id):
+@pytest.mark.parametrize(
+    ("measure_id", "period"),
+    [(MEASURE_ID, DEFAULT_PERIOD), (EXCLUSION_MEASURE_ID, EXCLUSION_PERIOD)],
+)
+async def test_deqm_job_matches_direct_load_populations(
+    integration_client, integration_session_factory, measure_id, period
+):
     """The DEQM workflow must produce the same populations as direct load.
 
     Parameterised over two measures deliberately. CMS122 passed this test while
@@ -92,9 +108,13 @@ async def test_deqm_job_matches_direct_load_populations(integration_client, inte
     a ServiceRequest whose dataRequirement names a VSAC ValueSet the CDR has never
     loaded, so the `code:in=` query failed and the resource was dropped. One
     measure is not a parity suite.
+
+    The CMS130 case only bites inside EXCLUSION_PERIOD -- see the comment there.
     """
-    direct = await _create_and_run(integration_client, integration_session_factory, "direct_load", measure_id)
-    deqm = await _create_and_run(integration_client, integration_session_factory, "deqm_submit_data", measure_id)
+    direct = await _create_and_run(integration_client, integration_session_factory, "direct_load", measure_id, period)
+    deqm = await _create_and_run(
+        integration_client, integration_session_factory, "deqm_submit_data", measure_id, period
+    )
 
     assert direct["status"] == "complete", f"direct job failed: {direct.get('error_message')}"
     assert deqm["status"] == "complete", f"DEQM job failed: {deqm.get('error_message')}"
