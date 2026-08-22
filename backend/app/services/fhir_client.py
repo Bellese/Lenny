@@ -368,6 +368,13 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
         self._mcs_url = mcs_url
         self._mcs_auth_headers = mcs_auth_headers or {}
         self._fallback = BatchQueryStrategy()
+        # One strategy instance per job, so this memoises $data-requirements for
+        # the whole run. The answer depends only on the measure, but the call
+        # compiles the measure's CQL in the engine's R4DataRequirementsService --
+        # calling it per patient drove the engine's heap past its container limit
+        # and got it OOM-killed mid-job at 319 patients.
+        self._requirements: list[dict[str, Any]] | None = None
+        self._requirements_lock = asyncio.Lock()
 
     async def gather_patients(
         self,
@@ -410,13 +417,28 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
             return await self._fallback.gather_patient_data(cdr_url, patient_id, auth_headers)
 
     async def _get_data_requirements(self) -> list[dict[str, Any]]:
-        """Call $data-requirements on MCS and return the dataRequirement entries."""
-        url = f"{self._mcs_url}/Measure/{self._measure_id}/$data-requirements"
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(url, headers=self._mcs_auth_headers)
-            resp.raise_for_status()
-            library = resp.json()
-            return library.get("dataRequirement", [])
+        """Call $data-requirements on MCS once per job and cache the entries.
+
+        Patients are gathered concurrently, so the lock keeps the first wave of
+        callers from each issuing the same expensive call; the double check means
+        every later patient is served from memory. Failures are not cached — the
+        caller falls back to `$everything`, and a transient error should not pin
+        the whole job to the fallback path.
+        """
+        if self._requirements is not None:
+            return self._requirements
+
+        async with self._requirements_lock:
+            if self._requirements is not None:
+                return self._requirements
+
+            url = f"{self._mcs_url}/Measure/{self._measure_id}/$data-requirements"
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.get(url, headers=self._mcs_auth_headers)
+                resp.raise_for_status()
+                library = resp.json()
+                self._requirements = library.get("dataRequirement", [])
+                return self._requirements
 
     async def _fetch_by_requirements(
         self,
@@ -508,36 +530,73 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                         type_valuesets = valuesets_by_type.get(resource_type, [])
                         distinct_valuesets = {vs for vs in type_valuesets if vs}
                         has_unfiltered = any(vs is None for vs in type_valuesets)
-                        params = f"subject=Patient/{patient_id}&_count=100"
+                        base_params = f"subject=Patient/{patient_id}&_count=100"
+
+                        # Try the narrow query first, then the same query without
+                        # the code filter. A `code:in=` against a ValueSet the CDR
+                        # cannot resolve fails the search outright (HAPI-2788
+                        # "Unknown ValueSet" for VSAC canonicals that were never
+                        # loaded), and treating that as "this patient has no
+                        # resources of this type" silently changes populations:
+                        # a hospice ServiceRequest dropped this way cost nine
+                        # patients their CMS130 denominator-exclusion while the
+                        # job still reported success. Over-fetching is safe —
+                        # CQL filters again anyway.
+                        attempts = []
                         if len(distinct_valuesets) == 1 and not has_unfiltered:
                             (single_vs,) = distinct_valuesets
-                            params += f"&code:in={single_vs}"
-                        page_url: Optional[str] = f"{cdr_url}/{resource_type}?{params}"
-                        while page_url:
-                            resp = await client.get(page_url, headers=auth_headers)
-                            if resp.status_code != 200:
-                                raise httpx.HTTPStatusError(
-                                    f"CDR returned {resp.status_code} for {resource_type}",
-                                    request=resp.request,
-                                    response=resp,
-                                )
-                            bundle = resp.json()
-                            for entry in bundle.get("entry", []):
-                                resource = entry.get("resource")
-                                if resource:
-                                    resources.append(resource)
-                            page_url = None
-                            for link in bundle.get("link", []):
-                                if link.get("relation") == "next":
-                                    next_url = link.get("url")
-                                    if next_url and _same_origin(cdr_url, next_url):
-                                        page_url = next_url
-                                    elif next_url:
-                                        logger.warning(
-                                            "SSRF: pagination next link rejected (origin mismatch)",
-                                            extra={"url": sanitize_url(next_url)},
+                            attempts.append(f"{base_params}&code:in={single_vs}")
+                        attempts.append(base_params)
+
+                        for attempt_index, params in enumerate(attempts):
+                            is_last_attempt = attempt_index == len(attempts) - 1
+                            # Stage into a local list so a failure part-way through
+                            # pagination cannot leave half a page in `resources`
+                            # and then duplicate it on the retry.
+                            collected: list[dict[str, Any]] = []
+                            try:
+                                page_url: Optional[str] = f"{cdr_url}/{resource_type}?{params}"
+                                while page_url:
+                                    resp = await client.get(page_url, headers=auth_headers)
+                                    if resp.status_code != 200:
+                                        raise httpx.HTTPStatusError(
+                                            f"CDR returned {resp.status_code} for {resource_type}",
+                                            request=resp.request,
+                                            response=resp,
                                         )
-                                    break
+                                    bundle = resp.json()
+                                    for entry in bundle.get("entry", []):
+                                        resource = entry.get("resource")
+                                        if resource:
+                                            collected.append(resource)
+                                    page_url = None
+                                    for link in bundle.get("link", []):
+                                        if link.get("relation") == "next":
+                                            next_url = link.get("url")
+                                            if next_url and _same_origin(cdr_url, next_url):
+                                                page_url = next_url
+                                            elif next_url:
+                                                logger.warning(
+                                                    "SSRF: pagination next link rejected (origin mismatch)",
+                                                    extra={"url": sanitize_url(next_url)},
+                                                )
+                                            break
+                            except Exception as exc:
+                                if is_last_attempt:
+                                    raise
+                                logger.warning(
+                                    "Filtered CDR query failed for %s, retrying without the code filter — %s",
+                                    resource_type,
+                                    str(exc),
+                                    extra={
+                                        "resource_type": resource_type,
+                                        "patient_id": patient_id,
+                                        "error": str(exc),
+                                    },
+                                )
+                                continue
+                            resources.extend(collected)
+                            break
                 except Exception as exc:
                     failed_type_names.add(resource_type)
                     failed_types.append(FailedResourceFetch(resource_type=resource_type, error=str(exc)))

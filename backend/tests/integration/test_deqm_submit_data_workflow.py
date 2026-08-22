@@ -14,6 +14,9 @@ from tests.integration.conftest import TEST_CDR_URL, TEST_MEASURE_URL
 pytestmark = pytest.mark.integration
 
 MEASURE_ID = "CMS122FHIRDiabetesAssessGreaterThan9Percent"
+# Carries a denominator-exclusion behind a ValueSet the CDR cannot resolve --
+# the case that exposed the silent under-fetch in targeted gathering.
+EXCLUSION_MEASURE_ID = "CMS130FHIRColorectalCancerScreening"
 
 
 def _run_patches(integration_session_factory):
@@ -37,11 +40,13 @@ def _run_patches(integration_session_factory):
     )
 
 
-async def _create_and_run(integration_client, integration_session_factory, workflow: str) -> dict:
+async def _create_and_run(
+    integration_client, integration_session_factory, workflow: str, measure_id: str = MEASURE_ID
+) -> dict:
     resp = await integration_client.post(
         "/jobs",
         json={
-            "measure_id": MEASURE_ID,
+            "measure_id": measure_id,
             "period_start": "2025-01-01",
             "period_end": "2025-12-31",
             "cdr_url": TEST_CDR_URL,
@@ -78,10 +83,18 @@ async def test_deqm_job_records_base_fallback_mode(integration_client, integrati
     assert body["submit_data_mode"] == "base-fallback"
 
 
-async def test_deqm_job_matches_direct_load_populations(integration_client, integration_session_factory):
-    """The DEQM workflow must produce the same populations as direct load."""
-    direct = await _create_and_run(integration_client, integration_session_factory, "direct_load")
-    deqm = await _create_and_run(integration_client, integration_session_factory, "deqm_submit_data")
+@pytest.mark.parametrize("measure_id", [MEASURE_ID, EXCLUSION_MEASURE_ID])
+async def test_deqm_job_matches_direct_load_populations(integration_client, integration_session_factory, measure_id):
+    """The DEQM workflow must produce the same populations as direct load.
+
+    Parameterised over two measures deliberately. CMS122 passed this test while
+    CMS130 silently diverged: CMS130's hospice denominator-exclusion is carried by
+    a ServiceRequest whose dataRequirement names a VSAC ValueSet the CDR has never
+    loaded, so the `code:in=` query failed and the resource was dropped. One
+    measure is not a parity suite.
+    """
+    direct = await _create_and_run(integration_client, integration_session_factory, "direct_load", measure_id)
+    deqm = await _create_and_run(integration_client, integration_session_factory, "deqm_submit_data", measure_id)
 
     assert direct["status"] == "complete", f"direct job failed: {direct.get('error_message')}"
     assert deqm["status"] == "complete", f"DEQM job failed: {deqm.get('error_message')}"

@@ -92,7 +92,14 @@ backend/app/
                          implementations: BatchQueryStrategy (paginated /Patient + $everything)
                          and DataRequirementsStrategy (DEQM spec — calls $data-requirements on
                          the measure engine, then fetches only the required resource types from
-                         the CDR; falls back to $everything on any failure). Also home to the
+                         the CDR; falls back to $everything on any failure). $data-requirements
+                         is fetched once per job and memoised on the strategy instance: the call
+                         compiles the measure's CQL in the engine, and issuing it per patient
+                         drove the engine past its container memory limit at 319 patients. Each
+                         type is queried with its `code:in=` valueset filter first and then
+                         WITHOUT the filter if that query fails — a VSAC canonical the CDR never
+                         loaded returns HAPI-2788 rather than an empty set, and treating that as
+                         "no such resources" silently changes populations. Also home to the
                          DEQM $submit-data capability probe: detect_submit_data_mode() reads the
                          MCS CapabilityStatement at job creation and stamps `Job.submit_data_mode`
                          as `stu5` or `base-fallback`, which decides which URL shape/envelope
