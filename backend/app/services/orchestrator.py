@@ -250,6 +250,14 @@ async def run_job(job_id: int) -> None:
             patient_ids=patient_ids,
         )
 
+        # Stage workflow prerequisites AFTER the wipe, never before. The wipe's
+        # full-wipe branch deletes Organization, so the DEQM reporter has to be
+        # (re)created on this side of it -- otherwise every MeasureReport in the
+        # job references an Organization that was just deleted, and because
+        # $submit-data is transaction-backed that fails each patient's whole
+        # submission. No-op for direct_load.
+        await workflow.ensure_target_prerequisites()
+
         # The cancellation check that already guarded the batch-creation block
         # below now also covers the wipe above — no second check needed.
         if await _stop_or_delete_job(job_id):

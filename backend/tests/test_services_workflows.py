@@ -449,15 +449,59 @@ class TestBuildSubmissionWorkflow:
         assert isinstance(wf, DeqmSubmitDataWorkflow)
         canon.assert_awaited_once_with("M1", mcs_url="http://mcs", auth_headers={})
         assert wf._mode == "base-fallback"
-        # The reporter Organization is PUT exactly once per job, here — not
-        # per patient (that is the fix for the HAPI-0823 version-conflict
-        # storm under concurrent batches).
+        # build_submission_workflow must NOT write anything: it runs BEFORE
+        # _wipe_prior_run_data, whose full-wipe branch deletes Organization.
+        # Staging the reporter here got it deleted before any patient was
+        # submitted. The write now belongs to ensure_target_prerequisites().
+        push.assert_not_awaited()
+
+    async def test_deqm_ensure_prerequisites_pushes_reporter_once(self):
+        """The reporter Organization is PUT exactly once per job by the
+        post-wipe hook -- not per patient (that was the HAPI-0823
+        version-conflict storm) and not at build time (the wipe deleted it)."""
+        with (
+            patch(
+                "app.services.workflows.get_measure_canonical",
+                new=AsyncMock(return_value="http://ex.org/Measure/M1|1.0"),
+            ),
+            patch("app.services.workflows.push_resources", new=AsyncMock()) as push,
+        ):
+            wf = await build_submission_workflow(
+                workflow="deqm_submit_data",
+                job_id=1,
+                measure_id="M1",
+                mcs_url="http://mcs",
+                mcs_auth_headers={},
+                submit_data_mode=None,
+                period_start="2025-01-01",
+                period_end="2025-12-31",
+            )
+            push.assert_not_awaited()
+            await wf.ensure_target_prerequisites()
+
         push.assert_awaited_once()
         push_args, push_kwargs = push.call_args
         assert [r["resourceType"] for r in push_args[0]] == ["Organization"]
         assert push_args[0][0]["id"] == LENNY_REPORTER_ORG["id"]
         assert push_kwargs["target_url"] == "http://mcs"
         assert push_kwargs["auth_headers"] == {}
+
+    async def test_direct_load_ensure_prerequisites_is_a_noop(self):
+        """direct_load stages nothing, so the orchestrator's unconditional
+        post-wipe call must be harmless for it."""
+        with patch("app.services.workflows.push_resources", new=AsyncMock()) as push:
+            wf = await build_submission_workflow(
+                workflow="direct_load",
+                job_id=1,
+                measure_id="M1",
+                mcs_url="http://mcs",
+                mcs_auth_headers={},
+                submit_data_mode=None,
+                period_start="2025-01-01",
+                period_end="2025-12-31",
+            )
+            await wf.ensure_target_prerequisites()
+        push.assert_not_awaited()
 
     async def test_deqm_stu5_mode_raises_on_relative_canonical(self):
         """F4: in STU5 mode, MeasureReport.measure is the only identifier —
@@ -516,17 +560,18 @@ class TestBuildSubmissionWorkflow:
                 new=AsyncMock(side_effect=RuntimeError("mcs down")),
             ),
         ):
+            wf = await build_submission_workflow(
+                workflow="deqm_submit_data",
+                job_id=1,
+                measure_id="M1",
+                mcs_url="http://mcs",
+                mcs_auth_headers={},
+                submit_data_mode="base-fallback",
+                period_start="2025-01-01",
+                period_end="2025-12-31",
+            )
             with pytest.raises(ValueError, match="lenny-reporter"):
-                await build_submission_workflow(
-                    workflow="deqm_submit_data",
-                    job_id=1,
-                    measure_id="M1",
-                    mcs_url="http://mcs",
-                    mcs_auth_headers={},
-                    submit_data_mode=None,
-                    period_start="2025-01-01",
-                    period_end="2025-12-31",
-                )
+                await wf.ensure_target_prerequisites()
 
     async def test_deqm_propagates_canonical_fetch_failure(self):
         """Coverage-audit gap fill: build_submission_workflow must let a

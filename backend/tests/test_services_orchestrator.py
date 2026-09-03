@@ -1685,7 +1685,20 @@ async def test_run_job_passes_job_fields_to_build_submission_workflow(test_sessi
                 return_value=stub,
             )
         )
-        stack.enter_context(patch("app.services.orchestrator.evaluate_measure", new_callable=AsyncMock))
+        # Shape the return value: run_job feeds it straight into
+        # `measure_report.get("group", [])`. A bare AsyncMock hands back an
+        # unconfigured MagicMock there, which emitted "coroutine
+        # 'AsyncMockMixin._execute_mock_call' was never awaited" from the
+        # population loop. The assertion below only covers
+        # build_submission_workflow's arguments, so an empty group list is
+        # enough -- it just has to be the shape the real call returns.
+        stack.enter_context(
+            patch(
+                "app.services.orchestrator.evaluate_measure",
+                new_callable=AsyncMock,
+                return_value={"resourceType": "MeasureReport", "group": []},
+            )
+        )
         await run_job(job_id)
 
     build_mock.assert_awaited_once_with(
@@ -1742,3 +1755,66 @@ async def test_run_job_build_submission_workflow_failure_skips_wipe_and_fails_jo
         job = await session.get(Job, job_id)
         assert job.status == JobStatus.failed
         assert job.error_message is not None
+
+
+class _OrderRecordingStubWorkflow(_StubWorkflow):
+    """Stub that records when its post-wipe prerequisite hook runs."""
+
+    name = "order-stub"
+
+    def __init__(self, outcome, calls: list[str]):
+        super().__init__(outcome)
+        self._calls = calls
+
+    async def ensure_target_prerequisites(self) -> None:
+        self._calls.append("prereq")
+
+
+async def test_run_job_stages_prerequisites_after_the_wipe(test_session, session_factory):
+    """Regression: the workflow's prerequisite staging must run AFTER the wipe.
+
+    `wipe_patient_data`'s full-wipe list includes "Organization", and
+    `build_submission_workflow` runs BEFORE the wipe (deliberately, so a
+    canonical-fetch failure aborts without wiping). Staging the DEQM reporter
+    Organization at build time therefore had it deleted moments later, leaving
+    every MeasureReport in the job pointing at a reporter that no longer
+    existed. Since $submit-data is transaction-backed, a dangling reference
+    fails that patient's entire submission.
+
+    Only bites when mcs_wipe_before_job is set, which is why this pins the
+    ordering rather than the symptom.
+    """
+    job_id = await _setup_job(test_session)
+    calls: list[str] = []
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        job.workflow = "deqm_submit_data"
+        job.mcs_wipe_before_job = True  # full wipe -> deletes Organization
+        await session.commit()
+
+    patients = [{"resourceType": "Patient", "id": "p1", "name": [{"family": "Test"}]}]
+    stub = _OrderRecordingStubWorkflow(GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]), calls)
+
+    with contextlib.ExitStack() as stack:
+        for p in _run_job_patches(session_factory, patients, stub):
+            stack.enter_context(p)
+        # Re-patch the full wipe so it records its own ordering.
+        stack.enter_context(
+            patch(
+                "app.services.orchestrator.wipe_patient_data",
+                new=AsyncMock(side_effect=lambda *a, **k: calls.append("wipe")),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.orchestrator.evaluate_measure",
+                new_callable=AsyncMock,
+                return_value={"resourceType": "MeasureReport", "group": []},
+            )
+        )
+        await run_job(job_id)
+
+    assert calls == ["wipe", "prereq"], (
+        f"expected the wipe to precede prerequisite staging, got {calls}. "
+        "Staging before the wipe means the full wipe deletes the DEQM reporter Organization."
+    )

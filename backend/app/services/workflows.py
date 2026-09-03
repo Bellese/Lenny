@@ -75,6 +75,21 @@ class SubmissionWorkflow(abc.ABC):
 
     name: str
 
+    async def ensure_target_prerequisites(self) -> None:
+        """Write any job-scoped resources the workflow needs on the MCS.
+
+        Called by the orchestrator AFTER `_wipe_prior_run_data` -- which is the
+        entire reason this is separate from `build_submission_workflow`. Build
+        runs BEFORE the wipe on purpose, so a canonical-fetch failure aborts
+        without wiping anything; but that ordering means anything build *writes*
+        is deleted by the wipe moments later. `wipe_patient_data`'s full-wipe
+        list includes "Organization", so the DEQM reporter created at build time
+        was being removed before a single patient was submitted.
+
+        Default is a no-op: direct_load needs nothing staged.
+        """
+        return None
+
     @abc.abstractmethod
     async def transfer_patient(self, cdr_url: str, patient_id: str, cdr_auth_headers: dict[str, str]) -> GatherResult:
         """Transfer one patient's data; return the GatherResult for
@@ -134,6 +149,35 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         self._period_start = period_start
         self._period_end = period_end
         self._mode = mode
+
+    async def ensure_target_prerequisites(self) -> None:
+        """Store the shared reporter Organization once, after the wipe.
+
+        DEQM requires MeasureReport.reporter 1..1 and every patient in the job
+        references the same client-assigned Organization/lenny-reporter. Sending
+        it inline per patient made concurrent batches upsert one id at once,
+        which HAPI answered with ResourceVersionConflictException, failing 100%
+        of patients; storing it once server-side and referencing it is the fix.
+
+        This must run AFTER `_wipe_prior_run_data`, or the full-wipe branch
+        deletes it and every submission then carries a dangling reporter
+        reference -- which, because $submit-data is transaction-backed, fails
+        that patient's whole submission.
+
+        Raising here fails the job fast with one clear error rather than every
+        patient failing later for the same reason.
+        """
+        try:
+            await push_resources(
+                [dict(LENNY_REPORTER_ORG)],
+                target_url=self._mcs_url,
+                auth_headers=self._mcs_auth_headers,
+            )
+        except Exception as exc:
+            raise ValueError(
+                f"Failed to store reporter Organization '{LENNY_REPORTER_ORG['id']}' on the MCS "
+                f"for job {self._job_id}: {exc}"
+            ) from exc
 
     async def transfer_patient(self, cdr_url: str, patient_id: str, cdr_auth_headers: dict[str, str]) -> GatherResult:
         try:
@@ -282,17 +326,11 @@ async def build_submission_workflow(
         # this same version conflict. Let failure here raise: it fails the
         # job fast with one clear error instead of every patient failing
         # later for the same reason.
-        try:
-            await push_resources(
-                [dict(LENNY_REPORTER_ORG)],
-                target_url=mcs_url,
-                auth_headers=mcs_auth_headers,
-            )
-        except Exception as exc:
-            raise ValueError(
-                f"Failed to store reporter Organization '{LENNY_REPORTER_ORG['id']}' on the MCS "
-                f"before starting job {job_id}: {exc}"
-            ) from exc
+        # The reporter push itself now lives in
+        # DeqmSubmitDataWorkflow.ensure_target_prerequisites(), which the
+        # orchestrator calls AFTER the wipe. Pushing it here meant any job with
+        # mcs_wipe_before_job set deleted it again immediately, because the full
+        # wipe removes Organization.
         return DeqmSubmitDataWorkflow(
             job_id=job_id,
             measure_id=measure_id,
