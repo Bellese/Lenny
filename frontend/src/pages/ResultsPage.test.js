@@ -103,3 +103,67 @@ describe('ResultsPage — error phase labels (#error_phase mapping)', () => {
     expect(await screen.findByText(new RegExp(label))).toBeInTheDocument();
   });
 });
+
+describe('ResultsPage — re-run preserves the submission workflow', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+  });
+
+  function mockForRerun(job) {
+    api.getAdminSettings = jest.fn().mockResolvedValue({ comparison_enabled: false, validation_enabled: false });
+    api.getJobs = jest.fn().mockResolvedValue([job]);
+    api.getJobComparison = jest.fn().mockResolvedValue(null);
+    api.getResults = jest.fn().mockResolvedValue({
+      job_id: job.id,
+      total_patients: 1,
+      failed_patients: 0,
+      populations: { initial_population: 1, denominator: 1, numerator: 1, denominator_exclusion: 0, numerator_exclusion: 0 },
+      performance_rate: 1,
+      patients: [
+        {
+          id: 101,
+          patient_id: 'pt-1',
+          patient_name: 'Jane Doe',
+          populations: { initial_population: true, denominator: true, numerator: true },
+          status: 'complete',
+          error_message: null,
+          error_phase: null,
+          error_details: null,
+        },
+      ],
+    });
+    api.createJob = jest.fn().mockResolvedValue({ id: 2 });
+  }
+
+  // Regression: handleRerun omitted `workflow`, so the backend default
+  // (direct_load, routes/jobs.py) won and re-running a DEQM job silently
+  // produced a direct-load job -- same measure, same period, different
+  // delivery path, with nothing on screen saying so.
+  test('re-running a DEQM job requests the DEQM workflow again', async () => {
+    mockForRerun({ ...BASE_JOB, workflow: 'deqm_submit_data', submit_data_mode: 'base-fallback' });
+    renderAt();
+
+    await waitFor(() => expect(api.getResults).toHaveBeenCalled());
+    const rerun = await screen.findByRole('button', { name: /re-?run/i });
+    rerun.click();
+
+    await waitFor(() => expect(api.createJob).toHaveBeenCalled());
+    expect(api.createJob).toHaveBeenCalledWith(
+      expect.objectContaining({ workflow: 'deqm_submit_data' }),
+    );
+  });
+
+  test('re-running a direct_load job does not smuggle in a workflow override', async () => {
+    mockForRerun({ ...BASE_JOB, workflow: 'direct_load', submit_data_mode: null });
+    renderAt();
+
+    await waitFor(() => expect(api.getResults).toHaveBeenCalled());
+    const rerun = await screen.findByRole('button', { name: /re-?run/i });
+    rerun.click();
+
+    await waitFor(() => expect(api.createJob).toHaveBeenCalled());
+    expect(api.createJob).toHaveBeenCalledWith(
+      expect.objectContaining({ workflow: 'direct_load' }),
+    );
+  });
+});
