@@ -26,6 +26,60 @@ EXCLUSION_MEASURE_ID = "CMS130FHIRColorectalCancerScreening"
 EXCLUSION_PERIOD = ("2026-01-01", "2026-12-31")
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _warm_hapi_search_parameters():
+    """Force HAPI's lazy SearchParameter registration to finish before concurrency.
+
+    HAPI registers its DEQM SearchParameters ~40s after startup (see
+    `scripts/smoke_connectathon.py`). The first *concurrent* batch of work against
+    a fresh measure engine races that indexing, and the losing requests come back
+    `409 HAPI-0550: HAPI-0825 ... client-assigned ID constraint failure`.
+    `app/services/validation.py` documents the same race and fixes it the same
+    way: run one serial evaluation per measure so indexing completes in a
+    single-threaded context before any concurrency starts.
+
+    This module needs the guard more than most, because `_run_patches`
+    deliberately sets BATCH_SIZE=25 to force concurrent submission. Without the
+    warmup the race is live for whichever job runs first, and that need not be the
+    DEQM one: it surfaced as a `direct_load` transfer failure that broke
+    `test_deqm_job_matches_direct_load_populations` on the CMS122 case, while DEQM
+    itself evaluated the same patient cleanly.
+    """
+    import httpx as _httpx
+
+    try:
+        resp = _httpx.get(f"{TEST_MEASURE_URL}/Patient", params={"_count": "1"}, timeout=30)
+        resp.raise_for_status()
+        entries = resp.json().get("entry", [])
+    except _httpx.HTTPError:
+        # Asserting infrastructure health is `_require_infrastructure`'s job, not
+        # this fixture's. A warmup that cannot run must not mask that error.
+        return
+    if not entries:
+        return
+    patient_id = entries[0]["resource"]["id"]
+
+    for measure_id, (period_start, period_end) in (
+        (MEASURE_ID, DEFAULT_PERIOD),
+        (EXCLUSION_MEASURE_ID, EXCLUSION_PERIOD),
+    ):
+        try:
+            _httpx.get(
+                f"{TEST_MEASURE_URL}/Measure/{measure_id}/$evaluate-measure",
+                params={
+                    "periodStart": period_start,
+                    "periodEnd": period_end,
+                    "subject": f"Patient/{patient_id}",
+                },
+                timeout=120,
+            )
+        except _httpx.HTTPError:
+            # Whether this particular evaluation succeeds is irrelevant. The only
+            # job here is to make HAPI finish SearchParameter indexing serially;
+            # the real assertions live in the tests below.
+            continue
+
+
 def _run_patches(integration_session_factory):
     return (
         patch("app.config.settings.MEASURE_ENGINE_URL", TEST_MEASURE_URL),
@@ -118,6 +172,11 @@ async def test_deqm_job_matches_direct_load_populations(
 
     assert direct["status"] == "complete", f"direct job failed: {direct.get('error_message')}"
     assert deqm["status"] == "complete", f"DEQM job failed: {deqm.get('error_message')}"
+    # Assert BOTH sides. Only the DEQM side was checked originally, so a
+    # direct_load patient failure fell through to the population diff below and
+    # reported as an opaque "Population mismatch" instead of naming the job that
+    # actually broke.
+    assert direct["failed_patients"] == 0, f"direct_load job had failed patients: {direct.get('error_message')}"
     assert deqm["failed_patients"] == 0, "DEQM job had failed patients"
 
     async with integration_session_factory() as session:
