@@ -45,6 +45,13 @@ PUT/POST 200 means the resource is durable. Search consistency is async, governe
 
 `spring.jpa.properties.hibernate.search.indexing.plan.synchronization.strategy=sync` is now set on both HAPI services in `docker-compose.yml`, `docker-compose.test.yml`, and both seeded Dockerfiles. POST/PUT blocks until the Lucene index is refreshed, eliminating the bug class. The Python-side compensator (`HAPI_SYNC_AFTER_UPLOAD` + `trigger_reindex_and_wait*`) has been removed — HS6 `synchronization.strategy=sync` is the sole mechanism.
 
+**What `sync` covers, and what it doesn't (#425).** `sync` is a guarantee about *write visibility*: a POST/PUT blocks until its own document is in the index. It says nothing about index *construction* — an index that was never built for rows this process didn't write. Those are separate concerns, and conflating them is what makes the integration suite's setup gates look like a compensator that #214 forgot to delete. They aren't one:
+
+- **Reference/token/date search params are not in Lucene at all.** HAPI serves them from the relational `HFJ_RES_LINK` / `HFJ_SPIDX_*` tables. Lucene backs full-text (`_content`, `_text`) and terminology — see the Hibernate Search row in `docs/architecture.md`. So `Encounter?patient=` is not a Lucene read, and `sync` is not what makes it work.
+- **The prebaked images ship an empty Lucene index** — a 69-byte `segments_1` and a 0-byte `write.lock` per index, against 43MB of baked H2 — because the bake's bare `docker stop` gives the JVM only Docker's default 10s SIGTERM window. It doesn't matter for search-param queries, per the point above.
+- **Consequently the prebaked path needs no reindex.** Measured on the standalone CDR image: patient-scoped searches are correct as soon as `/fhir/metadata` answers, and a full `$reindex` run to completion afterwards changed nothing (0 differences across 6 resource-type totals, 10 patients × 4 types, and `$everything`). #425 replaced the ~292s rebuild with a ~0s verification; `INTEGRATION_FORCE_CDR_REINDEX=1` restores it.
+- **The non-prebaked path still gates for a real reason.** There, data is POSTed at test time and HAPI's DEQM SearchParameter registers ~40s after startup, triggering an async reindex of existing rows. `sync` cannot retroactively index a parameter that didn't exist when the row was written.
+
 ### History
 
 PRs #142, #155, #159, #161, #167+ each patched a slice of this same disease.

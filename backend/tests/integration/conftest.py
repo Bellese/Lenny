@@ -18,6 +18,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from app.models.base import Base
 from tests.integration._helpers import fix_valueset_compose_for_hapi
+from tests.integration._index_gates import (
+    REINDEX_POLL_INTERVAL,
+    REINDEX_TIMEOUT,
+    wait_for_cdr_reference_index,
+)
 from tests.integration._setup_budget import GATE_TIMINGS, SetupBudget, record_gate
 
 # ---------------------------------------------------------------------------
@@ -43,9 +48,11 @@ SKIP_MESSAGE = (
 # Fix: after each bulk data load, trigger a fresh $reindex for Encounter,
 # Observation, and Condition, then poll until reference-param searches for
 # all three return results before allowing tests to proceed.
-_REINDEX_POLL_INTERVAL = 1  # seconds between probe checks
-_REINDEX_TIMEOUT = 300  # per-gate cap; the shared budget below is the real bound
-# CDR has no persistent Lucene; full reindex takes ~4 min on typical hardware.
+_REINDEX_POLL_INTERVAL = REINDEX_POLL_INTERVAL
+_REINDEX_TIMEOUT = REINDEX_TIMEOUT  # per-gate cap; the shared budget below is the real bound
+# Escape-hatch cap only: the prebaked path verifies the index rather than rebuilding it
+# (#425), so this applies solely under INTEGRATION_FORCE_CDR_REINDEX=1, where a full
+# reindex takes ~4 min on typical hardware.
 _CDR_REINDEX_TIMEOUT = 600  # per-gate cap; the shared budget below is the real bound
 
 # One shared wall-clock budget for every blocking gate in setup (#425).
@@ -62,9 +69,12 @@ _CDR_REINDEX_TIMEOUT = 600  # per-gate cap; the shared budget below is the real 
 #     tests themselves (post-#424)     ~410s
 #     checkout / python / docker        ~60s
 #     -> setup may claim at most       ~570s
-# 480s leaves margin under that and is still ~1.65x the ~290s a healthy run needs
-# (the CDR full reindex is ~240s of it). Override for slow hardware rather than
-# editing this: INTEGRATION_SETUP_BUDGET_SECONDS.
+# 480s leaves margin under that. It was sized against a ~290s healthy run, almost all
+# of it the CDR full reindex; since #425 replaced that rebuild with a verification the
+# prebaked path spends ~0s here, so the budget is now slack rather than a live bound.
+# Left at 480s deliberately: it still bounds the non-prebaked path, and re-sizing it
+# wants a CI measurement of the new floor rather than a guess. Override for slow
+# hardware rather than editing this: INTEGRATION_SETUP_BUDGET_SECONDS.
 _SETUP_BUDGET_SECONDS = float(os.environ.get("INTEGRATION_SETUP_BUDGET_SECONDS", "480"))
 
 # HAPI's in-memory ValueSet expansion is capped at 1000 codes (HAPI-0831).  ValueSets
@@ -126,8 +136,10 @@ def _wait_for_valueset_expansion(base_url: str, large_valueset_ids: list[str]) -
 def _trigger_cdr_full_reindex_and_wait(cdr_url: str, budget: SetupBudget) -> None:
     """Trigger a full $reindex on CDR and wait for the job to complete.
 
-    CDR uses an in-memory Lucene backend (no persistent directory) so patient-reference
-    searches — required by $everything — return 0 on startup until the index is rebuilt.
+    Retained as an escape hatch behind INTEGRATION_FORCE_CDR_REINDEX=1; the prebaked
+    path uses _index_gates.wait_for_cdr_reference_index instead (#425). Still the right tool if a
+    future image ships without usable search-param tables.
+
     Unlike the measure engine, CDR has no CR/DEQM jobs, so reindexing all types at once
     (including Procedure, MedicationRequest, MedicationAdministration) is safe.
 
@@ -253,9 +265,10 @@ def _trigger_reindex_and_wait(
     # Gate 2: Observation and Condition reference-param indexing must be ready.
     # $everything uses patient-reference searches to retrieve these; CMS122/124/125
     # produce IP=0 when their Observation/Condition data is missing.
-    # Use the same probe patient as Gate 1 — connectathon patients all have
-    # clinical data so a patient?= probe is a genuine reference-param index test
-    # (unlike ?_summary=count which HAPI may serve from JPA row-counts, not Lucene).
+    # Use the same probe patient as Gate 1 — connectathon patients all have clinical
+    # data, so a patient?= probe exercises the reference-param path rather than a bare
+    # row count. Note this is a relational index (HFJ_RES_LINK / HFJ_SPIDX_*), not a
+    # Lucene one; an earlier version of this comment had that backwards (#425).
     for resource_type, search_param in (("Observation", "patient"), ("Condition", "patient")):
         gate = f"{resource_type.lower()}-gate"
         allotted = budget.allot(gate, cap=_REINDEX_TIMEOUT)
@@ -404,10 +417,17 @@ def _load_seed_data(_require_infrastructure):
         except Exception:
             pass
 
-        # CDR: full reindex with job-completion gating — covers all types including
-        # Procedure, MedReq, MedAdmin which $everything needs. CDR has no cr.enabled
-        # so reindexing all types at once is safe here.
-        _trigger_cdr_full_reindex_and_wait(TEST_CDR_URL, budget)
+        # CDR: verify the reference-param index, do not rebuild it (#425).
+        #
+        # The baked image ships its search-param indexes inside H2, so they are usable
+        # the moment HAPI answers /fhir/metadata; the full $reindex this used to run
+        # cost ~292s in CI and changed nothing. See _index_gates.wait_for_cdr_reference_index for
+        # the measurement. Set INTEGRATION_FORCE_CDR_REINDEX=1 to restore the rebuild
+        # if a future image ever does need it.
+        if os.environ.get("INTEGRATION_FORCE_CDR_REINDEX") == "1":
+            _trigger_cdr_full_reindex_and_wait(TEST_CDR_URL, budget)
+        elif probe_patient_id:
+            wait_for_cdr_reference_index(TEST_CDR_URL, probe_patient_id, budget)
         # MEASURE: Enc/Obs/Cond only — explicit reindex of Proc/MedReq/MedAdmin causes
         # HAPI to restart async jobs, producing 500 errors on in-flight CQL evaluations.
         if probe_patient_id and probe_encounter_id:
