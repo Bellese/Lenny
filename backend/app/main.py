@@ -587,10 +587,15 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 
+# No `version=` here on purpose (#420). It read "0.1.0", which is FastAPI's own
+# default written out longhand — so it advertised a maintained version while
+# never being bumped, and collided with the real 0.1.0.0 release. The backend
+# image builds from `./backend` (docker-compose.yml), so the root VERSION file
+# is outside its build context and cannot be read without widening that context
+# through the prod deploy path. See docs/workflow.md § Versioning.
 app = FastAPI(
     title="Lenny — Measure Calculation Tool",
     description="Healthcare quality measure calculation orchestrator",
-    version="0.1.0",
     lifespan=lifespan,
 )
 

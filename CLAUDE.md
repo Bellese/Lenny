@@ -93,6 +93,7 @@ Full service map, data flow, HAPI configuration, and environment variables in `d
 - **React:** plain JavaScript (not TypeScript), PascalCase components, co-located CSS Modules (`Foo.module.css`)
 - **Config:** all values via environment variables (`backend/app/config.py`) — never hardcoded
 - **PRs:** use `.github/pull_request_template.md` sections (`gh pr create` does not auto-populate — build the body explicitly)
+- **Versions:** `VERSION` (4-component) is the source of truth; `frontend/package.json` and its lockfile carry the npm-valid first 3 components, and the app's status bar renders that manifest version. Never hand-edit any of them — `/ship` writes all three together via the committed `.gstack/package-json-path` pin, and `Config Validation` fails the PR if they drift (#420). Full rules: `docs/workflow.md` § Versioning.
 
 ## Workflow
 

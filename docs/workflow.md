@@ -34,6 +34,64 @@ Each phase uses one recommended tool. The issue gets updated before moving on.
 
 We maintain `docs/decisions.md` to record significant technical and process choices with their rationale. When you make a decision that would be non-obvious to someone joining the project next month, add it to the log.
 
+## Versioning
+
+Four files could carry a version. Three are kept in lockstep; the fourth
+deliberately carries none.
+
+| File | Value | Who writes it |
+|---|---|---|
+| `VERSION` | `MAJOR.MINOR.PATCH.MICRO` (4 components) — the source of truth | `/ship` Step 12 |
+| `frontend/package.json` | the **first 3 components** of `VERSION` | `/ship` Step 12 |
+| `frontend/package-lock.json` | both version fields track `package.json` | `/ship` Step 12 |
+| `backend/app/main.py` | no `version=` argument at all | nobody — see below |
+
+**Why the frontend truncates.** npm rejects a fourth component: `0.0.22.0` is not
+valid semver. `/ship`'s writer already knows this and stores the npm-valid
+translation in the manifest, so the manifest reads `0.2.0` while `VERSION` reads
+`0.2.0.0`. Mirroring `VERSION` verbatim would fight the tooling and reintroduce
+an invalid manifest.
+
+**A MICRO-only bump does not move the frontend version.** `0.2.0.0 -> 0.2.0.1`
+leaves the manifest at `0.2.0`. This is a known, accepted consequence of the
+line above: the CHANGELOG still records MICRO releases, but the on-screen
+version does not change for them.
+
+**This is user-visible, not bookkeeping.** `frontend/src/App.js` renders
+`Lenny · v{pkg.version}` in the status bar. When the manifest drifts, the
+running app misreports its own version — which is what issue #420 actually was.
+Between 2026-09-03 and this fix, the app claimed to be v0.0.22.0 while the
+shipped release was 0.2.0.0.
+
+**`.gstack/package-json-path` is committed on purpose.** `/ship` resolves the
+manifest to bump as `--package-json-path` -> `.gstack/package-json-path` ->
+`./package.json`. There is no root `package.json` in this repo — the only one
+lives in `frontend/` — so without the pin every `/ship` run silently bumps
+`VERSION` alone. That is the whole root cause of #420: the releases bumped by
+hand moved both files, the ones bumped by `/ship` did not. `.gitignore`
+excludes the rest of `.gstack/` but negates this one file, because a gitignored
+pin cannot survive the `git worktree add` that this project's workflow mandates
+and each new worktree would start unpinned.
+
+**The backend carries no version deliberately.** It previously passed
+`version="0.1.0"` to `FastAPI(...)`, which is FastAPI's own default written out
+longhand — so it advertised a maintained version while never being bumped, and
+collided confusingly with the real 0.1.0.0 release. Wiring it to `VERSION`
+would mean widening the backend image's build context, which is `./backend`
+(`docker-compose.yml`) and therefore cannot see the root `VERSION` file. That
+touches the prod deploy path, so it was not worth it for an OpenAPI field.
+If the backend ever needs to report a real version, widen the context or pass a
+build arg — do not re-add a hardcoded string.
+
+**Enforcement.** `scripts/check-version-consistency.sh` asserts all of the
+above and runs in the `Config Validation` job of `pr-checks.yml`, which is a
+required check. Its own unit tests are `scripts/tests/test_version_consistency.sh`.
+To repair drift, use `/ship`'s writer rather than editing by hand:
+
+```bash
+bun run ~/.claude/skills/gstack/bin/gstack-version-bump repair
+```
+
 ## Deploying to prod
 
 ### CI/CD deploy (automated — normal path)

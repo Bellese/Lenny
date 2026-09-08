@@ -30,4 +30,9 @@ frontend/build/
 
 # Claude
 .claude/
-.gstack/
+# gstack keeps local logs and caches here, but package-json-path is a committed
+# repo setting (#420): it tells /ship which manifest to bump alongside VERSION.
+# Excluding the directory outright stops git descending into it, so the negation
+# needs the directory itself un-ignored first.
+.gstack/*
+!.gstack/package-json-path

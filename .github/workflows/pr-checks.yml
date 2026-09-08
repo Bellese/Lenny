@@ -189,3 +189,14 @@ jobs:
 
       - name: Validate IAM policy JSON
         run: jq . iam/leonard-ec2-prod-cloudwatch-policy.json > /dev/null
+
+      # Issue #420: VERSION, frontend/package.json and its lockfile drifted
+      # across two consecutive releases, so the app's status bar reported a
+      # version two releases stale. The script also asserts the
+      # .gstack/package-json-path pin that stops /ship silently doing a
+      # VERSION-only bump. See docs/workflow.md, section "Versioning".
+      - name: Validate version consistency
+        run: ./scripts/check-version-consistency.sh
+
+      - name: Unit-test the version-consistency guard
+        run: bash scripts/tests/test_version_consistency.sh
