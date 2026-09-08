@@ -44,6 +44,11 @@ class SetupBudget:
         self._clock = clock
         self._start = clock()
 
+    @property
+    def total(self) -> float:
+        """The full allowance, for error messages that need to state it."""
+        return self._total
+
     def spent(self) -> float:
         """Wall-clock seconds since the budget was opened."""
         return self._clock() - self._start
