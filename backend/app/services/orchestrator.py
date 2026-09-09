@@ -855,6 +855,33 @@ async def _process_single_batch(
                 if job:
                     job.processed_patients = job.processed_patients + processed
                     job.failed_patients = job.failed_patients + failed
+                    # #414: the Jobs badge reads Job.submit_data_mode, which was
+                    # written once at creation from the capability probe. A job
+                    # that downgraded at runtime kept displaying the probe's
+                    # verdict — the UI stating the opposite of what happened.
+                    #
+                    # Persisted here rather than in the workflow because
+                    # workflows.py is deliberately session-free, and this is a
+                    # session the batch already opens for its own counters, so
+                    # it costs no extra query. getattr because only the DEQM
+                    # workflow has a mode at all.
+                    #
+                    # Latency, stated rather than implied: the workflow settles
+                    # the mode on its first patient, but this write lands when
+                    # the first batch finishes, so the badge can lag the truth
+                    # by up to one batch. It is never wrong once the job ends.
+                    settled_mode = getattr(workflow, "mode", None)
+                    if settled_mode and job.submit_data_mode != settled_mode:
+                        logger.info(
+                            "Persisting settled submission mode",
+                            extra={
+                                "job_id": job_id,
+                                "batch_id": batch_id,
+                                "probe_mode": job.submit_data_mode,
+                                "settled_mode": settled_mode,
+                            },
+                        )
+                        job.submit_data_mode = settled_mode
                     await session.commit()
 
             return  # Success — exit retry loop

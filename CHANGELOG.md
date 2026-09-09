@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2.0] - 2026-09-09
+
+### Fixed
+- **A DEQM calculation no longer tells you it used one submission format when it actually used another.** Lenny checks at creation time whether your measure server supports the DEQM STU5 submission operation, and shows a "DEQM" tag on the job saying which format it picked. If that check turned out to be wrong and Lenny switched to the older format mid-run, the tag kept showing the original choice — so the job reported the opposite of what happened, and the "your server doesn't support STU5" warning never appeared. The tag and its explanation now reflect the format actually used. (#414)
+- **A patient your measure server rejects no longer changes the submission format for every patient after it.** Lenny treated any HTTP 400 as proof the server lacked the STU5 operation. But 400 is also the ordinary FHIR answer to a payload the server won't accept, so a single patient failing validation silently switched the whole run to the other format and discarded the server's explanation of what was actually wrong. A 400 now fails only that patient, with the server's own message kept in the failure details, unless the message specifically says the operation isn't available. (#414)
+
+### Changed
+- **A calculation now uses one submission format from start to finish.** Previously a run could deliver some patients in the DEQM STU5 format and the rest in the base format, with nothing recording where the switch happened — so two patients in the same job could have been submitted two different ways. Lenny now settles the format once, on the first patient, and every other patient in that run uses it. If the first patient reveals the server can't do STU5, the whole run uses the base format; nobody is left submitted the other way. The trade-off is that the first patient's submission is no longer overlapped with the others while the format is being decided; this applies only to runs that start in STU5 mode, which no tested server has yet required. (#414)
+
 ## [0.2.1.0] - 2026-09-08
 
 ### Fixed

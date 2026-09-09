@@ -936,6 +936,99 @@ async def test_orchestrator_returns_empty_headers_when_auth_type_is_none_string(
     assert headers == {}
 
 
+async def test_batch_persists_runtime_downgrade_to_job_submit_data_mode(test_session, session_factory):
+    """#414 AC2/AC3: the Jobs badge reads Job.submit_data_mode, which was
+    written once at creation from the capability probe and never updated. A job
+    that downgraded at runtime therefore still displayed as `stu5` — the UI
+    stating the opposite of what happened.
+
+    workflows.py is deliberately session-free, so the orchestrator persists the
+    settled mode in the session the batch already opens for its counters.
+
+    The break this catches: dropping that write leaves the badge reporting the
+    probe's verdict forever, which is the bug.
+    """
+    from app.models.job import Batch, BatchStatus
+    from app.services.fhir_errors import FhirOperationError
+    from app.services.orchestrator import _process_single_batch
+    from app.services.workflows import DeqmSubmitDataWorkflow
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+        workflow="deqm_submit_data",
+        submit_data_mode="stu5",  # the probe's verdict
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    batch = Batch(job_id=job.id, batch_number=1, patient_ids=["p1"], status=BatchStatus.pending)
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    workflow = DeqmSubmitDataWorkflow(
+        job_id=job.id,
+        measure_id="CMS999",
+        mcs_url="http://mcs/fhir",
+        mcs_auth_headers=None,
+        measure_canonical="http://example.org/Measure/CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        mode="stu5",
+    )
+
+    # STU5 is not implemented on this server; base-mode submissions succeed.
+    async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+        if mode == "stu5":
+            raise FhirOperationError(
+                operation="submit-data",
+                url="http://mcs/Measure/$deqm-submit-data",
+                status_code=404,
+                outcome=None,
+                latency_ms=5,
+            )
+        return None
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch.object(
+            workflow._strategy,
+            "gather_patient_data",
+            new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}])),
+        ),
+        patch.object(workflow, "ensure_target_prerequisites", new=AsyncMock()),
+        patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={"resourceType": "MeasureReport", "status": "complete", "group": []},
+        ),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
+    ):
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map={"p1": {"resourceType": "Patient", "id": "p1"}},
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+            mcs_url="http://mcs/fhir",
+            workflow=workflow,
+        )
+
+    assert workflow.downgraded is True
+    refreshed = await test_session.get(Job, job.id)
+    await test_session.refresh(refreshed)
+    assert refreshed.submit_data_mode == "base-fallback", (
+        "the badge would still claim stu5 for a job that ran as base-fallback"
+    )
+
+
 async def test_process_batch_uses_everything_strategy(test_session, session_factory, monkeypatch):
     """DirectLoadWorkflow selects BatchQueryStrategy ($everything) by default;
     _process_single_batch just drives the pre-built workflow it's handed."""

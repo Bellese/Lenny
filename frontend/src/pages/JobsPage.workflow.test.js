@@ -104,6 +104,43 @@ describe('JobsPage — data submission workflow', () => {
     expect(screen.getByLabelText(/does not support DEQM STU5/i)).toBe(badge);
   });
 
+  // #414 AC3: the badge must track the mode the job ACTUALLY ran under, not the
+  // creation-time capability probe. The backend now persists a runtime
+  // downgrade to Job.submit_data_mode (see
+  // test_batch_persists_runtime_downgrade_to_job_submit_data_mode); these two
+  // assert the UI distinguishes the two modes, so a job that fell back can
+  // never render as a clean STU5 job.
+  test('a job that ran as STU5 shows the badge with no fallback marker', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({
+      jobs: [{ ...BASE_JOB, workflow: 'deqm_submit_data', submit_data_mode: 'stu5' }],
+    });
+    render(<Harness />);
+    const badge = await screen.findByTitle('DEQM STU5 $deqm-submit-data');
+    expect(badge).toHaveTextContent('DEQM');
+    // The warning marker and the fallback wording belong to base-fallback only.
+    expect(badge).not.toHaveTextContent('⚠');
+    expect(screen.queryByTitle(/does not support DEQM STU5/i)).not.toBeInTheDocument();
+  });
+
+  test('the two modes render distinguishably in the same list', async () => {
+    // Guards the failure this issue described from the UI side: if the badge
+    // ignored submit_data_mode, both rows would look identical and a job that
+    // fell back would be indistinguishable from one that did not.
+    api.getJobs = jest.fn().mockResolvedValue({
+      jobs: [
+        { ...BASE_JOB, id: 1, measure_name: 'Ran as STU5', workflow: 'deqm_submit_data', submit_data_mode: 'stu5' },
+        { ...BASE_JOB, id: 2, measure_name: 'Fell back', workflow: 'deqm_submit_data', submit_data_mode: 'base-fallback' },
+      ],
+    });
+    render(<Harness />);
+    await screen.findByText(/Ran as STU5/);
+    const clean = screen.getByTitle('DEQM STU5 $deqm-submit-data');
+    const fellBack = screen.getByTitle(/does not support DEQM STU5/i);
+    expect(clean).not.toBe(fellBack);
+    expect(fellBack).toHaveTextContent('⚠');
+    expect(clean).not.toHaveTextContent('⚠');
+  });
+
   test('direct load jobs show no workflow badge', async () => {
     api.getJobs = jest.fn().mockResolvedValue({
       jobs: [{ ...BASE_JOB, workflow: 'direct_load', submit_data_mode: null }],

@@ -18,6 +18,22 @@ from app.services.workflows import (
 )
 
 
+def _fhir_op_error_with_outcome(status_code: int, diagnostics: str) -> FhirOperationError:
+    """#414: a 400's meaning lives in its OperationOutcome, not its status."""
+    return FhirOperationError(
+        operation="submit-data",
+        url="http://mcs/Measure/$deqm-submit-data",
+        status_code=status_code,
+        outcome=FhirOperationOutcome.from_dict(
+            {
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "error", "code": "processing", "diagnostics": diagnostics}],
+            }
+        ),
+        latency_ms=5,
+    )
+
+
 def _fhir_op_error(status_code: int) -> FhirOperationError:
     return FhirOperationError(
         operation="submit-data",
@@ -149,24 +165,116 @@ class TestDeqmSubmitDataWorkflow:
                 await wf.transfer_patient("http://cdr", "p1", {})
         assert exc_info.value.phase == "gather"
 
-    async def test_stu5_400_downgrades_to_base_and_retry_succeeds(self):
-        """I4: a mis-probed stu5 server 400s the STU5 shape; downgrade to base
-        and retry once rather than failing the whole job."""
+    # -- #414: a 400 is not evidence of a missing operation ------------------
+    # DEQM prescribes 400 for an update-type mismatch, and 400 is the generic
+    # FHIR answer to a rejected payload. Treating it as "this server lacks
+    # STU5" discarded the real OperationOutcome and silently changed the wire
+    # format for every later patient. A genuine not-supported 400 does exist
+    # (HAPI answers the type-level base operation with "does not know how to
+    # handle POST operation[...]"), so the outcome text is what decides.
+
+    async def test_stu5_400_validation_rejection_fails_patient_without_downgrading(self):
+        """AC1: the bug. A per-patient validation rejection must not be read as
+        a capability verdict for the whole job."""
         wf = _deqm_workflow(mode="stu5")
-        submit = AsyncMock(side_effect=[_fhir_op_error(400), None])
+        submit = AsyncMock(side_effect=_fhir_op_error_with_outcome(400, "Bundle.entry[3]: minimum required = 1"))
         with (
             patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
             patch("app.services.workflows.submit_data", new=submit),
         ):
-            result = await wf.transfer_patient("http://cdr", "p1", {})
-        assert result is _GATHER
+            with pytest.raises(TransferPhaseError) as exc_info:
+                await wf.transfer_patient("http://cdr", "p1", {})
+        assert exc_info.value.phase == "submit"
+        assert wf._mode == "stu5"  # no downgrade
+        assert submit.await_count == 1  # no retry
+        # The server's own explanation must survive to error_details.
+        assert exc_info.value.cause.outcome.primary_diagnostic() == "Bundle.entry[3]: minimum required = 1"
+
+    async def test_stu5_400_saying_operation_unsupported_does_downgrade(self):
+        """AC1's other half: a 400 that genuinely reports the operation missing
+        is still a capability signal. HAPI's wording is the documented case."""
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(
+            side_effect=[
+                _fhir_op_error_with_outcome(
+                    400, "does not know how to handle POST operation[Measure/$deqm-submit-data]"
+                ),
+                None,
+            ]
+        )
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
         assert wf._mode == "base-fallback"
         assert submit.await_count == 2
-        first_kwargs, second_kwargs = submit.call_args_list[0].kwargs, submit.call_args_list[1].kwargs
-        assert first_kwargs["mode"] == "stu5"
-        assert first_kwargs["parameters"]["parameter"][0]["name"] == "bundle"
-        assert second_kwargs["mode"] == "base-fallback"
-        assert second_kwargs["parameters"]["parameter"][0]["name"] == "measureReport"
+
+    async def test_stu5_400_with_no_outcome_does_not_downgrade(self):
+        """A 400 carrying no OperationOutcome is not proof of anything. Absent
+        evidence, treat it as a payload rejection — the conservative direction,
+        since a wrong downgrade changes the format for every later patient."""
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(side_effect=_fhir_op_error(400))
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            with pytest.raises(TransferPhaseError):
+                await wf.transfer_patient("http://cdr", "p1", {})
+        assert wf._mode == "stu5"
+        assert submit.await_count == 1
+
+    # -- #414 AC4: a job is never half one wire format ------------------------
+
+    async def test_downgrade_refused_once_a_patient_has_succeeded(self):
+        """AC4 (ruling: mixed-mode jobs are prohibited).
+
+        A downgrade after a successful STU5 submission would leave the job
+        half STU5 and half base with nothing recording the boundary. The later
+        patient fails instead, and the job stays uniformly STU5.
+        """
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(side_effect=[None, _fhir_op_error(404)])
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})  # succeeds under stu5
+            with pytest.raises(TransferPhaseError) as exc_info:
+                await wf.transfer_patient("http://cdr", "p2", {})
+        assert exc_info.value.phase == "submit"
+        assert wf._mode == "stu5"  # NOT flipped — no mixed-mode job
+        assert submit.await_count == 2  # no rescue retry for p2
+
+    async def test_downgrade_still_allowed_before_any_success(self):
+        """AC4 must not cost the mis-probe rescue. With no successful
+        submission yet, nothing can be stranded in the other format, so the
+        downgrade is safe and still happens."""
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(side_effect=[_fhir_op_error(404), None])
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+        assert wf._mode == "base-fallback"
+        assert submit.await_count == 2
+
+    async def test_downgrade_is_observable_for_persistence(self):
+        """AC2 is persisted by the orchestrator, which owns DB access —
+        workflows.py is deliberately session-free. The workflow therefore has
+        to expose that a downgrade happened."""
+        wf = _deqm_workflow(mode="stu5")
+        assert wf.downgraded is False
+        submit = AsyncMock(side_effect=[_fhir_op_error(404), None])
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+        assert wf.downgraded is True
+        assert wf.mode == "base-fallback"
 
     async def test_stu5_404_also_downgrades(self):
         wf = _deqm_workflow(mode="stu5")
@@ -270,7 +378,7 @@ class TestDeqmSubmitDataWorkflow:
     async def test_stu5_downgrade_retry_also_fails_raises_submit_phase(self):
         """If the base-mode retry also fails, raise TransferPhaseError as today."""
         wf = _deqm_workflow(mode="stu5")
-        submit = AsyncMock(side_effect=[_fhir_op_error(400), _fhir_op_error(500)])
+        submit = AsyncMock(side_effect=[_fhir_op_error(404), _fhir_op_error(500)])
         with (
             patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
             patch("app.services.workflows.submit_data", new=submit),
@@ -296,42 +404,32 @@ class TestDeqmSubmitDataWorkflow:
         assert wf._mode == "base-fallback"
         assert submit.await_count == 1
 
-    async def test_concurrent_stu5_downgrade_does_not_strand_second_patient(self):
-        """Regression: self._mode is shared, mutable instance state, and one
-        DeqmSubmitDataWorkflow instance is reused concurrently across patients
-        in the same job (orchestrator batches under
-        asyncio.Semaphore(MAX_WORKERS) + asyncio.gather). If two patients
-        both send STU5 requests and both 400, the downgrade guard must judge
-        EACH attempt against the mode IT was sent under — not against
-        self._mode read after the await, which a concurrent sibling may
-        already have flipped to base-fallback. Otherwise whichever patient's
-        except-handler runs second reads the already-flipped mode, the guard
-        evaluates False, and that patient is stranded (raises
-        TransferPhaseError) despite having failed for the identical
-        mis-probed-STU5 reason as its sibling, which got rescued.
+    async def test_concurrent_patients_settle_one_mode_and_none_are_stranded(self):
+        """#414: replaces test_concurrent_stu5_downgrade_does_not_strand_second_patient.
 
-        The mock below uses an asyncio.Event as a barrier so BOTH STU5 400s
-        are guaranteed to be in flight/raised before either patient's
-        downgrade-and-retry logic runs — this reproduces the race
-        deterministically instead of relying on scheduling luck.
+        That test's premise — two patients both in flight under STU5 before
+        either downgrade runs — is now impossible by construction, which is the
+        point of the settlement barrier. It used an asyncio.Event to hold the
+        first STU5 attempt until a second one arrived; under the barrier the
+        second can never arrive, so the old test deadlocks rather than fails.
+
+        The guarantee it defended (no patient stranded by a sibling's flip) is
+        preserved and strengthened here: only ONE STU5 attempt is ever made,
+        so there is no second attempt to strand, and no patient can be
+        submitted under a mode the job later abandons.
+
+        The break this catches: removing the barrier and letting each patient
+        run its own downgrade would push the STU5 attempt count above 1 and
+        reintroduce mixed-mode jobs.
         """
         wf = _deqm_workflow(mode="stu5")
-        stu5_call_count = 0
-        release_first_waiter = asyncio.Event()
+        modes_attempted = []
 
         async def submit_data_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
-            nonlocal stu5_call_count
+            modes_attempted.append(mode)
             if mode == "stu5":
-                stu5_call_count += 1
-                if stu5_call_count == 1:
-                    # First STU5 attempt to arrive: wait for its sibling so
-                    # both 400s exist before either except-handler (and thus
-                    # any self._mode mutation) runs.
-                    await release_first_waiter.wait()
-                else:
-                    release_first_waiter.set()
-                raise _fhir_op_error(400)
-            return None  # base-mode retries succeed
+                raise _fhir_op_error(404)
+            return None  # base-mode submissions succeed
 
         submit = AsyncMock(side_effect=submit_data_side_effect)
         with (
@@ -344,11 +442,36 @@ class TestDeqmSubmitDataWorkflow:
             )
 
         assert result_a is _GATHER
-        assert result_b is _GATHER
-        assert stu5_call_count == 2
-        base_mode_calls = [c for c in submit.call_args_list if c.kwargs["mode"] == "base-fallback"]
-        assert len(base_mode_calls) == 2
+        assert result_b is _GATHER  # neither patient stranded
+        assert modes_attempted.count("stu5") == 1, (
+            f"exactly one STU5 attempt expected before settlement, got {modes_attempted}"
+        )
+        assert modes_attempted.count("base-fallback") == 2  # pioneer retry + sibling
         assert wf._mode == "base-fallback"
+        assert wf.downgraded is True
+
+    async def test_concurrent_patients_never_mix_modes_when_stu5_works(self):
+        """The mirror case: if STU5 succeeds there is no downgrade, and every
+        patient goes out as STU5. A job is uniform in either direction."""
+        wf = _deqm_workflow(mode="stu5")
+        modes_attempted = []
+
+        async def submit_data_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            modes_attempted.append(mode)
+            return None
+
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_data_side_effect)),
+        ):
+            await asyncio.gather(
+                wf.transfer_patient("http://cdr", "p1", {}),
+                wf.transfer_patient("http://cdr", "p2", {}),
+                wf.transfer_patient("http://cdr", "p3", {}),
+            )
+
+        assert set(modes_attempted) == {"stu5"}, modes_attempted
+        assert wf.downgraded is False
 
     async def test_empty_gather_still_submits_measure_report_only(self):
         """Coverage-audit gap fill: DeqmSubmitDataWorkflow does not skip
