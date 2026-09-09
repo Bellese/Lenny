@@ -7,6 +7,7 @@ identical for every workflow and stays in the orchestrator.
 """
 
 import abc
+import asyncio
 import logging
 from datetime import datetime, timezone
 
@@ -30,14 +31,55 @@ from app.services.fhir_client import (
 )
 from app.services.fhir_errors import FhirOperationError
 
-# Capability-mismatch signals only: a server that advertises $deqm-submit-data
-# but doesn't actually implement the type-level POST commonly answers with one
-# of these. 401/403 are deliberately excluded — those are auth failures, not
-# a capability mismatch, and must not be masked as a silent downgrade.
-# 429/5xx are deliberately excluded too — those are transient/overload
-# signals, not "this operation doesn't exist here", and downgrading on them
-# would paper over a retry-able failure as a permanent capability verdict.
-_DOWNGRADE_STATUS_CODES = {400, 404, 405, 501}
+# Capability-mismatch signals: a server that advertises $deqm-submit-data but
+# doesn't actually implement the type-level POST commonly answers with one of
+# these. Each is a statement about the SERVER, not about the payload, so it is
+# a credible capability verdict on its own.
+#
+# 401/403 are deliberately excluded — auth failures, not capability mismatches,
+# and must not be masked as a silent downgrade. 429/5xx are excluded too —
+# transient/overload signals, not "this operation doesn't exist here";
+# downgrading on them would paper over a retry-able failure as a permanent
+# verdict.
+#
+# 400 is NOT here (#414). DEQM prescribes 400 for an update-type mismatch, and
+# 400 is the generic FHIR answer to a rejected payload — so a per-patient
+# validation failure was being read as a verdict about the server, discarding
+# the real OperationOutcome. A genuine not-supported 400 does exist (HAPI
+# answers the type-level base operation with "does not know how to handle POST
+# operation[...]"), so a 400 is inspected rather than trusted: see
+# _outcome_reports_unsupported_operation.
+_DOWNGRADE_STATUS_CODES = {404, 405, 501}
+
+# Substrings that mark an OperationOutcome as "this operation isn't implemented
+# here" rather than "your payload was wrong". Deliberately narrow: a false
+# positive changes the wire format for the rest of the job, so anything not
+# clearly about the operation's existence is treated as a payload rejection.
+#
+# Text matching is fragile and this is the one place it is accepted, because
+# the status code alone cannot distinguish the two cases and HAPI's wording is
+# the documented real-world instance. A server whose phrasing differs simply
+# does not downgrade on 400 — it fails that patient with the server's own
+# explanation intact, which is the conservative direction.
+_UNSUPPORTED_OPERATION_MARKERS = (
+    "does not know how to handle",
+    "not supported",
+    "unsupported operation",
+    "unknown operation",
+    "operation not found",
+)
+
+
+def _outcome_reports_unsupported_operation(exc: FhirOperationError) -> bool:
+    """True when a 400's OperationOutcome says the operation is missing (#414)."""
+    if exc.outcome is None:
+        return False
+    for issue in exc.outcome.issues:
+        text = (issue.diagnostics or "").lower()
+        if any(marker in text for marker in _UNSUPPORTED_OPERATION_MARKERS):
+            return True
+    return False
+
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +191,45 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         self._period_start = period_start
         self._period_end = period_end
         self._mode = mode
+        # #414 (ruling: mixed-mode jobs are prohibited). The runtime downgrade
+        # exists to rescue a mis-probed job, but under
+        # asyncio.Semaphore(MAX_WORKERS) + asyncio.gather one patient's STU5
+        # submission can still be in flight when another patient's failure
+        # decides to downgrade — so a plain "has anything succeeded yet?" flag
+        # leaves a window where a job ends up half STU5 and half base.
+        #
+        # Instead the mode is SETTLED ONCE, behind a barrier: the first patient
+        # to reach the submit step under STU5 becomes the pioneer and is the
+        # only one allowed to downgrade. Everyone else waits for its verdict
+        # and then submits under the settled mode, with no downgrade path of
+        # their own. One patient's submission is therefore serialized; the rest
+        # run fully concurrent as before.
+        #
+        # The barrier only engages while the mode is STU5. base-fallback has
+        # nowhere to downgrade to, and per the v0.1.0.0 notes every server
+        # tested so far resolves to base — so in practice this costs nothing.
+        self._mode_lock = asyncio.Lock()
+        self._mode_settled = asyncio.Event()
+        self._downgraded = False
+        if mode != SUBMIT_DATA_MODE_STU5:
+            self._mode_settled.set()
+
+    @property
+    def mode(self) -> str:
+        """The mode actually in use — the settled one, once settlement ran."""
+        return self._mode
+
+    @property
+    def downgraded(self) -> bool:
+        """True once a runtime downgrade has happened.
+
+        workflows.py is deliberately session-free, so the orchestrator (which
+        already owns DB access and writes Job fields) reads this to persist
+        Job.submit_data_mode — without which the Jobs badge keeps reporting the
+        creation-time probe's verdict and states the opposite of what happened
+        (#414).
+        """
+        return self._downgraded
 
     async def ensure_target_prerequisites(self) -> None:
         """Store the shared reporter Organization once, after the wipe.
@@ -209,27 +290,62 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # the SAME client-assigned Organization/lenny-reporter into every
         # patient's payload is unsafe under concurrent batches.
         submitted = filtered_resources
-        # Snapshot the mode used for THIS attempt. self._mode is shared,
-        # mutable instance state: one DeqmSubmitDataWorkflow is built per job
-        # (orchestrator.py) and its transfer_patient() runs concurrently
-        # across patients in different batches under
-        # asyncio.Semaphore(MAX_WORKERS) + asyncio.gather. Two patients can
-        # both read self._mode == stu5 here, both send STU5 requests, and
-        # both fail with a 400 — but by the time the SECOND one's except
-        # handler below runs, the FIRST one may already have flipped
-        # self._mode to base-fallback. The downgrade guard must judge this
-        # attempt against the mode it was actually sent under (attempt_mode),
-        # never against the live self._mode read after the `await` —
-        # otherwise the second patient's guard sees the sibling's flip, comes
-        # up False, and that patient is stranded (raises TransferPhaseError)
-        # instead of being rescued like its sibling. Do NOT "simplify" this
-        # back to `self._mode` in the guard below.
+        # The mode used for THIS attempt. self._mode is shared, mutable state:
+        # one DeqmSubmitDataWorkflow is built per job (orchestrator.py) and its
+        # transfer_patient() runs concurrently across patients under
+        # asyncio.Semaphore(MAX_WORKERS) + asyncio.gather. The settlement
+        # barrier below is what makes that safe — self._mode is only ever
+        # written by the pioneer, while every other patient is still waiting on
+        # self._mode_settled, so no patient can send one envelope while the job
+        # is deciding on another (#414).
         attempt_mode = self._mode
         if attempt_mode == SUBMIT_DATA_MODE_STU5:
             parameters = build_stu5_parameters(measure_report, submitted)
         else:
             parameters = build_base_parameters(measure_report, submitted)
 
+        # Non-pioneers wait for the mode verdict, then re-derive their payload
+        # under it — a patient that queued while STU5 was still unsettled must
+        # not send an STU5 envelope to a server that has since been downgraded.
+        if not self._mode_settled.is_set():
+            async with self._mode_lock:
+                if not self._mode_settled.is_set():
+                    try:
+                        await self._settle_mode_and_submit(measure_report, submitted, patient_id)
+                    finally:
+                        self._mode_settled.set()
+                    return gather
+            # Settled by the pioneer while we queued on the lock; fall through
+            # and submit under whatever it decided.
+            attempt_mode = self._mode
+            parameters = (
+                build_stu5_parameters(measure_report, submitted)
+                if attempt_mode == SUBMIT_DATA_MODE_STU5
+                else build_base_parameters(measure_report, submitted)
+            )
+
+        # Settled path: no downgrade is available here, by design. Allowing one
+        # would be exactly the mixed-mode job this barrier prohibits.
+        try:
+            await submit_data(
+                mcs_url=self._mcs_url,
+                parameters=parameters,
+                mode=attempt_mode,
+                measure_id=self._measure_id,
+                auth_headers=self._mcs_auth_headers,
+            )
+        except Exception as exc:
+            raise TransferPhaseError("submit", exc) from exc
+        return gather
+
+    async def _settle_mode_and_submit(self, measure_report, submitted, patient_id: str) -> None:
+        """The pioneer's submission: the only one that may downgrade (#414).
+
+        Runs under self._mode_lock with self._mode_settled unset, so it is the
+        single point where the job's wire format is decided.
+        """
+        attempt_mode = self._mode
+        parameters = build_stu5_parameters(measure_report, submitted)
         try:
             await submit_data(
                 mcs_url=self._mcs_url,
@@ -241,25 +357,31 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         except FhirOperationError as exc:
             # A mis-probed capability stamps Job.submit_data_mode="stu5" for a
             # server that doesn't actually implement $deqm-submit-data. Rather
-            # than fail every patient in the job, downgrade to base mode on the
-            # first capability-mismatch status (_DOWNGRADE_STATUS_CODES) and
-            # retry once. Job.submit_data_mode still shows the probe's
-            # original verdict — reconciling the UI badge with a runtime
-            # downgrade is deliberately out of scope here.
-            if attempt_mode == SUBMIT_DATA_MODE_STU5 and exc.status_code in _DOWNGRADE_STATUS_CODES:
+            # than fail every patient in the job, downgrade to base mode and
+            # retry once. Because this runs before the mode is settled, no
+            # patient has been submitted under STU5 yet, so the downgrade
+            # cannot strand anyone in the other format.
+            #
+            # A bare status is only trusted when it is a statement about the
+            # server (_DOWNGRADE_STATUS_CODES). A 400 is ambiguous, so it
+            # downgrades only when its OperationOutcome says the operation is
+            # missing — otherwise it is a payload rejection and belongs to this
+            # patient alone, with the server's explanation preserved (#414).
+            capability_signal = exc.status_code in _DOWNGRADE_STATUS_CODES or (
+                exc.status_code == 400 and _outcome_reports_unsupported_operation(exc)
+            )
+            if capability_signal:
                 logger.warning(
                     "STU5 $deqm-submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
                     exc.status_code,
                     self._job_id,
                     extra={"job_id": self._job_id, "patient_id": patient_id, "status_code": exc.status_code},
                 )
-                # Flipping shared state here is the intended optimization —
-                # later patients (and later batches) skip straight to base
-                # mode instead of re-probing STU5 themselves. It's fine for
-                # this write to race with a concurrent sibling's own flip
-                # because it's idempotent (both write the same constant); the
-                # bug was only ever in a *guard* consulting this field.
                 self._mode = SUBMIT_DATA_MODE_BASE
+                # Read by the orchestrator to persist Job.submit_data_mode, so
+                # the Jobs badge reports the mode actually used rather than the
+                # probe's verdict.
+                self._downgraded = True
                 retry_parameters = build_base_parameters(measure_report, submitted)
                 try:
                     await submit_data(
@@ -275,7 +397,6 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
                 raise TransferPhaseError("submit", exc) from exc
         except Exception as exc:
             raise TransferPhaseError("submit", exc) from exc
-        return gather
 
 
 async def build_submission_workflow(
