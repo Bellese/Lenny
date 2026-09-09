@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1.0] - 2026-09-08
+
+### Fixed
+- **A patient whose data the measure server rejected is no longer counted as successfully submitted.** When a calculation uses the DEQM Data Exchange workflow, Lenny hands each patient's data to the measure server with `$submit-data`. A server is allowed to accept the request but reject its contents — answering `200 OK` with an `OperationOutcome` explaining what went wrong. Lenny read only the status code, so that patient was marked transferred and the measure was then calculated against data the server never stored. The result was a population count computed from missing data, presented as an ordinary result with nothing on screen suggesting it was wrong. Lenny now reads the response body: a rejection fails that patient, the server's own explanation is kept and shown in the failure details, and the count you see is calculated only from data that was actually accepted. Advisory outcomes carrying only warnings or information are unaffected and still count as success, as does a server that answers with a plain non-FHIR body. This affects the DEQM workflow only; Direct load was never at risk. (#415)
+
 ## [0.2.0.0] - 2026-09-07
 
 ### Added

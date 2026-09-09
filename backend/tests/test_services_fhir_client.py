@@ -3143,6 +3143,156 @@ class TestSubmitData:
         assert exc_info.value.status_code == 400
         assert exc_info.value.operation == "submit-data"
 
+    # -- #415: a 2xx is not proof of a delivered submission ------------------
+    # submit_data used to return on any status < 300 without reading the body.
+    # A server that rejects a submission inside a 200 therefore marked the
+    # patient transferred, and evaluation then ran against data the measure
+    # server never accepted — producing a population figure computed from
+    # missing data and reported as a normal result. evaluate_measure in this
+    # same module already guards this exact shape; these tests make the two
+    # operations agree about whether a 200 can mean failure.
+
+    async def test_200_operation_outcome_with_error_issue_raises(self):
+        """AC1: a rejection returned inside a 200 must fail the patient."""
+        oo = {
+            "resourceType": "OperationOutcome",
+            "issue": [
+                {
+                    "severity": "error",
+                    "code": "processing",
+                    "diagnostics": "Unable to resolve reference Patient/nope",
+                }
+            ],
+        }
+        post = AsyncMock(return_value=_make_response(200, oo))
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            with pytest.raises(FhirOperationError) as exc_info:
+                await submit_data(
+                    mcs_url="http://mcs",
+                    parameters={"resourceType": "Parameters"},
+                    mode=SUBMIT_DATA_MODE_BASE,
+                    measure_id="M1",
+                )
+        assert exc_info.value.status_code == 200
+        assert exc_info.value.operation == "submit-data"
+        # AC1: the outcome is preserved, not discarded — this is what reaches
+        # MeasureResult.error_details, so a user sees why the patient failed.
+        assert exc_info.value.outcome is not None
+        assert exc_info.value.outcome.primary_diagnostic() == "Unable to resolve reference Patient/nope"
+
+    async def test_200_operation_outcome_with_fatal_issue_raises(self):
+        """AC1: `fatal` is as disqualifying as `error`."""
+        oo = {
+            "resourceType": "OperationOutcome",
+            "issue": [{"severity": "fatal", "code": "exception", "diagnostics": "transaction rolled back"}],
+        }
+        post = AsyncMock(return_value=_make_response(200, oo))
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            with pytest.raises(FhirOperationError) as exc_info:
+                await submit_data(
+                    mcs_url="http://mcs",
+                    parameters={"resourceType": "Parameters"},
+                    mode=SUBMIT_DATA_MODE_BASE,
+                    measure_id="M1",
+                )
+        assert exc_info.value.outcome.primary_diagnostic() == "transaction rolled back"
+
+    async def test_200_transaction_bundle_still_succeeds(self):
+        """AC2: HAPI's success shape must keep succeeding.
+
+        Boundary guard for the check above: an implementation that raised on
+        any 2xx body, or that required a Bundle-with-no-issues, would fail
+        every real submission.
+        """
+        post = AsyncMock(
+            return_value=_make_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "transaction-response",
+                    "entry": [{"response": {"status": "201 Created"}}],
+                },
+            )
+        )
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            await submit_data(
+                mcs_url="http://mcs",
+                parameters={"resourceType": "Parameters"},
+                mode=SUBMIT_DATA_MODE_BASE,
+                measure_id="M1",
+            )
+        assert post.await_count == 1
+
+    async def test_200_operation_outcome_with_only_warnings_succeeds(self):
+        """AC3: a warning/information OperationOutcome is not a rejection.
+
+        Boundary guard: the naive fix — "a 200 whose body is an
+        OperationOutcome raises" — fails this test. Servers legitimately
+        return advisory outcomes alongside a successful write, and failing
+        those patients would be a new bug in the opposite direction.
+        """
+        oo = {
+            "resourceType": "OperationOutcome",
+            "issue": [
+                {"severity": "warning", "code": "informational", "diagnostics": "partial code match"},
+                {"severity": "information", "code": "informational", "diagnostics": "accepted"},
+            ],
+        }
+        post = AsyncMock(return_value=_make_response(200, oo))
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            await submit_data(
+                mcs_url="http://mcs",
+                parameters={"resourceType": "Parameters"},
+                mode=SUBMIT_DATA_MODE_BASE,
+                measure_id="M1",
+            )
+        assert post.await_count == 1
+
+    async def test_200_operation_outcome_with_issue_missing_severity_raises(self):
+        """FHIR requires `severity`; an issue without one is malformed. It is
+        treated as an error, so a malformed rejection fails the patient rather
+        than passing silently.
+
+        The break this catches: FhirOperationOutcome.from_dict defaults a
+        missing severity to "error". If that default were ever relaxed to
+        "information", a malformed rejection would start counting as a
+        delivered patient — the exact bug #415 exists to close.
+        """
+        oo = {
+            "resourceType": "OperationOutcome",
+            "issue": [{"code": "processing", "diagnostics": "rejected, severity omitted"}],
+        }
+        post = AsyncMock(return_value=_make_response(200, oo))
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            with pytest.raises(FhirOperationError):
+                await submit_data(
+                    mcs_url="http://mcs",
+                    parameters={"resourceType": "Parameters"},
+                    mode=SUBMIT_DATA_MODE_BASE,
+                    measure_id="M1",
+                )
+
+    async def test_200_with_unparseable_body_still_succeeds(self):
+        """A server that returns 200 with a non-JSON body must not start
+        failing patients because of this check — the guard reads the body to
+        find rejections, and an unreadable body is not evidence of one."""
+        resp = httpx.Response(200, content=b"OK", request=_DUMMY_REQUEST)
+        post = AsyncMock(return_value=resp)
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, post=post)
+            await submit_data(
+                mcs_url="http://mcs",
+                parameters={"resourceType": "Parameters"},
+                mode=SUBMIT_DATA_MODE_BASE,
+                measure_id="M1",
+            )
+        assert post.await_count == 1
+
 
 async def test_data_requirements_cached_across_patients():
     """$data-requirements is called once per job, not once per patient.
