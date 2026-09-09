@@ -1110,6 +1110,21 @@ async def detect_submit_data_mode(
     return SUBMIT_DATA_MODE_BASE
 
 
+def _submit_data_rejection(resp: httpx.Response) -> FhirOperationOutcome | None:
+    """Return the OperationOutcome if a 2xx $submit-data response is actually a
+    rejection, else None. See #415."""
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict) or body.get("resourceType") != "OperationOutcome":
+        return None
+    outcome = FhirOperationOutcome.from_dict(body)
+    if any(issue.severity in ("error", "fatal") for issue in outcome.issues):
+        return outcome
+    return None
+
+
 async def submit_data(
     *,
     mcs_url: str,
@@ -1137,8 +1152,13 @@ async def submit_data(
       POSTs). HAPI's clinical-reasoning module simply doesn't register the
       type-level operation, so base mode has to target the instance.
 
-    Any 2xx is success; the response body (HAPI returns a transaction Bundle)
-    carries no information the job needs.
+    A 2xx is necessary but not sufficient (#415). HAPI returns a transaction
+    Bundle on success, but a server may reject a submission inside a 200 by
+    returning an OperationOutcome. Treating that as delivered marked the
+    patient transferred and let evaluation run against data the measure server
+    never accepted — a population figure computed from missing data, reported
+    as a normal result. `evaluate_measure` in this module already guards the
+    same shape; the body check below makes the two operations agree.
 
     The reporter Organization is no longer inlined per-patient (see
     build_submission_workflow / DeqmSubmitDataWorkflow.transfer_patient) —
@@ -1177,6 +1197,21 @@ async def submit_data(
                     url=url,
                     status_code=resp.status_code,
                     outcome=FhirOperationOutcome.from_response(resp),
+                    latency_ms=latency_ms,
+                )
+            # #415: only an error-bearing OperationOutcome is a rejection. A
+            # warning/information outcome is advisory and accompanies a real
+            # write, so failing on any OperationOutcome would be a new bug in
+            # the opposite direction. An unreadable body is not evidence of a
+            # rejection either — this check looks for proof of failure, and
+            # absence of proof leaves the 2xx standing.
+            rejection = _submit_data_rejection(resp)
+            if rejection is not None:
+                raise FhirOperationError(
+                    operation="submit-data",
+                    url=url,
+                    status_code=resp.status_code,
+                    outcome=rejection,
                     latency_ms=latency_ms,
                 )
             logger.info(

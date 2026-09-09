@@ -8,7 +8,7 @@ import pytest
 from app.config import settings
 from app.services.deqm import LENNY_REPORTER_ORG
 from app.services.fhir_client import BatchQueryStrategy, DataRequirementsStrategy, GatherResult
-from app.services.fhir_errors import FhirOperationError
+from app.services.fhir_errors import FhirOperationError, FhirOperationOutcome
 from app.services.workflows import (
     DeqmSubmitDataWorkflow,
     DirectLoadWorkflow,
@@ -209,6 +209,63 @@ class TestDeqmSubmitDataWorkflow:
         assert exc_info.value.phase == "submit"
         assert wf._mode == "stu5"  # no downgrade attempted
         assert submit.await_count == 1
+
+    async def test_200_rejection_fails_the_patient_and_does_not_downgrade(self):
+        """#415 x #414: a rejection returned inside a 200 is a per-patient
+        failure, not evidence that the server lacks STU5.
+
+        The break this catches: widening _DOWNGRADE_STATUS_CODES to include a
+        2xx, or dropping the status_code check from the downgrade guard, would
+        turn one rejected patient into a silent wire-format change for every
+        subsequent patient in the job. #414 is scheduled to revisit that guard,
+        so pin the boundary now.
+        """
+        wf = _deqm_workflow(mode="stu5")
+        submit = AsyncMock(side_effect=_fhir_op_error(200))
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=submit),
+        ):
+            with pytest.raises(TransferPhaseError) as exc_info:
+                await wf.transfer_patient("http://cdr", "p1", {})
+        assert exc_info.value.phase == "submit"
+        assert wf._mode == "stu5"  # no downgrade
+        assert submit.await_count == 1  # no retry
+
+    async def test_200_rejection_preserves_the_outcome_for_error_details(self):
+        """#415 AC1: the OperationOutcome must survive the wrap into
+        TransferPhaseError, because orchestrator.py reads `.outcome.raw` off
+        the cause to populate MeasureResult.error_details["raw_outcome"]. A
+        wrap that dropped the cause would leave the user with a bare failure
+        and no reason for it."""
+        wf = _deqm_workflow(mode="base-fallback")
+        rejection = FhirOperationError(
+            operation="submit-data",
+            url="http://mcs/Measure/M1/$submit-data",
+            status_code=200,
+            outcome=FhirOperationOutcome.from_dict(
+                {
+                    "resourceType": "OperationOutcome",
+                    "issue": [
+                        {
+                            "severity": "error",
+                            "code": "processing",
+                            "diagnostics": "Unable to resolve reference Patient/nope",
+                        }
+                    ],
+                }
+            ),
+            latency_ms=5,
+        )
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=rejection)),
+        ):
+            with pytest.raises(TransferPhaseError) as exc_info:
+                await wf.transfer_patient("http://cdr", "p1", {})
+        cause = exc_info.value.cause
+        assert isinstance(cause, FhirOperationError)
+        assert cause.outcome.raw["issue"][0]["diagnostics"] == "Unable to resolve reference Patient/nope"
 
     async def test_stu5_downgrade_retry_also_fails_raises_submit_phase(self):
         """If the base-mode retry also fails, raise TransferPhaseError as today."""
