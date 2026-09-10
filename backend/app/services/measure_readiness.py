@@ -31,8 +31,9 @@ def extract_valueset_canonicals(library: dict) -> list[str]:
 
     Two locations carry them: `dataRequirement[].codeFilter[].valueSet` and
     `relatedArtifact[]` entries of type `depends-on`. Version suffixes are
-    stripped at `|` so presence can be checked by URL. `relatedArtifact` also
-    carries Library dependencies, which are excluded by URL shape.
+    stripped at `|` so presence can be checked by URL. `relatedArtifact` mixes
+    Library, ValueSet, and CodeSystem canonicals; only ValueSet-shaped entries
+    are collected.
     """
     found: set[str] = set()
 
@@ -46,7 +47,17 @@ def extract_valueset_canonicals(library: dict) -> list[str]:
         if artifact.get("type") != "depends-on":
             continue
         resource = artifact.get("resource") or ""
-        if not resource or "/Library/" in resource or resource.startswith("Library/"):
+        if not resource:
+            continue
+        # Exclude Library canonicals
+        if resource.startswith("Library/") or "/Library/" in resource:
+            continue
+        # Exclude CodeSystem canonicals (explicit /CodeSystem/ path or known systems)
+        if "/CodeSystem/" in resource or resource in (
+            "http://loinc.org",
+            "http://snomed.info/sct",
+            "http://www.ama-assn.org/go/cpt",
+        ):
             continue
         found.add(resource.split("|")[0])
 

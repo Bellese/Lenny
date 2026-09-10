@@ -192,3 +192,29 @@ def test_extract_missing_libraries_returns_empty_when_unrecognised():
 
     assert extract_missing_libraries("HTTP 500 Internal Server Error") == []
     assert extract_missing_libraries(None) == []
+
+
+def test_extract_valueset_canonicals_excludes_codesystem_canonicals():
+    """relatedArtifact mixes Library, ValueSet and CodeSystem canonicals.
+
+    LOINC and SNOMED are code systems, not ValueSet resources — searching a FHIR
+    server for them as ValueSets can never match, so admitting them here would
+    mark every real measure permanently not-ready.
+    """
+    from app.services.measure_readiness import extract_valueset_canonicals
+
+    library = {
+        "relatedArtifact": [
+            {"type": "depends-on", "resource": "http://loinc.org"},
+            {"type": "depends-on", "resource": "http://snomed.info/sct"},
+            {"type": "depends-on", "resource": "http://www.ama-assn.org/go/cpt"},
+            {"type": "depends-on", "resource": "http://terminology.hl7.org/CodeSystem/condition-clinical"},
+            {
+                "type": "depends-on",
+                "resource": "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.1003",
+            },
+        ],
+    }
+    assert extract_valueset_canonicals(library) == [
+        "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.1003"
+    ]
