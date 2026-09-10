@@ -6,6 +6,7 @@ from app.models.base import Base
 from app.models.config import CDRConfig
 from app.models.job import Batch, Job, MeasureResult
 from app.models.mcs_config import MCSConfig
+from app.models.measure_readiness import MeasureReadiness, ReadinessState
 from app.models.validation import (
     BundleUpload,
     ExpectedResult,
@@ -24,6 +25,8 @@ __all__ = [
     "MeasureResult",
     "CDRConfig",
     "MCSConfig",
+    "MeasureReadiness",
+    "ReadinessState",
     "BundleUpload",
     "ExpectedResult",
     "ValidationResult",
