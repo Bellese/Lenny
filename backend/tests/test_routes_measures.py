@@ -1,6 +1,7 @@
 """Tests for measure endpoints (GET /measures, POST /measures/upload, DELETE /measures/{id})."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -582,3 +583,134 @@ async def test_delete_measure_credential_failure_is_not_reported_as_not_found(cl
     assert detail["issue"][0]["code"] != "not-found"
     assert "Attendee MCS" in detail["issue"][0]["diagnostics"]
     mock_delete.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Readiness (issue #434)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_measures_reports_unknown_and_kicks_a_sweep(client, active_mcs):
+    """First view: no cached rows, so every measure reads `checking`."""
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=lambda coro: coro.close())):
+            resp = await client.get("/measures")
+
+    assert resp.status_code == 200
+    measure = resp.json()["measures"][0]
+    assert measure["readiness"]["state"] == "checking"
+
+
+async def test_get_measures_serves_a_cached_verdict(client, active_mcs, test_session):
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    test_session.add(
+        MeasureReadiness(
+            mcs_id=active_mcs.id,
+            measure_id="CMS122",
+            measure_version="0.5.000",
+            state=ReadinessState.not_ready,
+            missing_libraries=["Status 1.15.000"],
+            missing_valuesets=["http://vs/a"],
+            error="Could not load source for library Status, version 1.15.000, namespace uri null.",
+        )
+    )
+    await test_session.commit()
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        resp = await client.get("/measures")
+
+    readiness = resp.json()["measures"][0]["readiness"]
+    assert readiness["state"] == "not_ready"
+    assert readiness["missing_libraries"] == ["Status 1.15.000"]
+    assert "Could not load source for library Status" in readiness["error"]
+
+
+async def test_get_measures_does_not_serve_another_connections_verdict(client, active_mcs, test_session):
+    """Verdicts are per-MCS. A row for a different connection must not leak.
+
+    Deviation from the brief: `mcs_id=active_mcs.id + 999` violates the FK on
+    `measure_readiness.mcs_id`, which this suite's `test_engine` fixture
+    deliberately enforces (PRAGMA foreign_keys=ON) so test semantics match
+    production's real FK. A second, real `MCSConfig` row is created instead so
+    the "different connection" is an actual row rather than a dangling id.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    other_mcs = MCSConfig(
+        name="Other MCS",
+        mcs_url="https://other-mcs.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=False,
+        is_default=False,
+        is_read_only=False,
+    )
+    test_session.add(other_mcs)
+    await test_session.commit()
+    await test_session.refresh(other_mcs)
+
+    test_session.add(
+        MeasureReadiness(
+            mcs_id=other_mcs.id,
+            measure_id="CMS122",
+            measure_version="0.5.000",
+            state=ReadinessState.ready,
+        )
+    )
+    await test_session.commit()
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=lambda coro: coro.close())):
+            resp = await client.get("/measures")
+
+    assert resp.json()["measures"][0]["readiness"]["state"] != "ready"
+
+
+async def test_refresh_accepts_and_marks_everything_checking(client, active_mcs, test_session):
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [
+            {"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}},
+            {"resource": {"resourceType": "Measure", "id": "CMS124", "version": "1.0.000", "status": "active"}},
+        ],
+    }
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=lambda coro: coro.close())):
+            resp = await client.post("/measures/readiness/refresh")
+
+    assert resp.status_code == 202
+    assert resp.json()["measures"] == 2
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert {r.state for r in rows} == {ReadinessState.checking}
+
+
+async def test_measure_with_no_version_gets_a_readiness_object(client, active_mcs):
+    """A Measure without `version` must still render, not 500."""
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "NoVersion", "status": "active"}}],
+    }
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=lambda coro: coro.close())):
+            resp = await client.get("/measures")
+
+    assert resp.status_code == 200
+    assert resp.json()["measures"][0]["readiness"]["state"] == "checking"
