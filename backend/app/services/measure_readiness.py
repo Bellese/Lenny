@@ -8,15 +8,20 @@ Two questions, in order:
 Lenny parses no CQL. The server computes the dependency closure and returns it.
 """
 
+import asyncio
 import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 import httpx
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models.measure_readiness import MeasureReadiness, ReadinessState
 from app.services.fhir_errors import FhirOperationOutcome, hint_for_network_exception
 
@@ -258,3 +263,150 @@ async def check_measure_readiness(
         )
 
     return ReadinessVerdict(state=ReadinessState.ready, duration_ms=elapsed())
+
+
+def _session_factory():
+    """Indirection so tests can substitute the session without patching `app.db`.
+
+    The sweep runs detached from any request, so it cannot take a `Depends`
+    session — it must open its own.
+    """
+    from app.db import async_session
+
+    return async_session()
+
+
+async def claim_unchecked(session: AsyncSession, mcs_id: int, measures: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """Insert `checking` rows for measures with no verdict yet; return what was claimed.
+
+    Writing the row synchronously, before the sweep starts, is what stops a page
+    refresh during a 60s sweep from queueing a second one.
+    """
+    existing = set(
+        (
+            await session.execute(
+                select(MeasureReadiness.measure_id, MeasureReadiness.measure_version).where(
+                    MeasureReadiness.mcs_id == mcs_id
+                )
+            )
+        ).all()
+    )
+    claimed = [(mid, ver) for mid, ver in measures if (mid, ver) not in existing]
+    for measure_id, version in claimed:
+        session.add(
+            MeasureReadiness(
+                mcs_id=mcs_id, measure_id=measure_id, measure_version=version, state=ReadinessState.checking
+            )
+        )
+    if claimed:
+        await session.commit()
+    return claimed
+
+
+async def mark_all_checking(session: AsyncSession, mcs_id: int, measures: list[tuple[str, str]]) -> None:
+    """Force every listed measure into `checking`, inserting rows that are absent.
+
+    Used by the manual re-check, where the point is to discard current verdicts.
+    """
+    await invalidate_mcs(session, mcs_id)
+    for measure_id, version in measures:
+        session.add(
+            MeasureReadiness(
+                mcs_id=mcs_id, measure_id=measure_id, measure_version=version, state=ReadinessState.checking
+            )
+        )
+    await session.commit()
+
+
+async def invalidate_mcs(session: AsyncSession, mcs_id: int) -> int:
+    """Drop every cached verdict for one MCS. Returns the number removed.
+
+    Deliberately whole-connection rather than per-measure: an uploaded bundle can
+    carry a Library that several OTHER measures were missing, so invalidating
+    only the uploaded measure would leave those stale and red.
+    """
+    result = await session.execute(sa_delete(MeasureReadiness).where(MeasureReadiness.mcs_id == mcs_id))
+    await session.commit()
+    return result.rowcount or 0
+
+
+async def _store_verdict(
+    session: AsyncSession, mcs_id: int, measure_id: str, version: str, verdict: ReadinessVerdict
+) -> None:
+    row = (
+        await session.execute(
+            select(MeasureReadiness).where(
+                MeasureReadiness.mcs_id == mcs_id,
+                MeasureReadiness.measure_id == measure_id,
+                MeasureReadiness.measure_version == version,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        row = MeasureReadiness(mcs_id=mcs_id, measure_id=measure_id, measure_version=version)
+        session.add(row)
+    row.state = verdict.state
+    row.missing_libraries = verdict.missing_libraries or None
+    row.missing_valuesets = verdict.missing_valuesets or None
+    row.error = verdict.error
+    row.duration_ms = verdict.duration_ms
+    row.checked_at = datetime.now(timezone.utc)
+    await session.commit()
+
+
+async def run_sweep(mcs_id: int, measures: list[tuple[str, str]]) -> None:
+    """Check every listed measure against one MCS and store the verdicts.
+
+    Safe as an `asyncio.create_task` target: opens its own session and never
+    raises. Concurrency is capped because `$data-requirements` is expensive
+    enough to have OOM-killed the engine once already
+    (`fhir_client.py:371-375`).
+
+    The whole sweep shares one `AsyncSession` (opened once, not per-measure), and
+    an `AsyncSession` cannot run two operations concurrently on itself. The
+    semaphore below bounds how many `$data-requirements` calls are in flight at
+    once; a second, separate lock serialises the (fast) database write that
+    follows each one so two verdicts never call `commit()` at the same time.
+    """
+    from app.dependencies import resolve_mcs_auth_headers
+    from app.models.mcs_config import MCSConfig
+
+    if not measures:
+        return
+
+    semaphore = asyncio.Semaphore(max(1, settings.READINESS_CONCURRENCY))
+    write_lock = asyncio.Lock()
+
+    async with _session_factory() as session:
+        cfg = await session.get(MCSConfig, mcs_id)
+        if cfg is None:
+            logger.warning("Readiness sweep skipped: MCS %s no longer exists", mcs_id)
+            return
+        mcs_url = cfg.mcs_url
+        try:
+            auth_headers = await resolve_mcs_auth_headers(
+                session, mcs_id=mcs_id, mcs_url=mcs_url, mcs_auth_type=cfg.auth_type.value, owner_label=f"MCS {mcs_id}"
+            )
+        except Exception as exc:
+            logger.warning("Readiness sweep could not authenticate to MCS %s: %s", mcs_id, exc)
+            auth_headers = {}
+
+        async def one(measure_id: str, version: str) -> None:
+            async with semaphore:
+                try:
+                    verdict = await check_measure_readiness(
+                        mcs_url,
+                        measure_id,
+                        auth_headers=auth_headers,
+                        timeout=float(settings.READINESS_TIMEOUT_SECONDS),
+                    )
+                except Exception as exc:
+                    # A raising check must not leave the row spinning until restart.
+                    logger.exception("Readiness check raised for %s", measure_id)
+                    verdict = ReadinessVerdict(state=ReadinessState.unknown, error=f"Check failed: {exc}")
+            async with write_lock:
+                await _store_verdict(session, mcs_id, measure_id, version, verdict)
+
+        await asyncio.gather(*(one(mid, ver) for mid, ver in measures))
+
+    logger.info("Readiness sweep complete", extra={"mcs_id": mcs_id, "measures": len(measures)})

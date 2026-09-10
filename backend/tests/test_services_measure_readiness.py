@@ -4,6 +4,19 @@ import pytest
 import pytest_asyncio
 
 
+class _SessionCtx:
+    """Async-context wrapper that yields the test session without closing it."""
+
+    def __init__(self, session):
+        self._session = session
+
+    async def __aenter__(self):
+        return self._session
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+
 @pytest_asyncio.fixture
 async def mcs_row(test_session):
     """A writable MCS row to hang readiness rows off."""
@@ -573,3 +586,146 @@ async def test_check_ignores_a_top_level_warning_only_outcome():
         transport=httpx.MockTransport(handler),
     )
     assert verdict.state is not ReadinessState.not_ready
+
+
+async def test_claim_unchecked_only_claims_measures_with_no_row(test_session, mcs_row):
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+    from app.services.measure_readiness import claim_unchecked
+
+    test_session.add(
+        MeasureReadiness(mcs_id=mcs_row.id, measure_id="CMS122", measure_version="0.5.000", state=ReadinessState.ready)
+    )
+    await test_session.commit()
+
+    claimed = await claim_unchecked(
+        test_session, mcs_row.id, [("CMS122", "0.5.000"), ("CMS124", "1.0.000"), ("CMS125", "")]
+    )
+    assert sorted(claimed) == [("CMS124", "1.0.000"), ("CMS125", "")]
+
+
+async def test_claim_unchecked_writes_checking_rows_so_repeat_loads_do_not_requeue(test_session, mcs_row):
+    """The claim IS the de-duplication guard.
+
+    GET /measures kicks a sweep for unchecked measures. Without a synchronous
+    `checking` row, every page refresh during a 60s sweep queues another one.
+    """
+    from app.services.measure_readiness import claim_unchecked
+
+    first = await claim_unchecked(test_session, mcs_row.id, [("CMS124", "1.0.000")])
+    second = await claim_unchecked(test_session, mcs_row.id, [("CMS124", "1.0.000")])
+    assert first == [("CMS124", "1.0.000")]
+    assert second == []
+
+
+async def test_invalidate_mcs_removes_only_that_connections_rows(test_session, mcs_row):
+    """Rows for a second, unrelated MCS must survive.
+
+    `mcs_id` carries a real FK to `mcs_configs`, so the second row needs a real
+    connection row of its own rather than an arbitrary id — a fabricated id
+    would just fail the FK constraint the test never gets to exercise.
+    """
+    from sqlalchemy import select
+
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+    from app.services.measure_readiness import invalidate_mcs
+
+    other_mcs = MCSConfig(
+        name="Other MCS",
+        mcs_url="https://other-mcs.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=False,
+        is_default=False,
+        is_read_only=False,
+        request_timeout_seconds=30,
+    )
+    test_session.add(other_mcs)
+    await test_session.commit()
+    await test_session.refresh(other_mcs)
+
+    test_session.add(
+        MeasureReadiness(mcs_id=mcs_row.id, measure_id="CMS122", measure_version="1", state=ReadinessState.ready)
+    )
+    test_session.add(
+        MeasureReadiness(mcs_id=other_mcs.id, measure_id="CMS122", measure_version="1", state=ReadinessState.ready)
+    )
+    await test_session.commit()
+
+    removed = await invalidate_mcs(test_session, mcs_row.id)
+    assert removed == 1
+    remaining = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert [r.mcs_id for r in remaining] == [other_mcs.id]
+
+
+async def test_run_sweep_writes_a_verdict_per_measure(test_session, mcs_row, monkeypatch):
+    from sqlalchemy import select
+
+    import app.services.measure_readiness as svc
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    async def fake_check(mcs_url, measure_id, **kwargs):
+        if measure_id == "CMS122":
+            return svc.ReadinessVerdict(
+                state=ReadinessState.not_ready,
+                missing_libraries=["Status 1.15.000"],
+                error="Could not load source for library Status, version 1.15.000, namespace uri null.",
+                duration_ms=11442,
+            )
+        return svc.ReadinessVerdict(state=ReadinessState.ready, duration_ms=6167)
+
+    monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
+    monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
+
+    await svc.run_sweep(mcs_row.id, [("CMS122", "0.5.000"), ("CMS124", "1.0.000")])
+
+    rows = {r.measure_id: r for r in (await test_session.execute(select(MeasureReadiness))).scalars().all()}
+    assert rows["CMS122"].state is ReadinessState.not_ready
+    assert rows["CMS122"].missing_libraries == ["Status 1.15.000"]
+    assert rows["CMS122"].checked_at is not None
+    assert rows["CMS124"].state is ReadinessState.ready
+
+
+async def test_run_sweep_respects_the_concurrency_cap(test_session, mcs_row, monkeypatch):
+    """fhir_client.py:371-375 records this operation OOM-killing the engine."""
+    import asyncio
+
+    import app.services.measure_readiness as svc
+    from app.models.measure_readiness import ReadinessState
+
+    in_flight = 0
+    peak = 0
+
+    async def fake_check(mcs_url, measure_id, **kwargs):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return svc.ReadinessVerdict(state=ReadinessState.ready)
+
+    monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
+    monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
+
+    await svc.run_sweep(mcs_row.id, [(f"CMS{i}", "1.0.0") for i in range(8)])
+    assert peak <= 2
+
+
+async def test_run_sweep_leaves_no_row_stuck_in_checking_when_a_check_explodes(test_session, mcs_row, monkeypatch):
+    """A raising check must not leave a spinner that only a restart clears."""
+    from sqlalchemy import select
+
+    import app.services.measure_readiness as svc
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    async def fake_check(mcs_url, measure_id, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
+    monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
+
+    await svc.run_sweep(mcs_row.id, [("CMS122", "0.5.000")])
+
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert rows[0].state is ReadinessState.unknown
+    assert "boom" in (rows[0].error or "")
