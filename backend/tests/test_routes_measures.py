@@ -2,7 +2,7 @@
 
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
@@ -591,18 +591,40 @@ async def test_delete_measure_credential_failure_is_not_reported_as_not_found(cl
 
 
 async def test_get_measures_reports_unknown_and_kicks_a_sweep(client, active_mcs):
-    """First view: no cached rows, so every measure reads `checking`."""
+    """First view: no cached rows, so every measure reads `checking`, and
+    exactly one sweep is fired for the newly claimed measure.
+
+    A bare `lambda` cannot prove a sweep was fired: `claim_unchecked` writes
+    the `checking` row synchronously regardless of whether
+    `asyncio.create_task(run_sweep(...))` ever runs, so a route that dropped
+    that call entirely would still pass a test that only inspects the row.
+    `create_task` is therefore a spy here (still closing the coroutine so
+    Python does not warn it was never awaited), and its call count is checked.
+    """
     bundle = {
         "resourceType": "Bundle",
         "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
     }
+    create_task = Mock(side_effect=lambda coro: coro.close())
     with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
-        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=lambda coro: coro.close())):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
             resp = await client.get("/measures")
 
     assert resp.status_code == 200
     measure = resp.json()["measures"][0]
     assert measure["readiness"]["state"] == "checking"
+    create_task.assert_called_once()
+
+    # De-duplication guarantee: a second view of the same still-`checking`
+    # measure must not fire a second sweep.
+    create_task.reset_mock()
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
+            resp2 = await client.get("/measures")
+
+    assert resp2.status_code == 200
+    assert resp2.json()["measures"][0]["readiness"]["state"] == "checking"
+    create_task.assert_not_called()
 
 
 async def test_get_measures_serves_a_cached_verdict(client, active_mcs, test_session):
@@ -692,14 +714,63 @@ async def test_refresh_accepts_and_marks_everything_checking(client, active_mcs,
             {"resource": {"resourceType": "Measure", "id": "CMS124", "version": "1.0.000", "status": "active"}},
         ],
     }
+    create_task = Mock(side_effect=lambda coro: coro.close())
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
+            resp = await client.post("/measures/readiness/refresh")
+
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "accepted"
+    assert resp.json()["measures"] == 2
+    create_task.assert_called_once()
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert {r.state for r in rows} == {ReadinessState.checking}
+
+
+async def test_refresh_reports_skipped_when_there_is_no_active_mcs_row(client):
+    """The `mcs.id == 0` fallback (no active `MCSConfig` row) writes nothing.
+
+    The response must say so rather than claiming a real, successful refresh
+    that never actually queued anything — `GET /measures` renders `unknown` in
+    exactly this state, and the two endpoints must agree.
+    """
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    create_task = Mock(side_effect=lambda coro: coro.close())
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
+            resp = await client.post("/measures/readiness/refresh")
+
+    assert resp.status_code == 202
+    assert resp.json() == {"status": "skipped", "measures": 0}
+    create_task.assert_not_called()
+
+
+async def test_refresh_succeeds_on_a_read_only_mcs(client, read_only_mcs, test_session):
+    """The whole feature is read-only against the measure server: a refresh
+    writes nothing to the MCS, so it must succeed even when the connection is
+    marked read-only. This locks in that a future "be consistent" refactor
+    re-adding the `_read_only_outcome` guard would break the connectathon
+    (BYO CDR / shared read-only server) case the feature targets.
+    """
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
     with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
         with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=lambda coro: coro.close())):
             resp = await client.post("/measures/readiness/refresh")
 
     assert resp.status_code == 202
-    assert resp.json()["measures"] == 2
+    assert resp.json()["status"] == "accepted"
     rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
-    assert {r.state for r in rows} == {ReadinessState.checking}
+    assert len(rows) == 1
 
 
 async def test_measure_with_no_version_gets_a_readiness_object(client, active_mcs):

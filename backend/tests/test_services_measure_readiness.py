@@ -786,3 +786,53 @@ async def test_mark_all_checking_resets_existing_verdicts_and_adds_missing_rows(
     rows = {r.measure_id: r for r in (await test_session.execute(select(MeasureReadiness))).scalars().all()}
     assert set(rows) == {"CMS122", "CMS124"}
     assert all(r.state is ReadinessState.checking for r in rows.values())
+
+
+async def test_claim_unchecked_survives_a_lost_claim_race(test_session, mcs_row):
+    """A lost claim race must not raise, and must not cost non-colliding measures.
+
+    True concurrency needs two separate sessions/connections racing on the same
+    (mcs_id, measure_id, measure_version); this single-connection SQLite fixture
+    can't produce that directly. The same collision — a candidate that passes
+    the initial "not yet claimed" check but hits `uq_measure_readiness_key` at
+    insert time — is reproduced deterministically by listing the same key
+    twice in one call: the first occurrence claims and flushes for real, so the
+    second collides exactly as a genuine second requester would.
+    """
+    from app.services.measure_readiness import claim_unchecked
+
+    claimed = await claim_unchecked(
+        test_session,
+        mcs_row.id,
+        [("CMS124", "1.0.000"), ("CMS124", "1.0.000"), ("CMS999", "2.0.000")],
+    )
+    assert claimed == [("CMS124", "1.0.000"), ("CMS999", "2.0.000")]
+
+
+async def test_claim_unchecked_survives_a_genuine_concurrent_race(test_engine, mcs_row):
+    """Best-effort attempt at a *genuine* race: two independent sessions bound
+    to the same engine, both trying to claim the same never-before-seen
+    measure concurrently via `asyncio.gather`.
+
+    Whether the two coroutines actually interleave (both pass the SELECT
+    before either INSERTs) depends on asyncio/aiosqlite scheduling and is not
+    guaranteed run to run. The assertion is written to hold either way: across
+    both calls, the measure must be claimed exactly once and neither call may
+    raise — that is true whether a real collision happened this run or one
+    call's INSERT simply completed, and was visible, before the other's SELECT.
+    """
+    import asyncio
+
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+    from app.services.measure_readiness import claim_unchecked
+
+    session_factory = async_sessionmaker(test_engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def attempt():
+        async with session_factory() as session:
+            return await claim_unchecked(session, mcs_row.id, [("CMS777", "3.0.000")])
+
+    results = await asyncio.gather(attempt(), attempt())
+    combined = results[0] + results[1]
+    assert combined == [("CMS777", "3.0.000")]

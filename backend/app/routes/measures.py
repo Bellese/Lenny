@@ -437,8 +437,15 @@ async def refresh_readiness(
         if (r := entry.get("resource", {})).get("resourceType") == "Measure" and r.get("id")
     ]
     # See the matching guard in `get_measures`: `mcs.id == 0` means there is no
-    # real MCSConfig row to write `measure_readiness` rows against.
-    if mcs.id:
-        await mark_all_checking(session, mcs.id, keys)
-        asyncio.create_task(run_sweep(mcs.id, keys))
+    # real MCSConfig row to write `measure_readiness` rows against. Nothing is
+    # queued in that case, so the response must say `skipped`, not `accepted`
+    # — an identical 202 body for both would tell the caller "N measures
+    # queued" when N is merely how many measures exist and nothing happened.
+    # `GET /measures` renders `unknown` (not `checking`) in this same state;
+    # the two endpoints must not disagree about what occurred.
+    if not mcs.id:
+        return {"status": "skipped", "measures": 0}
+
+    await mark_all_checking(session, mcs.id, keys)
+    asyncio.create_task(run_sweep(mcs.id, keys))
     return {"status": "accepted", "measures": len(keys)}

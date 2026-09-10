@@ -19,6 +19,7 @@ import httpx
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
 from sqlalchemy import update as sa_update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -281,6 +282,23 @@ async def claim_unchecked(session: AsyncSession, mcs_id: int, measures: list[tup
 
     Writing the row synchronously, before the sweep starts, is what stops a page
     refresh during a 60s sweep from queueing a second one.
+
+    The SELECT-then-INSERT above is not atomic: two concurrent callers (two
+    `GET /measures` requests on separate sessions) can both read a measure as
+    unclaimed and both attempt to insert it, and one loses to
+    `uq_measure_readiness_key`. That must never surface as an error — it must
+    never abort the whole batch (a page load with 9 uncontended measures and 1
+    collision must still claim and sweep the other 8), and it must never look
+    like an MCS connectivity failure to the route above.
+
+    Each candidate is therefore inserted inside its own SAVEPOINT
+    (`begin_nested`), flushed immediately so a unique-constraint violation
+    surfaces right there rather than at the final `commit()` where every
+    savepoint in the batch would already be tangled together. A failing
+    savepoint rolls back to before its own INSERT and moves on to the next
+    candidate; every other row's SAVEPOINT is independent and still commits.
+    Losing the race is not a problem for the loser: whoever won already
+    fired the sweep for that measure.
     """
     existing = set(
         (
@@ -291,13 +309,23 @@ async def claim_unchecked(session: AsyncSession, mcs_id: int, measures: list[tup
             )
         ).all()
     )
-    claimed = [(mid, ver) for mid, ver in measures if (mid, ver) not in existing]
-    for measure_id, version in claimed:
-        session.add(
-            MeasureReadiness(
-                mcs_id=mcs_id, measure_id=measure_id, measure_version=version, state=ReadinessState.checking
-            )
-        )
+    candidates = [(mid, ver) for mid, ver in measures if (mid, ver) not in existing]
+    claimed: list[tuple[str, str]] = []
+    for measure_id, version in candidates:
+        try:
+            async with session.begin_nested():
+                session.add(
+                    MeasureReadiness(
+                        mcs_id=mcs_id, measure_id=measure_id, measure_version=version, state=ReadinessState.checking
+                    )
+                )
+                await session.flush()
+        except IntegrityError:
+            # Lost the race for this one row: another caller claimed
+            # (mcs_id, measure_id, version) between our SELECT and this INSERT.
+            # It already fired its own sweep, so there is nothing more to do.
+            continue
+        claimed.append((measure_id, version))
     if claimed:
         await session.commit()
     return claimed
