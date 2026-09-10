@@ -244,3 +244,254 @@ def test_extract_valueset_canonicals_excludes_unlisted_code_systems():
     assert extract_valueset_canonicals(library) == [
         "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.1003"
     ]
+
+
+def _dr_library(valuesets: list[str]) -> dict:
+    return {
+        "resourceType": "Library",
+        "dataRequirement": [{"codeFilter": [{"valueSet": vs}]} for vs in valuesets],
+    }
+
+
+def _vs_bundle(urls: list[str]) -> dict:
+    return {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "total": len(urls),
+        "entry": [{"resource": {"resourceType": "ValueSet", "url": u}} for u in urls],
+    }
+
+
+async def test_check_returns_ready_when_compiled_and_valuesets_present():
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "$data-requirements" in str(request.url):
+            return httpx.Response(200, json=_dr_library(["http://vs/a", "http://vs/b"]))
+        return httpx.Response(200, json=_vs_bundle(["http://vs/a", "http://vs/b"]))
+
+    transport = httpx.MockTransport(handler)
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+    )
+    assert verdict.state is ReadinessState.ready
+    assert verdict.missing_valuesets == []
+    assert verdict.error is None
+
+
+async def test_check_returns_not_ready_on_500_naming_a_missing_library():
+    """The motivating failure: HTTP 500 + HAPI-0389 from the connectathon server."""
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    outcome = {
+        "resourceType": "OperationOutcome",
+        "issue": [
+            {
+                "severity": "error",
+                "code": "processing",
+                "diagnostics": (
+                    "HAPI-0389: Failed to call access method: java.lang.RuntimeException: "
+                    "Could not load source for library Status, version 1.15.000, namespace uri null."
+                ),
+            }
+        ],
+    }
+    transport = httpx.MockTransport(lambda request: httpx.Response(500, json=outcome))
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+    )
+    assert verdict.state is ReadinessState.not_ready
+    assert verdict.missing_libraries == ["Status 1.15.000"]
+    assert "Could not load source for library Status" in verdict.error
+
+
+async def test_check_returns_not_ready_on_200_carrying_an_error_outcome():
+    """A 2xx is not proof of success — same shape #415 fixed for submit_data."""
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    outcome = {
+        "resourceType": "OperationOutcome",
+        "issue": [{"severity": "error", "code": "exception", "diagnostics": "Measure is not valid"}],
+    }
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=outcome))
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+    )
+    assert verdict.state is ReadinessState.not_ready
+    assert verdict.error == "Measure is not valid"
+
+
+async def test_check_ignores_a_warning_only_outcome():
+    """Warning/information outcomes are advisory and accompany real responses."""
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    library = _dr_library(["http://vs/a"])
+    library["contained"] = [
+        {
+            "resourceType": "OperationOutcome",
+            "issue": [{"severity": "warning", "code": "informational", "diagnostics": "heads up"}],
+        }
+    ]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "$data-requirements" in str(request.url):
+            return httpx.Response(200, json=library)
+        return httpx.Response(200, json=_vs_bundle(["http://vs/a"]))
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert verdict.state is ReadinessState.ready
+
+
+async def test_check_returns_not_ready_when_valuesets_are_absent():
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "$data-requirements" in str(request.url):
+            return httpx.Response(200, json=_dr_library(["http://vs/a", "http://vs/b", "http://vs/c"]))
+        return httpx.Response(200, json=_vs_bundle(["http://vs/b"]))
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert verdict.state is ReadinessState.not_ready
+    assert verdict.missing_valuesets == ["http://vs/a", "http://vs/c"]
+
+
+async def test_check_returns_unknown_on_timeout_not_not_ready():
+    """THE load-bearing test.
+
+    $data-requirements measured at 6-11s. If a timeout rendered red, one slow
+    server would mark every measure broken and the indicator would be noise.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("timed out", request=request)
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert verdict.state is ReadinessState.unknown
+    assert verdict.error is not None
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_check_returns_unknown_when_authentication_is_refused(status):
+    """A credential problem is ours, not the measure's."""
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(status, json={}))
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+    )
+    assert verdict.state is ReadinessState.unknown
+
+
+async def test_check_returns_unknown_when_the_valueset_query_itself_fails():
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "$data-requirements" in str(request.url):
+            return httpx.Response(200, json=_dr_library(["http://vs/a"]))
+        raise httpx.ConnectError("connection refused", request=request)
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert verdict.state is ReadinessState.unknown
+
+
+async def test_check_sends_no_period_parameters():
+    """Library resolution does not depend on a measurement period.
+
+    The DEQM path (fhir_client.py:434) calls it bare; probe_mcs_data_requirements
+    hardcodes 2024 dates. This spec follows the DEQM path.
+    """
+    import httpx
+
+    from app.services.measure_readiness import check_measure_readiness
+
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "$data-requirements" in str(request.url):
+            seen["url"] = str(request.url)
+            return httpx.Response(200, json=_dr_library([]))
+        return httpx.Response(200, json=_vs_bundle([]))
+
+    await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert "periodStart" not in seen["url"]
+    assert "periodEnd" not in seen["url"]
+
+
+async def test_find_missing_valuesets_chunks_long_lists():
+    """URL length is finite; 23 canonicals must not become one query."""
+    import httpx
+
+    from app.services.measure_readiness import find_missing_valuesets
+
+    present = [f"http://vs/{i}" for i in range(25)]
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json=_vs_bundle(present))
+
+    missing = await find_missing_valuesets(
+        "https://mcs.example.com/fhir",
+        present,
+        auth_headers={},
+        timeout=5.0,
+        chunk_size=10,
+        transport=httpx.MockTransport(handler),
+    )
+    assert missing == []
+    assert len(calls) == 3  # 25 canonicals at 10 per chunk

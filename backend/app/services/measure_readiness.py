@@ -10,11 +10,15 @@ Lenny parses no CQL. The server computes the dependency closure and returns it.
 
 import logging
 import re
+import time
+from dataclasses import dataclass, field
 
+import httpx
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.measure_readiness import MeasureReadiness, ReadinessState
+from app.services.fhir_errors import FhirOperationOutcome, hint_for_network_exception
 
 logger = logging.getLogger(__name__)
 
@@ -85,3 +89,157 @@ async def reclaim_stranded_checks(session: AsyncSession) -> int:
     )
     await session.commit()
     return result.rowcount or 0
+
+
+@dataclass
+class ReadinessVerdict:
+    """The outcome of one measure's check. Maps 1:1 onto a `MeasureReadiness` row."""
+
+    state: ReadinessState
+    missing_libraries: list[str] = field(default_factory=list)
+    missing_valuesets: list[str] = field(default_factory=list)
+    error: str | None = None
+    duration_ms: int = 0
+
+
+def _error_diagnostic(outcome: FhirOperationOutcome | None) -> str | None:
+    """The first error/fatal diagnostic, or None if the outcome is only advisory.
+
+    Warning and information issues accompany successful responses; treating them
+    as failures is the naive mistake #415 documented on the submit_data path.
+    """
+    if outcome is None:
+        return None
+    for issue in outcome.issues:
+        if issue.severity in ("error", "fatal"):
+            return issue.diagnostics or "Server reported an error with no diagnostic."
+    return None
+
+
+async def find_missing_valuesets(
+    mcs_url: str,
+    canonicals: list[str],
+    *,
+    auth_headers: dict[str, str],
+    timeout: float,
+    chunk_size: int = 10,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> list[str]:
+    """Return the subset of `canonicals` the MCS does not hold.
+
+    Chunked because a measure's closure runs to two dozen URLs and a single
+    comma-joined query would outgrow practical URL limits. Raises on transport
+    failure; the caller maps that to `unknown` rather than `not_ready`.
+    """
+    if not canonicals:
+        return []
+
+    present: set[str] = set()
+    async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+        for start in range(0, len(canonicals), chunk_size):
+            chunk = canonicals[start : start + chunk_size]
+            resp = await client.get(
+                f"{mcs_url}/ValueSet",
+                params={"url": ",".join(chunk), "_elements": "url", "_count": str(len(chunk))},
+                headers=auth_headers,
+            )
+            resp.raise_for_status()
+            for entry in resp.json().get("entry") or []:
+                url = (entry.get("resource") or {}).get("url")
+                if url:
+                    present.add(url.split("|")[0])
+
+    return [c for c in canonicals if c not in present]
+
+
+async def check_measure_readiness(
+    mcs_url: str,
+    measure_id: str,
+    *,
+    auth_headers: dict[str, str],
+    timeout: float,
+    transport: httpx.AsyncBaseTransport | None = None,
+) -> ReadinessVerdict:
+    """Decide whether `measure_id` can be evaluated on the MCS at `mcs_url`.
+
+    Read-only. Never raises: every failure mode becomes a verdict, because the
+    caller's job is to write a row, not to propagate an exception.
+
+    No period parameters are sent. Whether the Library graph resolves does not
+    depend on a measurement period, and the DEQM path already calls the
+    operation bare.
+    """
+    started = time.monotonic()
+
+    def elapsed() -> int:
+        return round((time.monotonic() - started) * 1000)
+
+    dr_url = f"{mcs_url}/Measure/{measure_id}/$data-requirements"
+    try:
+        async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+            resp = await client.get(dr_url, headers=auth_headers)
+    except Exception as exc:
+        return ReadinessVerdict(
+            state=ReadinessState.unknown, error=hint_for_network_exception(exc), duration_ms=elapsed()
+        )
+
+    # Authentication failures are OUR problem, not the measure's. Checked before
+    # the general non-2xx branch, which would otherwise call them not_ready.
+    if resp.status_code in (401, 403):
+        auth_error = (
+            f"HTTP {resp.status_code}: the measure server refused the request. Check this connection's credentials."
+        )
+        return ReadinessVerdict(state=ReadinessState.unknown, error=auth_error, duration_ms=elapsed())
+
+    outcome = FhirOperationOutcome.from_response(resp)
+    diagnostic = _error_diagnostic(outcome)
+
+    if not resp.is_success:
+        message = diagnostic or f"HTTP {resp.status_code} from $data-requirements."
+        return ReadinessVerdict(
+            state=ReadinessState.not_ready,
+            missing_libraries=extract_missing_libraries(message),
+            error=message,
+            duration_ms=elapsed(),
+        )
+
+    # A 2xx can still carry an error OperationOutcome instead of the Library.
+    if diagnostic:
+        return ReadinessVerdict(
+            state=ReadinessState.not_ready,
+            missing_libraries=extract_missing_libraries(diagnostic),
+            error=diagnostic,
+            duration_ms=elapsed(),
+        )
+
+    try:
+        library = resp.json()
+    except Exception:
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error="$data-requirements returned a body that is not JSON.",
+            duration_ms=elapsed(),
+        )
+
+    canonicals = extract_valueset_canonicals(library)
+    try:
+        missing = await find_missing_valuesets(
+            mcs_url, canonicals, auth_headers=auth_headers, timeout=timeout, transport=transport
+        )
+    except Exception as exc:
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error=f"Could not verify value sets: {hint_for_network_exception(exc)}",
+            duration_ms=elapsed(),
+        )
+
+    if missing:
+        noun = "value set" if len(missing) == 1 else "value sets"
+        return ReadinessVerdict(
+            state=ReadinessState.not_ready,
+            missing_valuesets=missing,
+            error=f"{len(missing)} {noun} referenced by this measure are not on this server.",
+            duration_ms=elapsed(),
+        )
+
+    return ReadinessVerdict(state=ReadinessState.ready, duration_ms=elapsed())
