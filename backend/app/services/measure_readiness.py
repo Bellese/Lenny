@@ -23,7 +23,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.models.measure_readiness import MeasureReadiness, ReadinessState
-from app.services.fhir_errors import FhirOperationOutcome, hint_for_network_exception
+from app.services.fhir_client import _same_origin
+from app.services.fhir_errors import FhirOperationOutcome, hint_for_network_exception, sanitize_url
 
 logger = logging.getLogger(__name__)
 
@@ -147,6 +148,27 @@ def _next_page_url(bundle: dict) -> str | None:
     return None
 
 
+class UnsafePaginationLinkError(RuntimeError):
+    """Raised when a ValueSet search's `next` link points off the MCS's origin.
+
+    The MCS here is third-party by design (connectathon servers, BYO CDRs), so
+    its response is not trusted input. `_same_origin` (fhir_client.py) is what
+    blocks the SSRF: without it, a hostile or misconfigured server could point
+    `next` at an internal host and this function would fetch it WITH
+    `auth_headers` attached, handing over the MCS connection's credentials.
+
+    Raised rather than silently stopping the page walk, unlike the other
+    `_same_origin` call sites in `fhir_client.py`: those return best-effort
+    partial data, but this function's result is a MISSING list. Silently
+    truncating it would report every canonical on the unread remainder as
+    absent — a false `not_ready`, which incorrectly tells an operator their
+    working server is broken. `check_measure_readiness` already raises on
+    transport failure and maps it to `unknown`; this reuses that path so an
+    origin-mismatch produces the same honest "we don't know" instead of a
+    wrong verdict in either direction.
+    """
+
+
 async def find_missing_valuesets(
     mcs_url: str,
     canonicals: list[str],
@@ -160,7 +182,8 @@ async def find_missing_valuesets(
 
     Chunked because a measure's closure runs to two dozen URLs and a single
     comma-joined query would outgrow practical URL limits. Raises on transport
-    failure; the caller maps that to `unknown` rather than `not_ready`.
+    failure, and on an off-origin `next` link (see `UnsafePaginationLinkError`);
+    the caller maps both to `unknown` rather than `not_ready`.
 
     Version suffixes are stripped from `canonicals` before comparison, on the
     same `|` convention as the server-returned URLs — callers are not required
@@ -191,7 +214,17 @@ async def find_missing_valuesets(
                         present.add(url.split("|")[0])
                 # A `next` link already carries the whole query, filter included;
                 # re-appending `params` would duplicate it.
-                next_url = _next_page_url(bundle)
+                candidate = _next_page_url(bundle)
+                if candidate is not None and not _same_origin(mcs_url, candidate):
+                    logger.warning(
+                        "SSRF: readiness ValueSet pagination next link rejected (origin mismatch)",
+                        extra={"mcs_url": sanitize_url(mcs_url), "next_url": sanitize_url(candidate)},
+                    )
+                    raise UnsafePaginationLinkError(
+                        f"The measure server returned a ValueSet page link pointing to a different "
+                        f"origin than {sanitize_url(mcs_url)}; refusing to follow it with credentials attached."
+                    )
+                next_url = candidate
                 params = None
                 if next_url is None:
                     break
@@ -296,6 +329,15 @@ async def check_measure_readiness(
     try:
         missing = await find_missing_valuesets(
             mcs_url, canonicals, auth_headers=auth_headers, timeout=timeout, transport=transport
+        )
+    except UnsafePaginationLinkError as exc:
+        # A distinct branch so the operator sees the real reason (a rejected
+        # off-origin next link) instead of `hint_for_network_exception`'s
+        # generic transport-failure text, which does not apply here.
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error=f"Could not verify value sets: {exc}",
+            duration_ms=elapsed(),
         )
     except Exception as exc:
         return ReadinessVerdict(

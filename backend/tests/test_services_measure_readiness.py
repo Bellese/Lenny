@@ -649,6 +649,80 @@ async def test_find_missing_valuesets_stops_following_next_links_eventually():
     assert len(calls) == _VALUESET_MAX_PAGES
 
 
+async def test_find_missing_valuesets_rejects_an_off_origin_next_link():
+    """The SSRF this is guarding against: a hostile/misconfigured MCS returns a
+    `next` link pointing at a different host than the one Lenny was asked to
+    query. Following it would hand that host `auth_headers` — the MCS
+    connection's bearer/basic credentials.
+
+    A truncated page walk cannot just stop and return whatever it has seen:
+    `find_missing_valuesets`'s result is a MISSING list, so silently stopping
+    would report every canonical on the unread remainder (here, the one that
+    only the second, off-origin page would have confirmed present) as absent —
+    a false `not_ready`. Raising instead, and letting the caller map that to
+    `unknown`, is the shape this codebase already uses for a transport failure
+    on this same call.
+    """
+    import httpx
+
+    from app.services.measure_readiness import UnsafePaginationLinkError, find_missing_valuesets
+
+    internal_calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "internal-metadata.evil.example" in str(request.url):
+            internal_calls.append(request)
+            return httpx.Response(200, json=_vs_bundle(["http://vs/b"]))
+        body = _vs_bundle(["http://vs/a"])
+        body["link"] = [{"relation": "next", "url": "http://internal-metadata.evil.example/ValueSet?_offset=1"}]
+        return httpx.Response(200, json=body)
+
+    with pytest.raises(UnsafePaginationLinkError):
+        await find_missing_valuesets(
+            "https://mcs.example.com/fhir",
+            ["http://vs/a", "http://vs/b"],
+            auth_headers={"Authorization": "Bearer super-secret-token"},
+            timeout=5.0,
+            transport=httpx.MockTransport(handler),
+        )
+
+    # The off-origin host must never have been reached — the guard has to
+    # fire BEFORE the credentialed request, not merely be noted afterwards.
+    assert internal_calls == []
+
+
+async def test_check_returns_unknown_not_not_ready_when_the_next_link_points_off_origin():
+    """End-to-end: `check_measure_readiness` must not turn an SSRF rejection
+    into a false `not_ready`. The measure server here holds BOTH value sets —
+    `b` only becomes visible on the (rejected) second page — so a version of
+    this code that stopped paging and reported the gap would call this
+    `not_ready` with `http://vs/b` listed missing, even though it is present.
+    `unknown` is the only verdict that is honest about what happened.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "$data-requirements" in str(request.url):
+            return httpx.Response(200, json=_dr_library(["http://vs/a", "http://vs/b"]))
+        body = _vs_bundle(["http://vs/a"])
+        body["link"] = [{"relation": "next", "url": "http://internal-metadata.evil.example/ValueSet?_offset=1"}]
+        return httpx.Response(200, json=body)
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert verdict.state is ReadinessState.unknown
+    assert verdict.missing_valuesets == []
+    assert "different origin" in (verdict.error or "") or "origin" in (verdict.error or "")
+
+
 async def test_check_returns_unknown_when_the_body_is_json_but_not_an_object():
     """A 2xx body of `null` or a bare array parses fine but is not a Library.
 
