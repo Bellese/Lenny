@@ -104,6 +104,15 @@ export function deleteMeasure(id) {
   });
 }
 
+// Queues a readiness sweep against the active MCS. Deliberately allowed on a
+// read-only connection — readiness checking reads the MCS, it doesn't write
+// to it. Returns 202 with { status: 'accepted' | 'skipped', measures: N }.
+export function refreshMeasureReadiness() {
+  return request('/measures/readiness/refresh', {
+    method: 'POST',
+  });
+}
+
 // Groups
 export function getGroups() {
   return request('/jobs/groups');

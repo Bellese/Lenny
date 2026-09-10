@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import styles from './MeasuresPage.module.css';
-import { deleteMeasure, getMeasures, uploadMeasure } from '../api/client';
+import { deleteMeasure, getMeasures, refreshMeasureReadiness, uploadMeasure } from '../api/client';
 import { parseFhirError } from '../api/fhirError';
 import { useToast } from '../components/Toast';
 import KebabMenu from '../components/KebabMenu';
@@ -58,14 +58,17 @@ const READINESS_LABELS = {
   unknown: 'Not checked',
 };
 
-function ReadinessBadge({ readiness, expanded, onToggle }) {
+function ReadinessBadge({ readiness, expanded, onToggle, measureName }) {
   const state = readiness?.state || 'unknown';
   const label = READINESS_LABELS[state] || READINESS_LABELS.unknown;
 
   if (state !== 'not_ready') {
-    const cls =
-      state === 'ready' ? styles.badgeOk : state === 'checking' ? styles.badgeDraft : styles.badge;
-    return <span className={`${styles.badge} ${cls}`}>{label}</span>;
+    // Only ready/checking add a modifier class on top of the base badge —
+    // anything else (unknown) renders the base class alone, not
+    // `${styles.badge} ${styles.badge}` (Task 7 review Fix 2).
+    if (state === 'ready') return <span className={`${styles.badge} ${styles.badgeOk}`}>{label}</span>;
+    if (state === 'checking') return <span className={`${styles.badge} ${styles.badgeDraft}`}>{label}</span>;
+    return <span className={styles.badge}>{label}</span>;
   }
 
   return (
@@ -73,7 +76,7 @@ function ReadinessBadge({ readiness, expanded, onToggle }) {
       type="button"
       className={`${styles.badge} ${styles.badgeBad} ${styles.readinessToggle}`}
       aria-expanded={expanded}
-      aria-label="Readiness details for this measure"
+      aria-label={`Readiness details for ${measureName}`}
       onClick={onToggle}
     >
       {label}
@@ -121,6 +124,7 @@ export default function MeasuresPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
   const [confirm, setConfirm] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
   const fileInputRef = useRef(null);
@@ -128,8 +132,8 @@ export default function MeasuresPage() {
   const { query } = useSearch();
   const { mcs } = useConnection();
 
-  const loadMeasures = useCallback(async () => {
-    setLoading(true);
+  const loadMeasures = useCallback(async ({ quiet = false } = {}) => {
+    if (!quiet) setLoading(true);
     setError(null);
     try {
       const data = await getMeasures();
@@ -143,7 +147,7 @@ export default function MeasuresPage() {
       const { issues, errorDetails } = parseFhirError(err.body);
       setError({ message: err.message || 'Cannot reach measure engine', issues, errorDetails });
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   }, []);
 
@@ -152,7 +156,29 @@ export default function MeasuresPage() {
   // different one in Settings.
   useEffect(() => { loadMeasures(); }, [loadMeasures, mcs.id]);
 
+  // Poll only while a sweep is actually running. A verdict is cached and
+  // event-invalidated, so there is nothing to poll for once every row has
+  // settled — an unconditional interval would be steady load for no news.
+  const anyChecking = measures.some(m => m.readiness?.state === 'checking');
+  useEffect(() => {
+    if (!anyChecking) return undefined;
+    const timer = setInterval(() => { loadMeasures({ quiet: true }); }, 5000);
+    return () => clearInterval(timer);
+  }, [anyChecking, loadMeasures]);
+
   const handleUploadClick = () => fileInputRef.current?.click();
+
+  const handleRecheck = async () => {
+    setRechecking(true);
+    try {
+      await refreshMeasureReadiness();
+      await loadMeasures({ quiet: true });
+    } catch (err) {
+      toast.error(`Could not start readiness check: ${err.message || 'Request failed'}`);
+    } finally {
+      setRechecking(false);
+    }
+  };
 
   const handleFileChange = async (e) => {
     const file = e.target.files?.[0];
@@ -208,6 +234,14 @@ export default function MeasuresPage() {
           )}
         </div>
         <div className={styles.headerActions}>
+          <button
+            className={styles.retryBtn}
+            onClick={handleRecheck}
+            disabled={rechecking}
+            aria-busy={rechecking}
+          >
+            {rechecking ? 'Checking…' : 'Re-check readiness'}
+          </button>
           <button
             className={styles.btnPrimary}
             onClick={handleUploadClick}
@@ -301,6 +335,7 @@ export default function MeasuresPage() {
                             readiness={readiness}
                             expanded={isExpanded}
                             onToggle={() => setExpandedId(isExpanded ? null : key)}
+                            measureName={getMeasureDisplayName(measure)}
                           />
                         </td>
                         <td data-label="Actions">

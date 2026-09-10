@@ -1,6 +1,6 @@
 import React from 'react';
 import '@testing-library/jest-dom';
-import { render, screen } from '@testing-library/react';
+import { render, screen, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import ConnectionContext from '../contexts/ConnectionContext';
@@ -166,7 +166,12 @@ describe('MeasuresPage — readiness (#434)', () => {
 
   test('expanding a not-ready measure lists what is missing', async () => {
     renderMeasuresPage([measureWith(NOT_READY)]);
-    const badge = await screen.findByRole('button', { name: /readiness details/i });
+    // The accessible name identifies the measure by its display name (#434
+    // Task 7 review Fix 1) — several not-ready rows must not read identically
+    // to a screen reader user tabbing through the table.
+    const badge = await screen.findByRole('button', {
+      name: /Readiness details for Diabetes: Hemoglobin A1c Poor Control/i,
+    });
     await userEvent.click(badge);
 
     expect(await screen.findByText(/Status 1.15.000/)).toBeInTheDocument();
@@ -178,7 +183,11 @@ describe('MeasuresPage — readiness (#434)', () => {
     /* The CQL engine reports one include at a time; the copy must not imply the
        list is exhaustive, or a user fixes one library and is surprised twice. */
     renderMeasuresPage([measureWith(NOT_READY)]);
-    await userEvent.click(await screen.findByRole('button', { name: /readiness details/i }));
+    await userEvent.click(
+      await screen.findByRole('button', {
+        name: /Readiness details for Diabetes: Hemoglobin A1c Poor Control/i,
+      }),
+    );
     expect(screen.getByText(/may reveal another/i)).toBeInTheDocument();
   });
 
@@ -186,5 +195,54 @@ describe('MeasuresPage — readiness (#434)', () => {
     renderMeasuresPage([measureWith(READY)]);
     await screen.findByText(/^Ready$/);
     expect(screen.queryByRole('button', { name: /readiness details/i })).not.toBeInTheDocument();
+  });
+
+  test('the re-check button posts to the refresh endpoint', async () => {
+    api.refreshMeasureReadiness = jest.fn().mockResolvedValue({ status: 'accepted', measures: 1 });
+    renderMeasuresPage([measureWith(NOT_READY)]);
+    await screen.findByText(/Not ready/i);
+
+    // Wrap the click in act() so the handler's chained promises (refresh,
+    // then the quiet reload) resolve inside a tracked act() scope rather
+    // than warning after the test moves on.
+    await act(async () => {
+      await userEvent.click(screen.getByRole('button', { name: /re-check/i }));
+    });
+
+    expect(api.refreshMeasureReadiness).toHaveBeenCalled();
+  });
+
+  test('the page polls while any measure is still checking', async () => {
+    jest.useFakeTimers();
+    try {
+      renderMeasuresPage([measureWith(CHECKING)]);
+      await screen.findByText(/Checking/i);
+      const callsAfterLoad = api.getMeasures.mock.calls.length;
+
+      await act(async () => {
+        jest.advanceTimersByTime(5000);
+      });
+
+      expect(api.getMeasures.mock.calls.length).toBeGreaterThan(callsAfterLoad);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the page stops polling once nothing is checking', async () => {
+    jest.useFakeTimers();
+    try {
+      renderMeasuresPage([measureWith(READY)]);
+      await screen.findByText(/^Ready$/);
+      const callsAfterLoad = api.getMeasures.mock.calls.length;
+
+      await act(async () => {
+        jest.advanceTimersByTime(15000);
+      });
+
+      expect(api.getMeasures.mock.calls.length).toBe(callsAfterLoad);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
