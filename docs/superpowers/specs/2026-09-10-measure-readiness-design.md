@@ -94,10 +94,18 @@ the server* turns a row red; a transport failure, timeout, 401 or 403 yields
 
 Per measure, read-only throughout:
 
-1. `GET {mcs}/Measure/{id}/$data-requirements?periodStart=…&periodEnd=…`
+1. `GET {mcs}/Measure/{id}/$data-requirements` — **no period parameters**
    - Non-2xx, or 2xx carrying an error/fatal `OperationOutcome` → `not_ready`,
      storing the server's diagnostic verbatim.
    - Transport error, timeout, 401, 403 → `unknown`, storing the reason.
+
+   The period is deliberately omitted. Whether the Library graph resolves does not
+   depend on a measurement period, and `_get_data_requirements`
+   (`services/fhir_client.py:434`) already calls the operation bare on the DEQM
+   path, so the parameterless form is proven against HAPI. Note the two existing
+   call sites disagree — `probe_mcs_data_requirements` hardcodes
+   `periodStart=2024-01-01&periodEnd=2024-12-31`. This spec follows the DEQM path.
+
 2. Collect ValueSet canonicals from the returned Library (version suffixes
    stripped at `|`). Query the MCS for their presence, chunked.
    - Any absent → `not_ready`, storing the missing list.
@@ -139,14 +147,17 @@ existing ones.
 `routes/settings.py` for factory-reset and reseed: mark the target rows
 `checking`, commit, then `asyncio.create_task` the sweep.
 
-- **Concurrency capped at 2** via `asyncio.Semaphore`. Deliberate: `docs`/CLAUDE.md
-  record `$data-requirements` OOM-killing the measure engine when called per
-  patient, and a shared connectathon server deserves the same restraint. At ~10 s
-  per measure, 9 measures complete in roughly 45–60 s.
+- **Concurrency capped at 2** via `asyncio.Semaphore`. Deliberate:
+  `services/fhir_client.py:371-375` records `$data-requirements` OOM-killing the
+  measure engine when called per patient at 319 patients — which is why that call
+  site memoises behind a lock. A shared connectathon server deserves the same
+  restraint. At ~10 s per measure, 9 measures complete in roughly 45–60 s.
 - **A dedicated timeout**, default 60 s, configured separately from
   `request_timeout_seconds` — the measured 11 s cost needs headroom, and raising
   the connection-wide timeout to suit this one operation would slow every other
-  failure path.
+  failure path. (Worth noting in passing: `_get_data_requirements` hardcodes 30 s
+  for the same operation on the DEQM path. Not changed here, but 11 s measured
+  against a 30 s ceiling is thinner headroom than it looks.)
 - `asyncio.create_task` does not survive a restart. Rows left `checking` by a
   crash are reclaimed to `unknown` at startup, mirroring how `main.py` already
   reclaims stranded jobs.
