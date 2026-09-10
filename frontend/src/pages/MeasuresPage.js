@@ -48,6 +48,67 @@ function StatusBadge({ status }) {
   return <span className={styles.badge}>{status}</span>;
 }
 
+// Readiness answers "can the active MCS actually evaluate this measure?".
+// Deliberately separate from StatusBadge above, which renders the FHIR
+// Measure.status (active/draft/retired) — a different question entirely.
+const READINESS_LABELS = {
+  ready: 'Ready',
+  not_ready: 'Not ready',
+  checking: 'Checking…',
+  unknown: 'Not checked',
+};
+
+function ReadinessBadge({ readiness, expanded, onToggle }) {
+  const state = readiness?.state || 'unknown';
+  const label = READINESS_LABELS[state] || READINESS_LABELS.unknown;
+
+  if (state !== 'not_ready') {
+    const cls =
+      state === 'ready' ? styles.badgeOk : state === 'checking' ? styles.badgeDraft : styles.badge;
+    return <span className={`${styles.badge} ${cls}`}>{label}</span>;
+  }
+
+  return (
+    <button
+      type="button"
+      className={`${styles.badge} ${styles.badgeBad} ${styles.readinessToggle}`}
+      aria-expanded={expanded}
+      aria-label="Readiness details for this measure"
+      onClick={onToggle}
+    >
+      {label}
+    </button>
+  );
+}
+
+function ReadinessDetail({ readiness }) {
+  return (
+    <div className={styles.readinessDetail}>
+      {readiness.error && <p className={styles.readinessError}>{readiness.error}</p>}
+      {readiness.missing_libraries?.length > 0 && (
+        <>
+          <h4>Missing libraries</h4>
+          <ul>
+            {readiness.missing_libraries.map(lib => <li key={lib} className={styles.mono}>{lib}</li>)}
+          </ul>
+          <p className={styles.readinessNote}>
+            The measure server reports only the first library it cannot load, so
+            loading this one may reveal another.
+          </p>
+        </>
+      )}
+      {readiness.missing_valuesets?.length > 0 && (
+        <>
+          <h4>Missing value sets ({readiness.missing_valuesets.length})</h4>
+          <ul>
+            {readiness.missing_valuesets.map(vs => <li key={vs} className={styles.mono}>{vs}</li>)}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
 export default function MeasuresPage() {
   const [measures, setMeasures] = useState([]);
   // The `mcs` block from the last successful GET /measures response — i.e.
@@ -61,6 +122,7 @@ export default function MeasuresPage() {
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [confirm, setConfirm] = useState(null);
+  const [expandedId, setExpandedId] = useState(null);
   const fileInputRef = useRef(null);
   const toast = useToast();
   const { query } = useSearch();
@@ -172,13 +234,13 @@ export default function MeasuresPage() {
           <table>
             <thead>
               <tr>
-                <th>ID</th><th className={styles.measureCell}>Measure</th><th>Version</th><th>Status</th><th style={{ textAlign: 'right' }}>Actions</th>
+                <th>ID</th><th className={styles.measureCell}>Measure</th><th>Version</th><th>Status</th><th style={{ width: 120 }}>Readiness</th><th style={{ textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {[1, 2, 3].map(i => (
                 <tr key={i}>
-                  {[90, 200, 60, 80, 100].map((w, j) => (
+                  {[90, 200, 60, 80, 110, 100].map((w, j) => (
                     <td key={j}><div className="skeleton" style={{ height: 14, width: w }} /></td>
                   ))}
                 </tr>
@@ -211,41 +273,61 @@ export default function MeasuresPage() {
                 <th className={styles.measureCell}>Measure</th>
                 <th style={{ width: 90 }}>Version</th>
                 <th style={{ width: 100 }}>Status</th>
+                <th style={{ width: 120 }}>Readiness</th>
                 <th style={{ width: 100, textAlign: 'right' }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {visible.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className={styles.emptyRow}>
+                  <td colSpan={6} className={styles.emptyRow}>
                     {q ? `No measures match "${q}".` : 'No measures loaded. Upload a measure bundle to get started.'}
                   </td>
                 </tr>
               ) : (
-                visible.map((measure, i) => (
-                  <tr key={measure.id || i} className={styles.row}>
-                    <td data-label="ID"><span className={styles.mono}>{extractCmsId(measure.id) || measure.id || '--'}</span></td>
-                    <td data-label="Measure" className={`${styles.measureName} ${styles.measureCell}`}>{getMeasureDisplayName(measure)}</td>
-                    <td data-label="Version" className={styles.mono} style={{ color: 'var(--text-muted)' }}>{getMeasureVersion(measure)}</td>
-                    <td data-label="Status"><StatusBadge status={getMeasureStatus(measure)} /></td>
-                    <td data-label="Actions">
-                      <div className={styles.actionGroup}>
-                        <Link to={`/jobs?newCalc=${encodeURIComponent(measure.id || '')}`} className={styles.calcBtn}>Calculate</Link>
-                        <KebabMenu items={[
-                          { divider: true },
-                          {
-                            label: 'Delete permanently',
-                            icon: <TrashIcon />,
-                            tone: 'destructive',
-                            disabled: !measure.id || mcs.isReadOnly,
-                            title: mcs.isReadOnly ? `${mcs.name || 'This connection'} is read-only` : undefined,
-                            onClick: () => confirmDelete(measure),
-                          },
-                        ]} />
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                visible.map((measure, i) => {
+                  const key = measure.id || i;
+                  const readiness = measure.readiness;
+                  const isExpanded = expandedId === key;
+                  return (
+                    <React.Fragment key={key}>
+                      <tr className={styles.row}>
+                        <td data-label="ID"><span className={styles.mono}>{extractCmsId(measure.id) || measure.id || '--'}</span></td>
+                        <td data-label="Measure" className={`${styles.measureName} ${styles.measureCell}`}>{getMeasureDisplayName(measure)}</td>
+                        <td data-label="Version" className={styles.mono} style={{ color: 'var(--text-muted)' }}>{getMeasureVersion(measure)}</td>
+                        <td data-label="Status"><StatusBadge status={getMeasureStatus(measure)} /></td>
+                        <td data-label="Readiness">
+                          <ReadinessBadge
+                            readiness={readiness}
+                            expanded={isExpanded}
+                            onToggle={() => setExpandedId(isExpanded ? null : key)}
+                          />
+                        </td>
+                        <td data-label="Actions">
+                          <div className={styles.actionGroup}>
+                            <Link to={`/jobs?newCalc=${encodeURIComponent(measure.id || '')}`} className={styles.calcBtn}>Calculate</Link>
+                            <KebabMenu items={[
+                              { divider: true },
+                              {
+                                label: 'Delete permanently',
+                                icon: <TrashIcon />,
+                                tone: 'destructive',
+                                disabled: !measure.id || mcs.isReadOnly,
+                                title: mcs.isReadOnly ? `${mcs.name || 'This connection'} is read-only` : undefined,
+                                onClick: () => confirmDelete(measure),
+                              },
+                            ]} />
+                          </div>
+                        </td>
+                      </tr>
+                      {isExpanded && readiness && (
+                        <tr className={styles.detailRow}>
+                          <td colSpan={6}><ReadinessDetail readiness={readiness} /></td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })
               )}
             </tbody>
           </table>

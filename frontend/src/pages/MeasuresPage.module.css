@@ -180,6 +180,44 @@
   color: var(--text);
 }
 
+.badgeBad {
+  background: var(--err-wash);
+  color: var(--err);
+}
+
+.readinessToggle {
+  border: none;
+  cursor: pointer;
+  font: inherit;
+}
+
+.detailRow > td {
+  background: var(--bg-sunken);
+}
+
+.readinessDetail h4 {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.8125rem;
+}
+
+.readinessDetail ul {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.8125rem;
+}
+
+.readinessError {
+  margin: 0;
+  color: var(--err);
+  font-size: 0.8125rem;
+}
+
+.readinessNote {
+  margin: 0.375rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
 @media (max-width: 820px) {
   .page {
     max-width: none;

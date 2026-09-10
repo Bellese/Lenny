@@ -1,6 +1,7 @@
 import React from 'react';
 import '@testing-library/jest-dom';
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import ConnectionContext from '../contexts/ConnectionContext';
 import { ToastProvider } from '../components/Toast';
@@ -108,5 +109,82 @@ describe('MeasuresPage — MCS awareness (#396)', () => {
     const uploadBtn = await screen.findByRole('button', { name: /Upload bundle/i });
     expect(uploadBtn).toBeDisabled();
     expect(uploadBtn).toHaveAttribute('title', expect.stringContaining('Read-only MCS'));
+  });
+});
+
+describe('MeasuresPage — readiness (#434)', () => {
+  const measureWith = (readiness, overrides = {}) => ({
+    id: 'CMS122FHIRDiabetesAssessGreaterThan9Percent',
+    name: 'DiabetesAssess',
+    title: 'Diabetes: Hemoglobin A1c Poor Control',
+    version: '0.5.000',
+    status: 'active',
+    readiness,
+    ...overrides,
+  });
+
+  const READY = { state: 'ready', checked_at: '2026-09-10T18:00:00Z', missing_libraries: [], missing_valuesets: [], error: null };
+  const NOT_READY = {
+    state: 'not_ready',
+    checked_at: '2026-09-10T18:00:00Z',
+    missing_libraries: ['Status 1.15.000'],
+    missing_valuesets: ['http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.1003'],
+    error: 'Could not load source for library Status, version 1.15.000, namespace uri null.',
+  };
+  const UNKNOWN = { state: 'unknown', checked_at: null, missing_libraries: [], missing_valuesets: [], error: null };
+  const CHECKING = { state: 'checking', checked_at: null, missing_libraries: [], missing_valuesets: [], error: null };
+
+  function renderMeasuresPage(measures, mcsOverrides = {}) {
+    api.getMeasures = jest.fn().mockResolvedValue({
+      measures,
+      total: measures.length,
+      mcs: { id: 'mcs-1', name: 'Alphora Sandbox' },
+    });
+    return renderWithMcs(mcsOverrides);
+  }
+
+  test('a ready measure shows the ready badge', async () => {
+    renderMeasuresPage([measureWith(READY)]);
+    expect(await screen.findByText(/^Ready$/)).toBeInTheDocument();
+  });
+
+  test('a not-ready measure shows the not-ready badge', async () => {
+    renderMeasuresPage([measureWith(NOT_READY)]);
+    expect(await screen.findByText(/Not ready/i)).toBeInTheDocument();
+  });
+
+  test('an unchecked measure shows Not checked, not a failure', async () => {
+    renderMeasuresPage([measureWith(UNKNOWN)]);
+    expect(await screen.findByText(/Not checked/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Not ready/i)).not.toBeInTheDocument();
+  });
+
+  test('a measure being checked shows Checking', async () => {
+    renderMeasuresPage([measureWith(CHECKING)]);
+    expect(await screen.findByText(/Checking/i)).toBeInTheDocument();
+  });
+
+  test('expanding a not-ready measure lists what is missing', async () => {
+    renderMeasuresPage([measureWith(NOT_READY)]);
+    const badge = await screen.findByRole('button', { name: /readiness details/i });
+    await userEvent.click(badge);
+
+    expect(await screen.findByText(/Status 1.15.000/)).toBeInTheDocument();
+    expect(screen.getByText(/2\.16\.840\.1\.113883\.3\.464\.1003\.1003/)).toBeInTheDocument();
+    expect(screen.getByText(/Could not load source for library Status/)).toBeInTheDocument();
+  });
+
+  test('the detail names only the first unresolvable library', async () => {
+    /* The CQL engine reports one include at a time; the copy must not imply the
+       list is exhaustive, or a user fixes one library and is surprised twice. */
+    renderMeasuresPage([measureWith(NOT_READY)]);
+    await userEvent.click(await screen.findByRole('button', { name: /readiness details/i }));
+    expect(screen.getByText(/may reveal another/i)).toBeInTheDocument();
+  });
+
+  test('a ready measure exposes no details toggle', async () => {
+    renderMeasuresPage([measureWith(READY)]);
+    await screen.findByText(/^Ready$/);
+    expect(screen.queryByRole('button', { name: /readiness details/i })).not.toBeInTheDocument();
   });
 });
