@@ -20,7 +20,7 @@ from app.dependencies import ConnectionContext, get_active_mcs
 from app.limiter import limiter
 from app.models.measure_readiness import MeasureReadiness, ReadinessState
 from app.services.fhir_client import _build_auth_headers, delete_measure, list_measures, upload_measure_bundle
-from app.services.measure_readiness import claim_unchecked, mark_all_checking, run_sweep
+from app.services.measure_readiness import claim_unchecked, invalidate_mcs, mark_all_checking, run_sweep
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -212,6 +212,7 @@ async def upload_measure(
     request: Request,
     file: UploadFile = File(...),
     mcs: ConnectionContext = Depends(get_active_mcs),
+    session: AsyncSession = Depends(get_session),
 ) -> dict:
     """Upload a FHIR Measure bundle (JSON) to the active MCS.
 
@@ -303,6 +304,9 @@ async def upload_measure(
             file.filename,
             extra={"mcs_id": mcs.id, "mcs_name": mcs.name},
         )
+        # An uploaded bundle can carry a Library that OTHER measures were missing,
+        # so the whole connection's verdicts are stale, not just this measure's.
+        await invalidate_mcs(session, mcs.id)
         return {
             "status": "success",
             "message": "Measure bundle uploaded successfully",
@@ -329,6 +333,7 @@ async def upload_measure(
 async def delete_measure_route(
     measure_id: str,
     mcs: ConnectionContext = Depends(get_active_mcs),
+    session: AsyncSession = Depends(get_session),
 ) -> Response:
     """Delete a Measure resource from the active MCS."""
     if mcs.is_read_only:
@@ -393,6 +398,7 @@ async def delete_measure_route(
             },
         ) from exc
 
+    await invalidate_mcs(session, mcs.id)
     logger.info("Measure deleted", extra={"measure_id": measure_id, "mcs_id": mcs.id, "mcs_name": mcs.name})
     return Response(status_code=204)
 

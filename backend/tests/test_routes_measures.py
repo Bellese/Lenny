@@ -785,3 +785,45 @@ async def test_measure_with_no_version_gets_a_readiness_object(client, active_mc
 
     assert resp.status_code == 200
     assert resp.json()["measures"][0]["readiness"]["state"] == "checking"
+
+
+async def test_uploading_a_bundle_invalidates_every_verdict_for_that_mcs(client, active_mcs, test_session):
+    """An uploaded Library can fix measures other than the one uploaded.
+
+    Invalidating only the uploaded measure would leave those stale and red.
+    """
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    for measure_id in ("CMS122", "CMS124"):
+        test_session.add(
+            MeasureReadiness(
+                mcs_id=active_mcs.id, measure_id=measure_id, measure_version="1", state=ReadinessState.not_ready
+            )
+        )
+    await test_session.commit()
+
+    bundle = json.dumps({"resourceType": "Bundle", "type": "transaction", "entry": []}).encode()
+    with patch.object(measures_module, "upload_measure_bundle", AsyncMock(return_value={"created": 1})):
+        resp = await client.post("/measures/upload", files={"file": ("bundle.json", bundle, "application/json")})
+
+    assert resp.status_code in (200, 201)
+    assert (await test_session.execute(select(MeasureReadiness))).scalars().all() == []
+
+
+async def test_deleting_a_measure_invalidates_verdicts_for_that_mcs(client, active_mcs, test_session):
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    test_session.add(
+        MeasureReadiness(mcs_id=active_mcs.id, measure_id="CMS122", measure_version="1", state=ReadinessState.ready)
+    )
+    await test_session.commit()
+
+    with patch.object(measures_module, "delete_measure", AsyncMock(return_value=None)):
+        resp = await client.delete("/measures/CMS122")
+
+    assert resp.status_code == 204
+    assert (await test_session.execute(select(MeasureReadiness))).scalars().all() == []

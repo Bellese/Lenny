@@ -483,3 +483,39 @@ async def test_mcs_probe_400_on_ssrf_rejection(client, test_session):
         resp = await client.post(f"/settings/mcs-connections/{cfg.id}/probe")
     assert resp.status_code == 400
     assert "SSRF protection" in resp.json()["detail"]["issue"][0]["diagnostics"]
+
+
+async def test_changing_the_mcs_url_invalidates_its_readiness_verdicts(client, test_session):
+    """Same connection id, different server — every cached verdict is now about
+    the wrong machine."""
+    from sqlalchemy import select
+
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    cfg = MCSConfig(
+        name="Repointed MCS",
+        mcs_url="https://before.example.com/fhir",
+        auth_type=AuthType.none,
+        auth_credentials=None,
+        is_active=False,
+        is_default=False,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    test_session.add(
+        MeasureReadiness(mcs_id=cfg.id, measure_id="CMS122", measure_version="1", state=ReadinessState.ready)
+    )
+    await test_session.commit()
+
+    resp = await client.put(
+        f"/settings/mcs-connections/{cfg.id}",
+        json={"name": "Repointed MCS", "mcs_url": "https://after.example.com/fhir", "auth_type": "none"},
+    )
+    assert resp.status_code == 200
+
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert rows == []
