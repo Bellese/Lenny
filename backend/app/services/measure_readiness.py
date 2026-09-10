@@ -130,14 +130,20 @@ async def find_missing_valuesets(
     Chunked because a measure's closure runs to two dozen URLs and a single
     comma-joined query would outgrow practical URL limits. Raises on transport
     failure; the caller maps that to `unknown` rather than `not_ready`.
+
+    Version suffixes are stripped from `canonicals` before comparison, on the
+    same `|` convention as the server-returned URLs — callers are not required
+    to pre-strip versions themselves.
     """
     if not canonicals:
         return []
 
+    normalised = [c.split("|")[0] for c in canonicals]
+
     present: set[str] = set()
     async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
-        for start in range(0, len(canonicals), chunk_size):
-            chunk = canonicals[start : start + chunk_size]
+        for start in range(0, len(normalised), chunk_size):
+            chunk = normalised[start : start + chunk_size]
             resp = await client.get(
                 f"{mcs_url}/ValueSet",
                 params={"url": ",".join(chunk), "_elements": "url", "_count": str(len(chunk))},
@@ -149,7 +155,7 @@ async def find_missing_valuesets(
                 if url:
                     present.add(url.split("|")[0])
 
-    return [c for c in canonicals if c not in present]
+    return [c for c in normalised if c not in present]
 
 
 async def check_measure_readiness(
@@ -218,6 +224,15 @@ async def check_measure_readiness(
         return ReadinessVerdict(
             state=ReadinessState.unknown,
             error="$data-requirements returned a body that is not JSON.",
+            duration_ms=elapsed(),
+        )
+
+    # Valid JSON but not a Library — e.g. `null`, a bare array, a string. We got
+    # no meaningful answer about the measure, so this is `unknown`, not `not_ready`.
+    if not isinstance(library, dict):
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error="$data-requirements returned a JSON body that is not a FHIR resource.",
             duration_ms=elapsed(),
         )
 

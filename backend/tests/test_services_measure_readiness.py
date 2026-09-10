@@ -495,3 +495,81 @@ async def test_find_missing_valuesets_chunks_long_lists():
     )
     assert missing == []
     assert len(calls) == 3  # 25 canonicals at 10 per chunk
+
+
+async def test_check_returns_unknown_when_the_body_is_json_but_not_an_object():
+    """A 2xx body of `null` or a bare array parses fine but is not a Library.
+
+    `check_measure_readiness` promises never to raise — Task 4's sweep stores
+    whatever verdict comes back, so an escaping AttributeError leaves the row
+    stuck in `checking` until a restart.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    for body in (None, [], "not a library", 42):
+        transport = httpx.MockTransport(lambda request, b=body: httpx.Response(200, json=b))
+        verdict = await check_measure_readiness(
+            "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+        )
+        assert verdict.state is ReadinessState.unknown, f"body {body!r} produced {verdict.state}"
+        assert verdict.error is not None
+
+
+async def test_find_missing_valuesets_normalises_versioned_input():
+    """Versions must be stripped on BOTH sides of the comparison.
+
+    Otherwise a canonical passed in as `...|1.0.0` never matches the server's
+    unversioned url and is reported missing while actually present.
+    """
+    import httpx
+
+    from app.services.measure_readiness import find_missing_valuesets
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_vs_bundle(["http://vs/a", "http://vs/b"]))
+
+    missing = await find_missing_valuesets(
+        "https://mcs.example.com/fhir",
+        ["http://vs/a|1.0.0", "http://vs/b", "http://vs/c|2.0.0"],
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert missing == ["http://vs/c"]
+
+
+async def test_check_ignores_a_top_level_warning_only_outcome():
+    """Drives _error_diagnostic's severity filter with a real warning outcome.
+
+    The sibling `contained` test never reaches that loop, because from_response
+    only parses a TOP-LEVEL OperationOutcome. Advisory outcomes must not go red.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    warning_outcome = {
+        "resourceType": "OperationOutcome",
+        "issue": [
+            {"severity": "warning", "code": "informational", "diagnostics": "advisory only"},
+            {"severity": "information", "code": "informational", "diagnostics": "also advisory"},
+        ],
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "$data-requirements" in str(request.url):
+            return httpx.Response(200, json=warning_outcome)
+        return httpx.Response(200, json=_vs_bundle([]))
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert verdict.state is not ReadinessState.not_ready
