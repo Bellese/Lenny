@@ -26,6 +26,20 @@ from app.services.validation import sanitize_error
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/measures", tags=["measures"])
 
+# The event loop keeps only a WEAK reference to a running task, so a fire-and-
+# forget `asyncio.create_task(...)` whose result nobody holds can be garbage
+# collected mid-flight — the sweep would then vanish partway through and leave
+# its rows in `checking` (see the asyncio docs' create_task note). Holding a
+# strong reference until the task finishes is the documented remedy.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn_background(coro) -> None:
+    """Run `coro` detached from the request, retaining a reference until done."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
 
 async def _resolve_auth(mcs: ConnectionContext) -> dict[str, str]:
     """Resolve MCS credentials, converting failures into a 502 OperationOutcome.
@@ -149,33 +163,47 @@ async def get_measures(
         # to reference (the FK would reject the insert), so readiness is left
         # `unknown` rather than claimed. Real deployments never hit this path
         # once the startup seed has run.
+        #
+        # The whole block is guarded separately from the MCS call around it.
+        # Readiness is a decoration served out of Lenny's OWN database, so a
+        # pool exhaustion or a dropped connection here must never fall through
+        # to the 502 handler below, which would drop every measure from the
+        # response and blame the measure server for our database.
         if mcs.id:
-            keys = [(m["id"], m.get("version") or "") for m in measures if m.get("id")]
-            rows = (
-                (await session.execute(select(MeasureReadiness).where(MeasureReadiness.mcs_id == mcs.id)))
-                .scalars()
-                .all()
-            )
-            by_key = {(r.measure_id, r.measure_version): r for r in rows}
+            try:
+                keys = [(m["id"], m.get("version") or "") for m in measures if m.get("id")]
+                rows = (
+                    (await session.execute(select(MeasureReadiness).where(MeasureReadiness.mcs_id == mcs.id)))
+                    .scalars()
+                    .all()
+                )
+                by_key = {(r.measure_id, r.measure_version): r for r in rows}
 
-            claimed = await claim_unchecked(session, mcs.id, keys)
-            if claimed:
-                asyncio.create_task(run_sweep(mcs.id, claimed))
-            claimed_set = set(claimed)
+                claimed = await claim_unchecked(session, mcs.id, keys)
+                if claimed:
+                    _spawn_background(run_sweep(mcs.id, claimed))
+                claimed_set = set(claimed)
 
-            for measure in measures:
-                key = (measure.get("id"), measure.get("version") or "")
-                row = by_key.get(key)
-                if row is None and key in claimed_set:
-                    measure["readiness"] = {
-                        "state": ReadinessState.checking.value,
-                        "checked_at": None,
-                        "missing_libraries": [],
-                        "missing_valuesets": [],
-                        "error": None,
-                    }
-                else:
-                    measure["readiness"] = _readiness_payload(row)
+                for measure in measures:
+                    key = (measure.get("id"), measure.get("version") or "")
+                    row = by_key.get(key)
+                    if row is None and key in claimed_set:
+                        measure["readiness"] = {
+                            "state": ReadinessState.checking.value,
+                            "checked_at": None,
+                            "missing_libraries": [],
+                            "missing_valuesets": [],
+                            "error": None,
+                        }
+                    else:
+                        measure["readiness"] = _readiness_payload(row)
+            except Exception:
+                logger.exception(
+                    "Readiness lookup failed; serving the measure list without verdicts",
+                    extra={"mcs_id": mcs.id, "mcs_name": mcs.name},
+                )
+                for measure in measures:
+                    measure["readiness"] = _readiness_payload(None)
         else:
             for measure in measures:
                 measure["readiness"] = _readiness_payload(None)
@@ -453,5 +481,5 @@ async def refresh_readiness(
         return {"status": "skipped", "measures": 0}
 
     await mark_all_checking(session, mcs.id, keys)
-    asyncio.create_task(run_sweep(mcs.id, keys))
+    _spawn_background(run_sweep(mcs.id, keys))
     return {"status": "accepted", "measures": len(keys)}

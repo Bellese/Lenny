@@ -18,7 +18,6 @@ from datetime import datetime, timezone
 import httpx
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import select
-from sqlalchemy import update as sa_update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,17 +81,21 @@ def extract_missing_libraries(diagnostic: str | None) -> list[str]:
 
 
 async def reclaim_stranded_checks(session: AsyncSession) -> int:
-    """Convert rows left in `checking` by a crashed sweep into `unknown`.
+    """DELETE rows left in `checking` by a crashed sweep. Returns how many.
 
     Called at startup. `asyncio.create_task` does not survive a restart, so
     without this a killed container leaves a spinner that never resolves.
-    Returns the number of rows reclaimed.
+
+    Deleting rather than marking them `unknown` is deliberate: `claim_unchecked`
+    only claims measures with NO row, so an `unknown` row is terminal — the next
+    page load would skip it and the measure would read "Not checked" forever,
+    for a reason (a deploy-time restart) that has nothing to do with the
+    measure. With the row gone, the next `GET /measures` re-claims it and the
+    sweep runs again automatically. Nothing of value is lost: the row held only
+    a `checking` placeholder, and the message the old code wrote was never
+    rendered anywhere.
     """
-    result = await session.execute(
-        sa_update(MeasureReadiness)
-        .where(MeasureReadiness.state == ReadinessState.checking)
-        .values(state=ReadinessState.unknown, error="Interrupted by backend restart")
-    )
+    result = await session.execute(sa_delete(MeasureReadiness).where(MeasureReadiness.state == ReadinessState.checking))
     await session.commit()
     return result.rowcount or 0
 
@@ -119,6 +122,28 @@ def _error_diagnostic(outcome: FhirOperationOutcome | None) -> str | None:
     for issue in outcome.issues:
         if issue.severity in ("error", "fatal"):
             return issue.diagnostics or "Server reported an error with no diagnostic."
+    return None
+
+
+# `_count` is a PAGE SIZE, not a cap on how many resources an OR match may hit.
+# FHIR stores each `(url, version)` pair as its own resource, so a server loaded
+# from several MADiE bundles routinely holds one VSAC canonical at two or three
+# versions: ten requested canonicals can legitimately match thirty resources.
+# Sizing the page to `len(chunk)` truncated that and reported PRESENT value sets
+# as missing — a false `not_ready`. The page is therefore sized generously AND
+# `link[relation=next]` is followed, so the number is a round-trip optimisation
+# rather than something correctness depends on.
+_VALUESET_PAGE_FACTOR = 10
+# A server that returns a `next` link pointing at itself would otherwise spin
+# forever inside a check that is supposed to time out and return `unknown`.
+_VALUESET_MAX_PAGES = 50
+
+
+def _next_page_url(bundle: dict) -> str | None:
+    """The `next` link of a searchset Bundle, or None when this is the last page."""
+    for link in bundle.get("link") or []:
+        if link.get("relation") == "next" and link.get("url"):
+            return str(link["url"])
     return None
 
 
@@ -150,16 +175,26 @@ async def find_missing_valuesets(
     async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
         for start in range(0, len(normalised), chunk_size):
             chunk = normalised[start : start + chunk_size]
-            resp = await client.get(
-                f"{mcs_url}/ValueSet",
-                params={"url": ",".join(chunk), "_elements": "url", "_count": str(len(chunk))},
-                headers=auth_headers,
-            )
-            resp.raise_for_status()
-            for entry in resp.json().get("entry") or []:
-                url = (entry.get("resource") or {}).get("url")
-                if url:
-                    present.add(url.split("|")[0])
+            next_url: str | None = f"{mcs_url}/ValueSet"
+            params: dict[str, str] | None = {
+                "url": ",".join(chunk),
+                "_elements": "url",
+                "_count": str(len(chunk) * _VALUESET_PAGE_FACTOR),
+            }
+            for _ in range(_VALUESET_MAX_PAGES):
+                resp = await client.get(next_url, params=params, headers=auth_headers)
+                resp.raise_for_status()
+                bundle = resp.json()
+                for entry in bundle.get("entry") or []:
+                    url = (entry.get("resource") or {}).get("url")
+                    if url:
+                        present.add(url.split("|")[0])
+                # A `next` link already carries the whole query, filter included;
+                # re-appending `params` would duplicate it.
+                next_url = _next_page_url(bundle)
+                params = None
+                if next_url is None:
+                    break
 
     return [c for c in normalised if c not in present]
 
@@ -239,6 +274,21 @@ async def check_measure_readiness(
         return ReadinessVerdict(
             state=ReadinessState.unknown,
             error="$data-requirements returned a JSON body that is not a FHIR resource.",
+            duration_ms=elapsed(),
+        )
+
+    # A dict is not enough. Anything dict-shaped with no `dataRequirement` and no
+    # `relatedArtifact` yields zero canonicals, zero missing, and would fall
+    # through to `ready` — a false READY, the one output this feature must never
+    # produce. Reachable without any non-compliance: a `Parameters` wrapper
+    # around the Library (a common server variation), an OperationOutcome
+    # carrying only information/warning issues (`_error_diagnostic` returns None
+    # for those, by design), or any 2xx body from a proxy that is not the
+    # resource. We learned nothing about the measure, so this is `unknown`.
+    if library.get("resourceType") != "Library":
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error="$data-requirements did not return a Library resource.",
             duration_ms=elapsed(),
         )
 
@@ -361,6 +411,24 @@ async def invalidate_mcs(session: AsyncSession, mcs_id: int) -> int:
 async def _store_verdict(
     session: AsyncSession, mcs_id: int, measure_id: str, version: str, verdict: ReadinessVerdict
 ) -> None:
+    """Update the `checking` row this sweep is filling in. Never inserts.
+
+    Update-only is load-bearing, not tidiness. Every sweep's rows are created
+    first, synchronously, by `claim_unchecked` or `mark_all_checking`, so the
+    only way the row can be gone by the time the verdict lands is that someone
+    deliberately deleted it underneath us — which is exactly what
+    `invalidate_mcs` does when the user uploads the missing Library, deletes a
+    measure, or repoints the connection. Re-inserting there would resurrect the
+    PRE-upload verdict, and since `claim_unchecked` only claims measures with no
+    row and verdicts have no TTL, that stale red would be permanent. Dropping
+    the write instead leaves no row, so the next page load re-claims and
+    re-checks.
+
+    It also closes the unique-violation window between `invalidate_mcs`'s commit
+    and `mark_all_checking`'s inserts: a double-clicked Re-check can no longer
+    have an in-flight sweep insert a row that the second re-check then collides
+    with.
+    """
     row = (
         await session.execute(
             select(MeasureReadiness).where(
@@ -371,8 +439,11 @@ async def _store_verdict(
         )
     ).scalar_one_or_none()
     if row is None:
-        row = MeasureReadiness(mcs_id=mcs_id, measure_id=measure_id, measure_version=version)
-        session.add(row)
+        logger.info(
+            "Readiness verdict dropped: the row was invalidated while the sweep ran",
+            extra={"mcs_id": mcs_id, "measure_id": measure_id},
+        )
+        return
     row.state = verdict.state
     row.missing_libraries = verdict.missing_libraries or None
     row.missing_valuesets = verdict.missing_valuesets or None
@@ -433,8 +504,29 @@ async def run_sweep(mcs_id: int, measures: list[tuple[str, str]]) -> None:
                     logger.exception("Readiness check raised for %s", measure_id)
                     verdict = ReadinessVerdict(state=ReadinessState.unknown, error=f"Check failed: {exc}")
             async with write_lock:
-                await _store_verdict(session, mcs_id, measure_id, version, verdict)
+                # The write is guarded too. Unguarded, one DB fault (pool
+                # exhaustion, a dropped connection) escaped `gather`, the
+                # `async with _session_factory()` below closed the session out
+                # from under every sibling task still awaiting it, and their
+                # rows stayed `checking` forever — `claim_unchecked` skips rows
+                # that exist, so no later page load rescues them.
+                try:
+                    await _store_verdict(session, mcs_id, measure_id, version, verdict)
+                except Exception:
+                    logger.exception("Could not store readiness verdict for %s", measure_id)
+                    # A failed commit leaves the transaction in a state where
+                    # every subsequent write on this session fails too, so the
+                    # siblings queued behind this lock need it rolled back.
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        logger.exception("Rollback after a failed readiness write also failed")
 
-        await asyncio.gather(*(one(mid, ver) for mid, ver in measures))
+        # `return_exceptions=True` so a task that raises somewhere outside the
+        # two guards above still cannot cancel its siblings mid-flight.
+        results = await asyncio.gather(*(one(mid, ver) for mid, ver in measures), return_exceptions=True)
+        for (measure_id, _version), result in zip(measures, results):
+            if isinstance(result, BaseException):
+                logger.error("Readiness task failed for %s: %s", measure_id, result)
 
     logger.info("Readiness sweep complete", extra={"mcs_id": mcs_id, "measures": len(measures)})

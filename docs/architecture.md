@@ -239,6 +239,8 @@ Defined in `backend/app/config.py`. All overridable via environment variables.
 | `BATCH_SIZE` | `100` | Patients per `$evaluate-measure` batch |
 | `MAX_WORKERS` | `4` | Concurrent job worker threads |
 | `MAX_RETRIES` | `3` | Retry attempts for failed FHIR requests |
+| `READINESS_TIMEOUT_SECONDS` | `60` | Per-measure timeout for the readiness check's `$data-requirements` call (#434). Measured at 6–11s per measure against the local engine, so it needs its own ceiling rather than borrowing `MCSConfig.request_timeout_seconds` (default 30). A timeout renders as `unknown`, never as "not ready". |
+| `READINESS_CONCURRENCY` | `2` | How many readiness checks run at once during a sweep (#434). `$data-requirements` OOM-killed the measure engine once already (`fhir_client.py`), and the target server is usually shared, so the cap is deliberately low. |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `ALLOWED_ORIGINS` | `"*"` | Comma-separated CORS allowed origins; `"*"` for wildcard (local dev default). Set to `https://${CADDY_HOST}` in production via `docker-compose.prod.yml`. |
 | `CDR_FERNET_KEY` | _(none)_ | Fernet key for encrypting CDR auth credentials at rest. Required in production. Generate with: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. In prod, injected via Docker secret at `/run/secrets/cdr_fernet_key` (takes priority over env var). See `.env.example`. |

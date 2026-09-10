@@ -13,6 +13,24 @@ import app.routes.measures as measures_module
 pytestmark = pytest.mark.asyncio
 
 
+def _create_task_spy() -> Mock:
+    """Stand-in for `asyncio.create_task` that behaves like the real thing.
+
+    The route retains every spawned task in a module-level set and registers a
+    done-callback on it — the asyncio docs' remedy for a fire-and-forget task
+    being garbage collected mid-flight (final review, cheap minors). A fake
+    that returned `None` would therefore AttributeError instead of testing the
+    route. Closing the coroutine keeps Python from warning it was never
+    awaited.
+    """
+
+    def _fake(coro):
+        coro.close()
+        return Mock(spec=["add_done_callback"])
+
+    return Mock(side_effect=_fake)
+
+
 @pytest.fixture(autouse=True)
 def _reset_limiter():
     """Reset the 10/minute upload rate limiter so tests don't 429 each other."""
@@ -605,7 +623,7 @@ async def test_get_measures_reports_unknown_and_kicks_a_sweep(client, active_mcs
         "resourceType": "Bundle",
         "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
     }
-    create_task = Mock(side_effect=lambda coro: coro.close())
+    create_task = _create_task_spy()
     with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
         with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
             resp = await client.get("/measures")
@@ -696,7 +714,7 @@ async def test_get_measures_does_not_serve_another_connections_verdict(client, a
         "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
     }
     with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
-        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=lambda coro: coro.close())):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=_create_task_spy())):
             resp = await client.get("/measures")
 
     assert resp.json()["measures"][0]["readiness"]["state"] != "ready"
@@ -714,7 +732,7 @@ async def test_refresh_accepts_and_marks_everything_checking(client, active_mcs,
             {"resource": {"resourceType": "Measure", "id": "CMS124", "version": "1.0.000", "status": "active"}},
         ],
     }
-    create_task = Mock(side_effect=lambda coro: coro.close())
+    create_task = _create_task_spy()
     with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
         with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
             resp = await client.post("/measures/readiness/refresh")
@@ -738,7 +756,7 @@ async def test_refresh_reports_skipped_when_there_is_no_active_mcs_row(client):
         "resourceType": "Bundle",
         "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
     }
-    create_task = Mock(side_effect=lambda coro: coro.close())
+    create_task = _create_task_spy()
     with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
         with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
             resp = await client.post("/measures/readiness/refresh")
@@ -764,7 +782,7 @@ async def test_refresh_succeeds_on_a_read_only_mcs(client, read_only_mcs, test_s
         "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
     }
     with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
-        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=lambda coro: coro.close())):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=_create_task_spy())):
             resp = await client.post("/measures/readiness/refresh")
 
     assert resp.status_code == 202
@@ -780,7 +798,7 @@ async def test_measure_with_no_version_gets_a_readiness_object(client, active_mc
         "entry": [{"resource": {"resourceType": "Measure", "id": "NoVersion", "status": "active"}}],
     }
     with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
-        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=lambda coro: coro.close())):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=_create_task_spy())):
             resp = await client.get("/measures")
 
     assert resp.status_code == 200
@@ -827,3 +845,63 @@ async def test_deleting_a_measure_invalidates_verdicts_for_that_mcs(client, acti
 
     assert resp.status_code == 204
     assert (await test_session.execute(select(MeasureReadiness))).scalars().all() == []
+
+
+async def test_get_measures_survives_a_readiness_database_fault(client, active_mcs):
+    """A readiness DB fault must not hide the measure list or blame the MCS.
+
+    Readiness is a decoration written to Lenny's OWN database. Before this fix
+    the only guarded failure was `IntegrityError` (handled inside
+    `claim_unchecked`); anything else — pool exhaustion, a dropped
+    connection — fell through to the generic handler and became
+    `502 "Cannot reach measure engine 'Attendee MCS'"` with no measures at all,
+    accusing a measure server that had just answered successfully.
+    """
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    boom = AsyncMock(side_effect=RuntimeError("QueuePool limit of size 5 overflow 10 reached"))
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "claim_unchecked", boom):
+            resp = await client.get("/measures")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [m["id"] for m in body["measures"]] == ["CMS122"]
+    assert body["measures"][0]["readiness"]["state"] == "unknown"
+    assert body["measures"][0]["readiness"]["error"] is None  # not a failure verdict
+    boom.assert_awaited()
+
+
+async def test_spawn_background_retains_the_task_until_it_completes():
+    """asyncio keeps only a WEAK reference to a running task.
+
+    A bare `asyncio.create_task(run_sweep(...))` whose result nobody holds can
+    be garbage collected mid-flight, which would abandon the sweep and leave
+    its rows in `checking` — the state nothing recovers from until a restart.
+    The task must be in the retention set while it runs, and out of it once it
+    finishes (or the set is a leak).
+    """
+    import asyncio
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def work():
+        started.set()
+        await release.wait()
+
+    before = set(measures_module._background_tasks)
+    measures_module._spawn_background(work())
+    await started.wait()
+
+    added = set(measures_module._background_tasks) - before
+    assert len(added) == 1, "the spawned task was not retained while running"
+
+    release.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if not (set(measures_module._background_tasks) & added):
+            break
+    assert not (set(measures_module._background_tasks) & added), "the done-callback did not discard the task"

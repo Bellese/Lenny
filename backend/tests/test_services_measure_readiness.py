@@ -116,16 +116,23 @@ def test_readiness_settings_have_defaults():
     assert settings.READINESS_CONCURRENCY == 2
 
 
-async def test_startup_reclaims_stranded_checking_rows(test_session, mcs_row):
+async def test_startup_deletes_stranded_checking_rows_so_they_are_re_swept(test_session, mcs_row):
     """`asyncio.create_task` does not survive a restart.
 
     A container that dies mid-sweep leaves rows in `checking` forever, which
-    renders as a spinner that never resolves. Startup must convert them.
+    renders as a spinner that never resolves. Startup must clear them.
+
+    The row is DELETED, not marked `unknown` (final review I5b). `unknown` was
+    terminal: `claim_unchecked` only claims measures with no row, so a row left
+    behind at all — whatever its state — makes the measure read "Not checked"
+    permanently after one deploy-time restart. Deleting is what lets the next
+    page load re-claim and re-check it, which the second half of this test
+    asserts directly.
     """
     from sqlalchemy import select
 
     from app.models.measure_readiness import MeasureReadiness, ReadinessState
-    from app.services.measure_readiness import reclaim_stranded_checks
+    from app.services.measure_readiness import claim_unchecked, reclaim_stranded_checks
 
     test_session.add(
         MeasureReadiness(
@@ -137,12 +144,17 @@ async def test_startup_reclaims_stranded_checking_rows(test_session, mcs_row):
     )
     await test_session.commit()
 
-    await reclaim_stranded_checks(test_session)
+    reclaimed = await reclaim_stranded_checks(test_session)
+    assert reclaimed == 1
 
     rows = {r.measure_id: r for r in (await test_session.execute(select(MeasureReadiness))).scalars().all()}
-    assert rows["CMS122"].state is ReadinessState.unknown
-    assert rows["CMS122"].error == "Interrupted by backend restart"
-    assert rows["CMS124"].state is ReadinessState.ready  # untouched
+    assert "CMS122" not in rows
+    assert rows["CMS124"].state is ReadinessState.ready  # a settled verdict is untouched
+
+    # The point of deleting: the next page load re-claims the stranded measure
+    # (and still leaves the settled one alone).
+    claimed = await claim_unchecked(test_session, mcs_row.id, [("CMS122", "0.5.000"), ("CMS124", "1.0.000")])
+    assert claimed == [("CMS122", "0.5.000")]
 
 
 def test_extract_valueset_canonicals_from_both_locations():
@@ -510,6 +522,133 @@ async def test_find_missing_valuesets_chunks_long_lists():
     assert len(calls) == 3  # 25 canonicals at 10 per chunk
 
 
+def _paging_valueset_server(store: list[str]):
+    """A `/ValueSet?url=a,b` mock that behaves the way a FHIR server actually does.
+
+    Two properties matter and neither is present in `_vs_bundle` alone:
+
+    * `url=a,b` is an OR match over *resources*, and each `(url, version)` pair
+      is its own resource — so N requested canonicals can match more than N
+      resources.
+    * `_count` is a PAGE SIZE. Matches beyond it are not dropped, they are
+      paged behind `link[relation=next]`.
+
+    `store` holds versioned canonicals, as a server loaded from several MADiE
+    bundles would.
+    """
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        requested = [u for u in (params.get("url") or "").split(",") if u]
+        offset = int(params.get("_offset") or 0)
+        count = int(params.get("_count") or 20)
+        matches = [u for u in store if u.split("|")[0] in requested]
+        body = _vs_bundle(matches[offset : offset + count])
+        body["total"] = len(matches)
+        if offset + count < len(matches):
+            body["link"] = [{"relation": "next", "url": str(request.url.copy_set_param("_offset", offset + count))}]
+        return httpx.Response(200, json=body)
+
+    return handler
+
+
+async def test_find_missing_valuesets_tolerates_a_canonical_held_at_several_versions():
+    """The page must be sized to the MATCHES, not to the number of canonicals.
+
+    `_count=len(chunk)` truncated the OR match: here two canonicals are asked
+    for and three resources match (one of them is on the server twice, at two
+    versions), so a two-row page contains both copies of `a` and none of `b` —
+    and `b`, which is PRESENT, is reported missing. That is a false `not_ready`
+    with a wrong count in the message, on a completely ordinary server.
+    """
+    import httpx
+
+    from app.services.measure_readiness import find_missing_valuesets
+
+    store = ["http://vs/a|20210101", "http://vs/a|20230101", "http://vs/b|20220101"]
+    handler = _paging_valueset_server(store)
+    calls = []
+
+    def counting(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return handler(request)
+
+    missing = await find_missing_valuesets(
+        "https://mcs.example.com/fhir",
+        ["http://vs/a", "http://vs/b"],
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(counting),
+    )
+    assert missing == []
+    # Following `next` (tested separately below) makes the result correct even
+    # with a too-small page, so the page size needs its own assertion or the
+    # `_count` half of the fix is untested: a handful of versions of a handful
+    # of canonicals must not cost one round trip per resource.
+    assert len(calls) == 1, f"the page was sized to the chunk, not to the possible matches: {calls}"
+
+
+async def test_find_missing_valuesets_follows_the_next_link():
+    """Whatever the page size, a paged match must be followed to the end.
+
+    26 resources match the two requested canonicals and only `b`'s single
+    resource is past the page boundary, so an implementation that reads page
+    one and stops reports a present value set as missing.
+    """
+    import httpx
+
+    from app.services.measure_readiness import find_missing_valuesets
+
+    store = [f"http://vs/a|v{i}" for i in range(25)] + ["http://vs/b|v1"]
+    handler = _paging_valueset_server(store)
+    calls = []
+
+    def counting(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return handler(request)
+
+    missing = await find_missing_valuesets(
+        "https://mcs.example.com/fhir",
+        ["http://vs/a", "http://vs/b"],
+        auth_headers={},
+        timeout=5.0,
+        chunk_size=2,
+        transport=httpx.MockTransport(counting),
+    )
+    assert missing == []
+    assert len(calls) == 2, f"expected a second page to be fetched, got {calls}"
+
+
+async def test_find_missing_valuesets_stops_following_next_links_eventually():
+    """The `next`-following loop needs a stop, or a misbehaving server hangs it.
+
+    A server whose `next` link points back at itself would otherwise spin
+    inside a check that is supposed to answer within the readiness timeout.
+    """
+    import httpx
+
+    from app.services.measure_readiness import _VALUESET_MAX_PAGES, find_missing_valuesets
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        body = _vs_bundle([])
+        body["link"] = [{"relation": "next", "url": str(request.url)}]
+        return httpx.Response(200, json=body)
+
+    missing = await find_missing_valuesets(
+        "https://mcs.example.com/fhir",
+        ["http://vs/a"],
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert missing == ["http://vs/a"]
+    assert len(calls) == _VALUESET_MAX_PAGES
+
+
 async def test_check_returns_unknown_when_the_body_is_json_but_not_an_object():
     """A 2xx body of `null` or a bare array parses fine but is not a Library.
 
@@ -554,11 +693,19 @@ async def test_find_missing_valuesets_normalises_versioned_input():
     assert missing == ["http://vs/c"]
 
 
-async def test_check_ignores_a_top_level_warning_only_outcome():
+async def test_check_returns_unknown_for_a_top_level_warning_only_outcome():
     """Drives _error_diagnostic's severity filter with a real warning outcome.
 
     The sibling `contained` test never reaches that loop, because from_response
-    only parses a TOP-LEVEL OperationOutcome. Advisory outcomes must not go red.
+    only parses a TOP-LEVEL OperationOutcome. An advisory outcome must not go
+    red — but it must not go GREEN either, which is what this body did before
+    the final review's C1 fix: an OperationOutcome carries no `dataRequirement`
+    and no `relatedArtifact`, so it yielded zero canonicals, zero missing, and
+    fell through to `ready`. A body that is not a Library tells us nothing
+    about the measure, so the answer is `unknown`.
+
+    (Pre-existing test, expectation deliberately changed: it asserted
+    `is not not_ready`, which still passes after C1 but for the wrong reason.)
     """
     import httpx
 
@@ -585,7 +732,53 @@ async def test_check_ignores_a_top_level_warning_only_outcome():
         timeout=5.0,
         transport=httpx.MockTransport(handler),
     )
-    assert verdict.state is not ReadinessState.not_ready
+    assert verdict.state is ReadinessState.unknown
+    assert verdict.error == "$data-requirements did not return a Library resource."
+
+
+@pytest.mark.parametrize(
+    "body,label",
+    [
+        (
+            {
+                "resourceType": "OperationOutcome",
+                "issue": [{"severity": "information", "code": "informational", "diagnostics": "all good"}],
+            },
+            "information-only OperationOutcome",
+        ),
+        ({"resourceType": "OperationOutcome"}, "OperationOutcome with no issue array"),
+        (
+            {
+                "resourceType": "Parameters",
+                "parameter": [{"name": "return", "resource": {"resourceType": "Library"}}],
+            },
+            "Parameters wrapper around the Library",
+        ),
+        ({"message": "ok", "status": "success"}, "a gateway's own JSON envelope"),
+    ],
+)
+async def test_check_returns_unknown_when_the_body_is_not_a_library(body, label):
+    """A dict is not proof of a Library, and a false READY is the worst output.
+
+    Each of these is a 2xx dict with no `dataRequirement` and no
+    `relatedArtifact`: before C1 every one of them produced zero canonicals,
+    zero missing value sets, and therefore `ready` — telling the user a measure
+    will evaluate when nothing was ever verified. None of them require a
+    non-compliant server; the Parameters wrapper in particular is a common
+    variation, and this feature exists precisely because the target servers are
+    third-party.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+    )
+    assert verdict.state is ReadinessState.unknown, f"{label} produced {verdict.state}"
+    assert verdict.error == "$data-requirements did not return a Library resource."
 
 
 async def test_claim_unchecked_only_claims_measures_with_no_row(test_session, mcs_row):
@@ -659,6 +852,13 @@ async def test_invalidate_mcs_removes_only_that_connections_rows(test_session, m
 
 
 async def test_run_sweep_writes_a_verdict_per_measure(test_session, mcs_row, monkeypatch):
+    """Claims first, exactly as `GET /measures` does, then sweeps.
+
+    The claim is not decoration in this test: `_store_verdict` is update-only
+    (final review I3), so a sweep whose rows were never claimed writes nothing.
+    That IS production's sequence — `claim_unchecked` or `mark_all_checking`
+    always runs synchronously before the task is spawned.
+    """
     from sqlalchemy import select
 
     import app.services.measure_readiness as svc
@@ -677,7 +877,9 @@ async def test_run_sweep_writes_a_verdict_per_measure(test_session, mcs_row, mon
     monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
     monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
 
-    await svc.run_sweep(mcs_row.id, [("CMS122", "0.5.000"), ("CMS124", "1.0.000")])
+    measures = [("CMS122", "0.5.000"), ("CMS124", "1.0.000")]
+    assert await svc.claim_unchecked(test_session, mcs_row.id, measures) == measures
+    await svc.run_sweep(mcs_row.id, measures)
 
     rows = {r.measure_id: r for r in (await test_session.execute(select(MeasureReadiness))).scalars().all()}
     assert rows["CMS122"].state is ReadinessState.not_ready
@@ -707,7 +909,9 @@ async def test_run_sweep_respects_the_concurrency_cap(test_session, mcs_row, mon
     monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
     monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
 
-    await svc.run_sweep(mcs_row.id, [(f"CMS{i}", "1.0.0") for i in range(8)])
+    measures = [(f"CMS{i}", "1.0.0") for i in range(8)]
+    await svc.claim_unchecked(test_session, mcs_row.id, measures)
+    await svc.run_sweep(mcs_row.id, measures)
     assert peak <= 2
 
 
@@ -724,11 +928,91 @@ async def test_run_sweep_leaves_no_row_stuck_in_checking_when_a_check_explodes(t
     monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
     monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
 
+    await svc.claim_unchecked(test_session, mcs_row.id, [("CMS122", "0.5.000")])
     await svc.run_sweep(mcs_row.id, [("CMS122", "0.5.000")])
 
     rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert len(rows) == 1
     assert rows[0].state is ReadinessState.unknown
     assert "boom" in (rows[0].error or "")
+
+
+async def test_run_sweep_does_not_resurrect_a_verdict_invalidated_mid_sweep(test_session, mcs_row, monkeypatch):
+    """The workflow this feature was built for must not leave a sticky red.
+
+    User sees `not_ready` -> uploads the missing Library -> `invalidate_mcs`
+    deletes every row for the connection. If the sweep that was still running
+    from the page load re-INSERTS its pre-upload verdict, that stale red is
+    permanent: verdicts have no TTL and `claim_unchecked` only claims measures
+    with no row, so no reload ever re-checks it.
+
+    The delete is performed from inside the fake check — i.e. after the sweep
+    started and before its verdict is written — which is exactly the window the
+    real race occupies.
+    """
+    from sqlalchemy import select
+
+    import app.services.measure_readiness as svc
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    async def fake_check(mcs_url, measure_id, **kwargs):
+        await svc.invalidate_mcs(test_session, mcs_row.id)
+        return svc.ReadinessVerdict(state=ReadinessState.not_ready, error="stale pre-upload verdict")
+
+    monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
+    monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
+
+    await svc.claim_unchecked(test_session, mcs_row.id, [("CMS122", "0.5.000")])
+    await svc.run_sweep(mcs_row.id, [("CMS122", "0.5.000")])
+
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert rows == [], f"a deleted verdict was resurrected by the in-flight sweep: {[r.state for r in rows]}"
+
+    # And because no row survives, the next page load re-claims and re-checks.
+    assert await svc.claim_unchecked(test_session, mcs_row.id, [("CMS122", "0.5.000")]) == [("CMS122", "0.5.000")]
+
+
+async def test_run_sweep_isolates_one_failing_write_from_the_other_measures(test_session, mcs_row, monkeypatch):
+    """One DB fault must not strand every other row in `checking` forever.
+
+    `_store_verdict` was outside the `try` and `gather` had no
+    `return_exceptions`, so a single write failure propagated out of `gather`,
+    closed the shared session while sibling tasks were still using it, and left
+    their rows spinning with nothing able to recover them (`claim_unchecked`
+    skips rows that exist, so no later page load re-kicks them).
+
+    The measure whose own write fails necessarily keeps its `checking` row —
+    nothing can write a verdict when the write is what is broken — so this
+    asserts precisely that: exactly one row stranded, the one that failed.
+    """
+    from sqlalchemy import select
+
+    import app.services.measure_readiness as svc
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    async def fake_check(mcs_url, measure_id, **kwargs):
+        return svc.ReadinessVerdict(state=ReadinessState.ready, duration_ms=7)
+
+    real_store = svc._store_verdict
+
+    async def flaky_store(session, mcs_id, measure_id, version, verdict):
+        if measure_id == "CMS124":
+            raise RuntimeError("connection pool exhausted")
+        return await real_store(session, mcs_id, measure_id, version, verdict)
+
+    monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
+    monkeypatch.setattr(svc, "_store_verdict", flaky_store)
+    monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
+
+    measures = [("CMS122", "0.5.000"), ("CMS124", "1.0.000"), ("CMS125", "2.0.000")]
+    await svc.claim_unchecked(test_session, mcs_row.id, measures)
+
+    await svc.run_sweep(mcs_row.id, measures)  # must not raise: run_sweep promises that
+
+    rows = {r.measure_id: r for r in (await test_session.execute(select(MeasureReadiness))).scalars().all()}
+    assert rows["CMS122"].state is ReadinessState.ready
+    assert rows["CMS125"].state is ReadinessState.ready
+    assert [mid for mid, r in rows.items() if r.state is ReadinessState.checking] == ["CMS124"]
 
 
 async def test_run_sweep_updates_the_claimed_checking_row_in_place(test_session, mcs_row, monkeypatch):
