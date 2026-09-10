@@ -130,3 +130,65 @@ async def test_startup_reclaims_stranded_checking_rows(test_session, mcs_row):
     assert rows["CMS122"].state is ReadinessState.unknown
     assert rows["CMS122"].error == "Interrupted by backend restart"
     assert rows["CMS124"].state is ReadinessState.ready  # untouched
+
+
+def test_extract_valueset_canonicals_from_both_locations():
+    """$data-requirements names valuesets in two places; both count."""
+    from app.services.measure_readiness import extract_valueset_canonicals
+
+    library = {
+        "resourceType": "Library",
+        "dataRequirement": [
+            {"type": "Condition", "codeFilter": [{"path": "code", "valueSet": "http://vs/one"}]},
+            {"type": "Observation", "codeFilter": [{"path": "code", "valueSet": "http://vs/two|20210101"}]},
+        ],
+        "relatedArtifact": [
+            {"type": "depends-on", "resource": "http://vs/three"},
+            {"type": "depends-on", "resource": "https://madie.cms.gov/Library/FHIRHelpers|4.4.000"},
+        ],
+    }
+    assert extract_valueset_canonicals(library) == ["http://vs/one", "http://vs/three", "http://vs/two"]
+
+
+def test_extract_valueset_canonicals_ignores_libraries_and_dedupes():
+    """A Library dependency is not a ValueSet, and the same VS appears repeatedly."""
+    from app.services.measure_readiness import extract_valueset_canonicals
+
+    library = {
+        "dataRequirement": [
+            {"codeFilter": [{"valueSet": "http://vs/dupe"}]},
+            {"codeFilter": [{"valueSet": "http://vs/dupe|1.0.0"}]},
+        ],
+        "relatedArtifact": [{"type": "depends-on", "resource": "Library/Status"}],
+    }
+    assert extract_valueset_canonicals(library) == ["http://vs/dupe"]
+
+
+def test_extract_valueset_canonicals_tolerates_empty_library():
+    from app.services.measure_readiness import extract_valueset_canonicals
+
+    assert extract_valueset_canonicals({}) == []
+    assert extract_valueset_canonicals({"dataRequirement": [], "relatedArtifact": []}) == []
+
+
+def test_extract_missing_libraries_parses_the_engine_diagnostic():
+    """The real string, verbatim from the 2026-09-10 connectathon failure."""
+    from app.services.measure_readiness import extract_missing_libraries
+
+    diagnostic = (
+        "Exception for library: CMS122FHIRDiabetesAssessGreaterThan9Percent, "
+        "Message: Could not load source for library Status, version 1.15.000, namespace uri null."
+    )
+    assert extract_missing_libraries(diagnostic) == ["Status 1.15.000"]
+
+
+def test_extract_missing_libraries_returns_empty_when_unrecognised():
+    """An unparsed diagnostic is not evidence of a missing library.
+
+    The raw text is still stored in `error`; this list stays empty rather than
+    inventing a name.
+    """
+    from app.services.measure_readiness import extract_missing_libraries
+
+    assert extract_missing_libraries("HTTP 500 Internal Server Error") == []
+    assert extract_missing_libraries(None) == []
