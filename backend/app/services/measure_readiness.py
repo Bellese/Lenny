@@ -47,17 +47,12 @@ def extract_valueset_canonicals(library: dict) -> list[str]:
         if artifact.get("type") != "depends-on":
             continue
         resource = artifact.get("resource") or ""
-        if not resource:
-            continue
-        # Exclude Library canonicals
-        if resource.startswith("Library/") or "/Library/" in resource:
-            continue
-        # Exclude CodeSystem canonicals (explicit /CodeSystem/ path or known systems)
-        if "/CodeSystem/" in resource or resource in (
-            "http://loinc.org",
-            "http://snomed.info/sct",
-            "http://www.ama-assn.org/go/cpt",
-        ):
+        # A positive test, not an exclusion list. `relatedArtifact` mixes Library,
+        # ValueSet and CodeSystem canonicals, and a blocklist of known code systems
+        # fails open: anything not on the list is admitted as a ValueSet and then
+        # searched for as one, which can never match. Only ValueSet-shaped
+        # canonicals are collected.
+        if "/ValueSet/" not in resource:
             continue
         found.add(resource.split("|")[0])
 

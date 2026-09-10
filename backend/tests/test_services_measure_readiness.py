@@ -143,11 +143,15 @@ def test_extract_valueset_canonicals_from_both_locations():
             {"type": "Observation", "codeFilter": [{"path": "code", "valueSet": "http://vs/two|20210101"}]},
         ],
         "relatedArtifact": [
-            {"type": "depends-on", "resource": "http://vs/three"},
+            {"type": "depends-on", "resource": "http://cts.nlm.nih.gov/fhir/ValueSet/vs-three"},
             {"type": "depends-on", "resource": "https://madie.cms.gov/Library/FHIRHelpers|4.4.000"},
         ],
     }
-    assert extract_valueset_canonicals(library) == ["http://vs/one", "http://vs/three", "http://vs/two"]
+    assert extract_valueset_canonicals(library) == [
+        "http://cts.nlm.nih.gov/fhir/ValueSet/vs-three",
+        "http://vs/one",
+        "http://vs/two",
+    ]
 
 
 def test_extract_valueset_canonicals_ignores_libraries_and_dedupes():
@@ -209,6 +213,28 @@ def test_extract_valueset_canonicals_excludes_codesystem_canonicals():
             {"type": "depends-on", "resource": "http://snomed.info/sct"},
             {"type": "depends-on", "resource": "http://www.ama-assn.org/go/cpt"},
             {"type": "depends-on", "resource": "http://terminology.hl7.org/CodeSystem/condition-clinical"},
+            {
+                "type": "depends-on",
+                "resource": "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.1003",
+            },
+        ],
+    }
+    assert extract_valueset_canonicals(library) == [
+        "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.1003"
+    ]
+
+
+def test_extract_valueset_canonicals_excludes_unlisted_code_systems():
+    """A blocklist of known code systems fails open; the filter must be positive.
+
+    HCPCS carries no `/CodeSystem/` path segment, so any exclusion-list approach
+    admits it and the measure then reports a value set that can never be found.
+    """
+    from app.services.measure_readiness import extract_valueset_canonicals
+
+    library = {
+        "relatedArtifact": [
+            {"type": "depends-on", "resource": "http://www.cms.gov/Medicare/Coding/HCPCSReleaseCodeSets"},
             {
                 "type": "depends-on",
                 "resource": "http://cts.nlm.nih.gov/fhir/ValueSet/2.16.840.1.113883.3.464.1003.1003",
