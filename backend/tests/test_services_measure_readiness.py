@@ -729,3 +729,60 @@ async def test_run_sweep_leaves_no_row_stuck_in_checking_when_a_check_explodes(t
     rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
     assert rows[0].state is ReadinessState.unknown
     assert "boom" in (rows[0].error or "")
+
+
+async def test_run_sweep_updates_the_claimed_checking_row_in_place(test_session, mcs_row, monkeypatch):
+    """The production path: claim_unchecked inserts `checking`, the sweep updates THAT row.
+
+    Every other sweep test starts from an empty table and so only exercises the
+    insert branch. If _store_verdict inserted a second row instead of updating,
+    Task 1's unique constraint on (mcs_id, measure_id, measure_version) would
+    raise IntegrityError here.
+    """
+    from sqlalchemy import select
+
+    import app.services.measure_readiness as svc
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    async def fake_check(mcs_url, measure_id, **kwargs):
+        return svc.ReadinessVerdict(state=ReadinessState.ready, duration_ms=1234)
+
+    monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
+    monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
+
+    claimed = await svc.claim_unchecked(test_session, mcs_row.id, [("CMS122", "0.5.000")])
+    assert claimed == [("CMS122", "0.5.000")]
+
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert len(rows) == 1 and rows[0].state is ReadinessState.checking
+
+    await svc.run_sweep(mcs_row.id, claimed)
+
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert len(rows) == 1, f"expected the claimed row to be updated in place, got {len(rows)} rows"
+    assert rows[0].state is ReadinessState.ready
+    assert rows[0].duration_ms == 1234
+    assert rows[0].checked_at is not None
+
+
+async def test_mark_all_checking_resets_existing_verdicts_and_adds_missing_rows(test_session, mcs_row):
+    """The manual re-check path: every listed measure ends up `checking`.
+
+    Covers both halves — an existing ready/not_ready verdict is discarded, and a
+    measure with no row at all gains one.
+    """
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+    from app.services.measure_readiness import mark_all_checking
+
+    test_session.add(
+        MeasureReadiness(mcs_id=mcs_row.id, measure_id="CMS122", measure_version="0.5.000", state=ReadinessState.ready)
+    )
+    await test_session.commit()
+
+    await mark_all_checking(test_session, mcs_row.id, [("CMS122", "0.5.000"), ("CMS124", "1.0.000")])
+
+    rows = {r.measure_id: r for r in (await test_session.execute(select(MeasureReadiness))).scalars().all()}
+    assert set(rows) == {"CMS122", "CMS124"}
+    assert all(r.state is ReadinessState.checking for r in rows.values())
