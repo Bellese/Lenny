@@ -180,6 +180,11 @@
   color: var(--text);
 }
 
+.retryBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .badgeBad {
   background: var(--err-wash);
   color: var(--err);
@@ -231,12 +236,14 @@
     margin-bottom: 14px;
   }
 
-  .headerActions,
-  .btnPrimary {
+  .headerActions {
     width: 100%;
+    flex-direction: column;
   }
 
-  .btnPrimary {
+  .headerActions .btnPrimary,
+  .headerActions .retryBtn {
+    width: 100%;
     justify-content: center;
     min-height: 40px;
   }

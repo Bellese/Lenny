@@ -229,7 +229,9 @@ describe('MeasuresPage — readiness (#434)', () => {
     }
   });
 
-  test('the page stops polling once nothing is checking', async () => {
+  test('the page never starts polling when nothing is checking from the start', async () => {
+    // Distinct from the transition test below: this proves an interval that
+    // never began makes no calls, not that a running interval tears down.
     jest.useFakeTimers();
     try {
       renderMeasuresPage([measureWith(READY)]);
@@ -241,6 +243,41 @@ describe('MeasuresPage — readiness (#434)', () => {
       });
 
       expect(api.getMeasures.mock.calls.length).toBe(callsAfterLoad);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('the page stops polling once a running sweep settles', async () => {
+    // The guarantee that actually matters: an interval that IS running (a row
+    // started out `checking`) must be torn down once a later poll settles the
+    // last checking row — otherwise the page polls forever after the sweep
+    // finishes, invisible load with no user-visible signal.
+    jest.useFakeTimers();
+    try {
+      const mcs = { id: 'mcs-1', name: 'Alphora Sandbox' };
+      api.getMeasures = jest.fn()
+        .mockResolvedValueOnce({ measures: [measureWith(CHECKING)], total: 1, mcs })
+        .mockResolvedValue({ measures: [measureWith(READY)], total: 1, mcs });
+      renderWithMcs();
+
+      await screen.findByText(/Checking/i);
+      expect(api.getMeasures).toHaveBeenCalledTimes(1);
+
+      // One interval tick: the poll's response settles the row to ready.
+      await act(async () => {
+        jest.advanceTimersByTime(5000);
+      });
+      await screen.findByText(/^Ready$/);
+      expect(api.getMeasures).toHaveBeenCalledTimes(2);
+
+      // Several more intervals' worth of time must produce no further
+      // calls — the effect's cleanup must have cleared the timer once
+      // anyChecking flipped to false.
+      await act(async () => {
+        jest.advanceTimersByTime(20000);
+      });
+      expect(api.getMeasures).toHaveBeenCalledTimes(2);
     } finally {
       jest.useRealTimers();
     }
