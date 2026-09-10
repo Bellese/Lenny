@@ -217,10 +217,24 @@
   font-size: 0.8125rem;
 }
 
+/* An `unknown` verdict's explanation must not be styled like a failure: the
+   check could not complete, which says nothing bad about the measure. */
+.readinessNeutralError {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
 .readinessNote {
   margin: 0.375rem 0 0;
   color: var(--text-muted);
   font-size: 0.75rem;
+}
+
+.staleNote {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
 }
 
 @media (max-width: 820px) {
@@ -285,6 +299,26 @@
     font-weight: 500;
     letter-spacing: 0.06em;
     text-transform: uppercase;
+  }
+
+  /* The expanded readiness panel is a full-width `<td colSpan={6}>` with no
+     data-label, so the generic card rule above (flex + space-between, meant
+     for a label/value pair) lays its paragraphs and lists out sideways. It
+     needs to stay a block. NOT visually verified — no device or browser
+     screenshot was taken for this rule. */
+  .card tr.detailRow {
+    padding: 0 16px 16px;
+  }
+
+  .card .detailRow > td {
+    display: block;
+    padding: 12px;
+    border-radius: var(--radius);
+    text-align: left;
+  }
+
+  .card .detailRow > td::before {
+    display: none;
   }
 
   .card td[data-label="Measure"] {

@@ -132,6 +132,13 @@ describe('MeasuresPage — readiness (#434)', () => {
     error: 'Could not load source for library Status, version 1.15.000, namespace uri null.',
   };
   const UNKNOWN = { state: 'unknown', checked_at: null, missing_libraries: [], missing_valuesets: [], error: null };
+  const UNKNOWN_WITH_ERROR = {
+    state: 'unknown',
+    checked_at: null,
+    missing_libraries: [],
+    missing_valuesets: [],
+    error: 'HTTP 401: the measure server refused the request. Check this connection\u2019s credentials.',
+  };
   const CHECKING = { state: 'checking', checked_at: null, missing_libraries: [], missing_valuesets: [], error: null };
 
   function renderMeasuresPage(measures, mcsOverrides = {}) {
@@ -161,7 +168,10 @@ describe('MeasuresPage — readiness (#434)', () => {
 
   test('a measure being checked shows Checking', async () => {
     renderMeasuresPage([measureWith(CHECKING)]);
-    expect(await screen.findByText(/Checking/i)).toBeInTheDocument();
+    // `{ selector: 'span' }` picks the row's badge specifically: the Re-check
+    // BUTTON also reads "Checking…" for the duration of a sweep now (it is
+    // disabled while one runs), so a bare /Checking/ matches two nodes.
+    expect(await screen.findByText(/^Checking…$/, { selector: 'span' })).toBeInTheDocument();
   });
 
   test('expanding a not-ready measure lists what is missing', async () => {
@@ -216,7 +226,7 @@ describe('MeasuresPage — readiness (#434)', () => {
     jest.useFakeTimers();
     try {
       renderMeasuresPage([measureWith(CHECKING)]);
-      await screen.findByText(/Checking/i);
+      await screen.findByText(/^Checking…$/, { selector: 'span' });
       const callsAfterLoad = api.getMeasures.mock.calls.length;
 
       await act(async () => {
@@ -261,7 +271,7 @@ describe('MeasuresPage — readiness (#434)', () => {
         .mockResolvedValue({ measures: [measureWith(READY)], total: 1, mcs });
       renderWithMcs();
 
-      await screen.findByText(/Checking/i);
+      await screen.findByText(/^Checking…$/, { selector: 'span' });
       expect(api.getMeasures).toHaveBeenCalledTimes(1);
 
       // One interval tick: the poll's response settles the row to ready.
@@ -281,5 +291,130 @@ describe('MeasuresPage — readiness (#434)', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+  test('an unknown verdict WITH an error explains itself and points at Re-check', async () => {
+    // Three routes reach `unknown` — timeout, 401/403, restart reclaim — and
+    // all three record why. Rendering a bare "Not checked" with no toggle and
+    // no title threw that away, and because a row now exists the backend never
+    // re-claims it: one bad credential and every measure read "Not checked"
+    // forever, with no explanation and no hint that Re-check is the cure.
+    renderMeasuresPage([measureWith(UNKNOWN_WITH_ERROR)]);
+
+    const badge = await screen.findByRole('button', {
+      name: /Readiness details for Diabetes: Hemoglobin A1c Poor Control/i,
+    });
+    expect(badge).toHaveAttribute('title', expect.stringContaining('refused the request'));
+    // Still NOT a failure badge: `unknown` must never read as not-ready.
+    expect(badge.className).not.toMatch(/badgeBad/);
+
+    await userEvent.click(badge);
+    expect(await screen.findByText(/refused the request/i)).toBeInTheDocument();
+    expect(screen.getByText(/Re-check readiness.{0,3} to try again/i)).toBeInTheDocument();
+  });
+
+  test('an unknown verdict with nothing to say stays a plain badge with no toggle', async () => {
+    renderMeasuresPage([measureWith(UNKNOWN)]);
+    await screen.findByText(/Not checked/i);
+    expect(screen.queryByRole('button', { name: /readiness details/i })).not.toBeInTheDocument();
+  });
+
+  test('a failed background poll keeps the table instead of blanking it', async () => {
+    // Before this fix a quiet poll called setError, and the render swapped the
+    // whole table for a full-page "Cannot reach {mcs}" banner — then self-healed
+    // on the next 5s tick, so the list the user was reading flashed away and back.
+    jest.useFakeTimers();
+    try {
+      const mcs = { id: 'mcs-1', name: 'Alphora Sandbox' };
+      api.getMeasures = jest.fn()
+        .mockResolvedValueOnce({ measures: [measureWith(CHECKING)], total: 1, mcs })
+        .mockRejectedValue(new Error('Connection reset by peer'));
+      renderWithMcs();
+
+      await screen.findByText(/^Checking…$/, { selector: 'span' });
+      const rows = screen.getAllByText(/Diabetes: Hemoglobin A1c Poor Control/i).length;
+
+      await act(async () => {
+        jest.advanceTimersByTime(5000);
+      });
+
+      expect(api.getMeasures).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText(/Cannot reach/i)).not.toBeInTheDocument();
+      expect(screen.getAllByText(/Diabetes: Hemoglobin A1c Poor Control/i)).toHaveLength(rows);
+      expect(screen.getByText(/showing the last result/i)).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  test('a user-initiated load still surfaces the failure as a banner', async () => {
+    // The counterpart to the test above: quiet-only suppression must not make
+    // a real, user-visible failure silent.
+    api.getMeasures = jest.fn().mockRejectedValue(new Error('Connection refused'));
+    renderWithMcs({ name: 'Alphora Sandbox' });
+    expect(await screen.findByText(/Cannot reach Alphora Sandbox/i)).toBeInTheDocument();
+  });
+
+  test('Re-check is disabled for the whole sweep, not just the POST', async () => {
+    // Ten clicks used to mean ten concurrent sweeps against a shared measure
+    // server, defeating the backend's concurrency cap (which bounds one sweep).
+    api.refreshMeasureReadiness = jest.fn().mockResolvedValue({ status: 'accepted', measures: 1 });
+    renderMeasuresPage([measureWith(CHECKING)]);
+    await screen.findByText(/^Checking…$/, { selector: 'span' });
+
+    const button = screen.getByRole('button', { name: /checking/i });
+    expect(button).toBeDisabled();
+    await userEvent.click(button);
+    expect(api.refreshMeasureReadiness).not.toHaveBeenCalled();
+  });
+
+  test('Re-check is enabled again once nothing is checking', async () => {
+    // Guards the test above against passing for the trivial reason that the
+    // button is always disabled.
+    renderMeasuresPage([measureWith(READY)]);
+    await screen.findByText(/^Ready$/);
+    expect(screen.getByRole('button', { name: /re-check readiness/i })).toBeEnabled();
+  });
+
+  test('a re-check the backend skipped is reported, not silently ignored', async () => {
+    api.refreshMeasureReadiness = jest.fn().mockResolvedValue({ status: 'skipped', measures: 0 });
+    renderMeasuresPage([measureWith(NOT_READY)]);
+    await screen.findByText(/Not ready/i);
+
+    await act(async () => {
+      await userEvent.click(screen.getByRole('button', { name: /re-check readiness/i }));
+    });
+
+    expect(await screen.findByText(/skipped/i)).toBeInTheDocument();
+  });
+
+  test('an expanded row collapses when it stops having anything to show', async () => {
+    // A poll that turns an expanded not-ready row green used to leave an empty
+    // grey detail panel behind.
+    const mcs = { id: 'mcs-1', name: 'Alphora Sandbox' };
+    api.refreshMeasureReadiness = jest.fn().mockResolvedValue({ status: 'accepted', measures: 1 });
+    api.getMeasures = jest.fn()
+      .mockResolvedValueOnce({ measures: [measureWith(NOT_READY)], total: 1, mcs })
+      .mockResolvedValue({ measures: [measureWith(READY)], total: 1, mcs });
+    const { container } = renderWithMcs();
+
+    await userEvent.click(
+      await screen.findByRole('button', {
+        name: /Readiness details for Diabetes: Hemoglobin A1c Poor Control/i,
+      }),
+    );
+    expect(await screen.findByText(/Could not load source for library Status/)).toBeInTheDocument();
+    expect(container.querySelectorAll('.detailRow')).toHaveLength(1);
+
+    // Any quiet reload will do; Re-check is the one the user can press.
+    await act(async () => {
+      await userEvent.click(screen.getByRole('button', { name: /re-check readiness/i }));
+    });
+
+    await screen.findByText(/^Ready$/);
+    expect(screen.queryByText(/Could not load source for library Status/)).not.toBeInTheDocument();
+    // Asserting on the absent TEXT alone would pass with the bug present: a
+    // ready verdict has no error and no missing lists, so the leftover panel
+    // is empty, not absent. The row itself has to be gone.
+    expect(container.querySelectorAll('.detailRow')).toHaveLength(0);
   });
 });

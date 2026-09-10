@@ -58,25 +58,41 @@ const READINESS_LABELS = {
   unknown: 'Not checked',
 };
 
+// `unknown` means "not checked, or the check could not complete" — a timeout,
+// a refused credential, a restart mid-sweep. All three record WHY, and hiding
+// that behind a bare "Not checked" is what the design spec promised against.
+// So an `unknown` WITH an error gets the same expandable affordance as
+// not_ready; an `unknown` with nothing to say stays a plain, silent badge.
+// This is the single source of truth for "is there anything to expand" — the
+// badge and the detail row must never disagree, or a row can be left expanded
+// over an empty grey panel.
+function hasReadinessDetail(readiness) {
+  if (!readiness) return false;
+  if (readiness.state === 'not_ready') return true;
+  return readiness.state === 'unknown' && !!readiness.error;
+}
+
 function ReadinessBadge({ readiness, expanded, onToggle, measureName }) {
   const state = readiness?.state || 'unknown';
   const label = READINESS_LABELS[state] || READINESS_LABELS.unknown;
 
-  if (state !== 'not_ready') {
-    // Only ready/checking add a modifier class on top of the base badge —
-    // anything else (unknown) renders the base class alone, not
-    // `${styles.badge} ${styles.badge}` (Task 7 review Fix 2).
-    if (state === 'ready') return <span className={`${styles.badge} ${styles.badgeOk}`}>{label}</span>;
-    if (state === 'checking') return <span className={`${styles.badge} ${styles.badgeDraft}`}>{label}</span>;
-    return <span className={styles.badge}>{label}</span>;
-  }
+  // Only ready/checking add a modifier class on top of the base badge —
+  // anything else (unknown) renders the base class alone, not
+  // `${styles.badge} ${styles.badge}` (Task 7 review Fix 2).
+  if (state === 'ready') return <span className={`${styles.badge} ${styles.badgeOk}`}>{label}</span>;
+  if (state === 'checking') return <span className={`${styles.badge} ${styles.badgeDraft}`}>{label}</span>;
+  if (!hasReadinessDetail(readiness)) return <span className={styles.badge}>{label}</span>;
 
+  // `unknown` keeps the neutral badge deliberately: it is not a verdict about
+  // the measure, and must never read as a failure. It only gains the toggle.
+  const toneClass = state === 'not_ready' ? `${styles.badgeBad} ` : '';
   return (
     <button
       type="button"
-      className={`${styles.badge} ${styles.badgeBad} ${styles.readinessToggle}`}
+      className={`${styles.badge} ${toneClass}${styles.readinessToggle}`}
       aria-expanded={expanded}
       aria-label={`Readiness details for ${measureName}`}
+      title={readiness.error || undefined}
       onClick={onToggle}
     >
       {label}
@@ -85,9 +101,18 @@ function ReadinessBadge({ readiness, expanded, onToggle, measureName }) {
 }
 
 function ReadinessDetail({ readiness }) {
+  const isUnknown = readiness.state === 'unknown';
   return (
     <div className={styles.readinessDetail}>
-      {readiness.error && <p className={styles.readinessError}>{readiness.error}</p>}
+      {readiness.error && (
+        <p className={isUnknown ? styles.readinessNeutralError : styles.readinessError}>{readiness.error}</p>
+      )}
+      {isUnknown && (
+        <p className={styles.readinessNote}>
+          This measure was not checked — the check could not complete. Nothing is
+          known to be wrong with it. Use “Re-check readiness” to try again.
+        </p>
+      )}
       {readiness.missing_libraries?.length > 0 && (
         <>
           <h4>Missing libraries</h4>
@@ -125,6 +150,7 @@ export default function MeasuresPage() {
   const [error, setError] = useState(null);
   const [uploading, setUploading] = useState(false);
   const [rechecking, setRechecking] = useState(false);
+  const [refreshFailed, setRefreshFailed] = useState(false);
   const [confirm, setConfirm] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
   const fileInputRef = useRef(null);
@@ -134,14 +160,25 @@ export default function MeasuresPage() {
 
   const loadMeasures = useCallback(async ({ quiet = false } = {}) => {
     if (!quiet) setLoading(true);
-    setError(null);
+    if (!quiet) setError(null);
     try {
       const data = await getMeasures();
       setMeasures(Array.isArray(data) ? data : data.measures || data.entry || []);
       setMeasuresMcs(Array.isArray(data) ? null : (data.mcs || null));
+      setRefreshFailed(false);
     } catch (err) {
-      // Never render a stale list from a previous connection — the whole
-      // point of this fix is that an unreachable MCS shows empty, not old data.
+      // A QUIET load is the readiness poll, firing every 5s behind a table the
+      // user is reading. One transient blip must not replace that table with a
+      // full-page "Cannot reach {mcs}" banner that self-heals on the next tick
+      // — that flashes, and destroys the list for a failure the user never
+      // asked about. Keep the last good data and say so in one line instead.
+      if (quiet) {
+        setRefreshFailed(true);
+        return;
+      }
+      // A user-initiated load is different: never render a stale list from a
+      // previous connection — the whole point of #396 is that an unreachable
+      // MCS shows empty, not old data.
       setMeasures([]);
       setMeasuresMcs(null);
       const { issues, errorDetails } = parseFhirError(err.body);
@@ -166,12 +203,27 @@ export default function MeasuresPage() {
     return () => clearInterval(timer);
   }, [anyChecking, loadMeasures]);
 
+  // A row that stops having anything to show must not leave an expanded,
+  // empty grey detail panel behind — a 5s poll can turn an expanded not-ready
+  // row green underneath the user.
+  useEffect(() => {
+    if (expandedId === null) return;
+    const row = measures.find((m, i) => (m.id || i) === expandedId);
+    if (!hasReadinessDetail(row?.readiness)) setExpandedId(null);
+  }, [measures, expandedId]);
+
   const handleUploadClick = () => fileInputRef.current?.click();
 
   const handleRecheck = async () => {
     setRechecking(true);
     try {
-      await refreshMeasureReadiness();
+      const result = await refreshMeasureReadiness();
+      // The backend answers `skipped` when there is no MCSConfig row to write
+      // verdicts against. Nothing was queued, so saying nothing at all would
+      // make a no-op look like a successful re-check.
+      if (result?.status === 'skipped') {
+        toast.error('Readiness check skipped: no active measure server connection to check against.');
+      }
       await loadMeasures({ quiet: true });
     } catch (err) {
       toast.error(`Could not start readiness check: ${err.message || 'Request failed'}`);
@@ -232,15 +284,25 @@ export default function MeasuresPage() {
               {measuresMcs?.name || mcs.name || 'the active connection'}
             </div>
           )}
+          {!loading && !error && refreshFailed && (
+            <div className={styles.staleNote} role="status">
+              Couldn’t refresh just now — showing the last result.
+            </div>
+          )}
         </div>
         <div className={styles.headerActions}>
+          {/* Disabled for the whole sweep, not just the milliseconds the POST
+              is in flight. Ten clicks used to mean ten concurrent sweeps
+              against a shared measure server — exactly what the backend's
+              concurrency cap exists to prevent (it caps one sweep, not ten).
+              It also makes the "Checking…" label truthful throughout. */}
           <button
             className={styles.retryBtn}
             onClick={handleRecheck}
-            disabled={rechecking}
-            aria-busy={rechecking}
+            disabled={rechecking || anyChecking}
+            aria-busy={rechecking || anyChecking}
           >
-            {rechecking ? 'Checking…' : 'Re-check readiness'}
+            {rechecking || anyChecking ? 'Checking…' : 'Re-check readiness'}
           </button>
           <button
             className={styles.btnPrimary}
@@ -293,7 +355,11 @@ export default function MeasuresPage() {
             issues={error.issues}
             errorDetails={error.errorDetails}
           />
-          <button className={styles.retryBtn} onClick={loadMeasures}>Retry</button>
+          {/* Wrapped: passing the click handler directly hands React's event
+              object in as the options bag. It works only by accident today
+              (`event.quiet` is undefined), and would silently mean "quiet"
+              the moment another option is added. */}
+          <button className={styles.retryBtn} onClick={() => loadMeasures()}>Retry</button>
         </div>
       )}
 
@@ -355,7 +421,7 @@ export default function MeasuresPage() {
                           </div>
                         </td>
                       </tr>
-                      {isExpanded && readiness && (
+                      {isExpanded && hasReadinessDetail(readiness) && (
                         <tr className={styles.detailRow}>
                           <td colSpan={6}><ReadinessDetail readiness={readiness} /></td>
                         </tr>
