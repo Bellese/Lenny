@@ -56,7 +56,9 @@ backend/app/
     jobs.py         POST /jobs, GET /jobs, GET /jobs/{id}, POST /jobs/{id}/cancel,
                     GET /jobs/{id}/measure-report (FHIR Bundle of individual MeasureReports),
                     GET /jobs/{id}/comparison (actual vs. expected population counts)
-    measures.py     GET /measures, POST /measures/upload
+    measures.py     GET /measures, POST /measures/upload, DELETE /measures/{id},
+                    POST /measures/readiness/refresh (drops the active MCS's cached
+                    readiness verdicts and re-sweeps every measure; 202 + detached task)
     results.py      GET /results, GET /results/{job_id}
     groups.py       GET /api/groups, POST /api/groups/{id}/evaluate — experimental.
                     Admin-gated (`groups_enabled`); lists CQL-evaluatable Groups from

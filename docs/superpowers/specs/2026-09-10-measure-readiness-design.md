@@ -159,8 +159,15 @@ existing ones.
   for the same operation on the DEQM path. Not changed here, but 11 s measured
   against a 30 s ceiling is thinner headroom than it looks.)
 - `asyncio.create_task` does not survive a restart. Rows left `checking` by a
-  crash are reclaimed to `unknown` at startup, mirroring how `main.py` already
-  reclaims stranded jobs.
+  crash are DELETED at startup (`reclaim_stranded_checks`), mirroring how
+  `main.py` already reclaims stranded jobs. This design originally said
+  "reclaimed to `unknown`"; deleting instead is a deliberate later change.
+  `claim_unchecked` only claims measures with NO row, and verdicts have no TTL,
+  so an `unknown` row is terminal — the measure would read "Not checked"
+  forever, for a reason (a deploy-time restart) that has nothing to do with the
+  measure. With the row gone the next `GET /measures` re-claims it and the
+  sweep runs again by itself. Nothing is lost: the row held only a `checking`
+  placeholder.
 
 **Triggers**, all event-driven — no TTL, since content on a FHIR server does not
 rot on a timer:
