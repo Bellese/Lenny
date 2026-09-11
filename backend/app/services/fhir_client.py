@@ -161,16 +161,46 @@ def _validate_ssrf_url(url: str, label: str = "URL") -> None:
         )
 
 
+# A URL that names its scheme's default port is the SAME origin as one that
+# omits it. HAPI builds paging links from its configured `server_address`, which
+# routinely carries an explicit `:443` the operator never typed into Lenny, so a
+# raw `a.port == b.port` comparison rejects a perfectly legitimate link from the
+# very server we just queried.
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    """The port a URL actually talks to: explicit, or its scheme's default."""
+    return port if port is not None else _DEFAULT_PORTS.get(scheme)
+
+
 def _same_origin(base_url: str, next_url: str) -> bool:
     """Return True if next_url shares the same scheme, host, and port as base_url.
 
     Pagination next links must always point back to the same CDR server.
     A malicious CDR returning a next link to a different host (e.g. an internal
     Docker service) is the SSRF vector this check blocks.
+
+    Default ports are normalised per scheme before comparison (see
+    `_DEFAULT_PORTS`) — `https://h` and `https://h:443` are one origin.
+
+    A `next_url` whose authority carries a non-numeric or out-of-range port
+    (`https://host:99999/`) makes `urlparse(...).port` raise `ValueError`.
+    That is caught and reported as a MISMATCH rather than allowed to escape:
+    callers treat this function as a boolean guard, and an exception escaping
+    here surfaces to the operator as a generic network failure, hiding the fact
+    that an SSRF rejection is what actually happened. Unparseable is not
+    same-origin, so `False` is both the safe answer and the honest one.
     """
-    a = urlparse(base_url)
-    b = urlparse(next_url)
-    return a.scheme == b.scheme and a.hostname == b.hostname and a.port == b.port
+    try:
+        a = urlparse(base_url)
+        b = urlparse(next_url)
+        a_port = _effective_port(a.scheme, a.port)
+        b_port = _effective_port(b.scheme, b.port)
+    except ValueError:
+        logger.warning("SSRF: rejecting a link whose port could not be parsed")
+        return False
+    return a.scheme == b.scheme and a.hostname == b.hostname and a_port == b_port
 
 
 async def _build_auth_headers(auth_type: str, auth_credentials: Optional[dict]) -> dict[str, str]:

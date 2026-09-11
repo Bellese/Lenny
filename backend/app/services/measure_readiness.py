@@ -14,6 +14,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from urllib.parse import urljoin
 
 import httpx
 from sqlalchemy import delete as sa_delete
@@ -24,7 +25,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.config import settings
 from app.models.measure_readiness import MeasureReadiness, ReadinessState
 from app.services.fhir_client import _same_origin
-from app.services.fhir_errors import FhirOperationOutcome, hint_for_network_exception, sanitize_url
+from app.services.fhir_errors import (
+    FhirOperationOutcome,
+    _sanitize_str,
+    hint_for_network_exception,
+    sanitize_url,
+)
+from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
 
@@ -113,16 +120,32 @@ class ReadinessVerdict:
 
 
 def _error_diagnostic(outcome: FhirOperationOutcome | None) -> str | None:
-    """The first error/fatal diagnostic, or None if the outcome is only advisory.
+    """The first error/fatal diagnostic, REDACTED, or None if only advisory.
 
     Warning and information issues accompany successful responses; treating them
     as failures is the naive mistake #415 documented on the submit_data path.
+
+    Redacted here rather than at the display layer because this is the single
+    point every caller reads the diagnostic through, and what the callers do
+    with it is persist it: the text lands in `measure_readiness.error` and is
+    rendered verbatim in the UI. The MCS is third-party by design (connectathon
+    servers, BYO CDRs) and `redact_outcome` records why its text is not trusted
+    — HAPI echoes failed request bodies into diagnostics, which can carry the
+    Authorization header we just sent it. `_sanitize_str` is the same primitive
+    `build_error_envelope` already applies to `issue[].diagnostics`.
+
+    `extract_missing_libraries` is unaffected: it matches a library name and
+    version, neither of which any redaction pattern touches.
     """
     if outcome is None:
         return None
     for issue in outcome.issues:
         if issue.severity in ("error", "fatal"):
-            return issue.diagnostics or "Server reported an error with no diagnostic."
+            return (
+                _sanitize_str(issue.diagnostics)
+                if issue.diagnostics
+                else "Server reported an error with no diagnostic."
+            )
     return None
 
 
@@ -146,6 +169,20 @@ def _next_page_url(bundle: dict) -> str | None:
         if link.get("relation") == "next" and link.get("url"):
             return str(link["url"])
     return None
+
+
+class PaginationBudgetExceededError(RuntimeError):
+    """Raised when the page walk hits `_VALUESET_MAX_PAGES` with a `next` outstanding.
+
+    Same reasoning as `UnsafePaginationLinkError`, from the other exit of the
+    same loop: this function's result is a MISSING list, so stopping the walk
+    early and returning what has been seen so far reports every canonical on
+    the unread remainder as absent — a false `not_ready`, which tells an
+    operator their working server is broken. The budget exists to stop a
+    self-referential `next` link spinning forever, not to license a wrong
+    answer; hitting it means we do not know, so the caller maps it to
+    `unknown`.
+    """
 
 
 class UnsafePaginationLinkError(RuntimeError):
@@ -215,19 +252,53 @@ async def find_missing_valuesets(
                 # A `next` link already carries the whole query, filter included;
                 # re-appending `params` would duplicate it.
                 candidate = _next_page_url(bundle)
-                if candidate is not None and not _same_origin(mcs_url, candidate):
-                    logger.warning(
-                        "SSRF: readiness ValueSet pagination next link rejected (origin mismatch)",
-                        extra={"mcs_url": sanitize_url(mcs_url), "next_url": sanitize_url(candidate)},
-                    )
-                    raise UnsafePaginationLinkError(
-                        f"The measure server returned a ValueSet page link pointing to a different "
-                        f"origin than {sanitize_url(mcs_url)}; refusing to follow it with credentials attached."
-                    )
+                if candidate is not None:
+                    # Relative and protocol-relative links are resolved against
+                    # `mcs_url` BEFORE the origin check, never after. A server is
+                    # entitled to emit `next` as `/fhir?_getpages=...` (scheme
+                    # `''`, hostname `None`), which the origin check would
+                    # otherwise reject as a mismatch — a false `unknown` on a
+                    # perfectly good server. Keeping the check on the far side of
+                    # the join is what stops that leniency from opening a hole:
+                    # `//evil.example/x` resolves to `https://evil.example/x`,
+                    # which is exactly the off-origin link the guard must refuse.
+                    try:
+                        resolved: str | None = urljoin(mcs_url, candidate)
+                    except ValueError:
+                        resolved = None
+                    if resolved is None or not _same_origin(mcs_url, resolved):
+                        logger.warning(
+                            "SSRF: readiness ValueSet pagination next link rejected (origin mismatch)",
+                            extra={"mcs_url": sanitize_url(mcs_url), "next_url": sanitize_url(candidate)},
+                        )
+                        # Deliberately no URL in the text. This string is
+                        # persisted to `measure_readiness.error`, returned by
+                        # `GET /measures` and rendered in the UI, and
+                        # `sanitize_url` only redacts DOTLESS hosts — so
+                        # `http://10.0.2.15:8080/fhir` and
+                        # `http://mcs.internal.corp/fhir` would pass through
+                        # intact, undoing on the readiness path exactly what the
+                        # measures route refuses to publish on its 200 path. The
+                        # operator already knows which connection they are
+                        # looking at.
+                        raise UnsafePaginationLinkError(
+                            "The measure server returned a ValueSet page link pointing to a different "
+                            "origin than the configured measure server; refusing to follow it with "
+                            "credentials attached."
+                        )
+                    candidate = resolved
                 next_url = candidate
                 params = None
                 if next_url is None:
                     break
+            else:
+                # Budget exhausted with a `next` link still outstanding: see
+                # `PaginationBudgetExceededError`. Falling out of the loop here
+                # is what would produce the false `not_ready`.
+                raise PaginationBudgetExceededError(
+                    f"The measure server's ValueSet search did not finish within {_VALUESET_MAX_PAGES} "
+                    "pages, so the results are incomplete."
+                )
 
     return [c for c in normalised if c not in present]
 
@@ -270,6 +341,24 @@ async def check_measure_readiness(
             f"HTTP {resp.status_code}: the measure server refused the request. Check this connection's credentials."
         )
         return ReadinessVerdict(state=ReadinessState.unknown, error=auth_error, duration_ms=elapsed())
+
+    # A redirect is not evidence about the measure. `follow_redirects` is off
+    # (deliberately — an MCS response must not be able to steer a credentialed
+    # request somewhere else), so a 3xx arrives here intact and would otherwise
+    # fall into the non-2xx branch below and mark EVERY measure on the
+    # connection `not_ready`. The commonest causes are entirely benign and have
+    # nothing to do with CQL: an http→https upgrade or a trailing-slash
+    # normalisation in a proxy in front of the MCS. We never saw an answer, so
+    # the answer is `unknown`.
+    if 300 <= resp.status_code < 400:
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error=(
+                f"HTTP {resp.status_code}: the measure server redirected $data-requirements. "
+                "Check this connection's URL."
+            ),
+            duration_ms=elapsed(),
+        )
 
     outcome = FhirOperationOutcome.from_response(resp)
     diagnostic = _error_diagnostic(outcome)
@@ -325,15 +414,65 @@ async def check_measure_readiness(
             duration_ms=elapsed(),
         )
 
-    canonicals = extract_valueset_canonicals(library)
+    # `resourceType == "Library"` is not enough either, and this is the same
+    # false-READY hole one layer in. A Library carrying NEITHER
+    # `dataRequirement` NOR `relatedArtifact` — absent, or present and empty —
+    # yields zero canonicals, `find_missing_valuesets` short-circuits on the
+    # empty list without a single network call, `missing` is falsy, and the
+    # function returns `ready`: a green verdict produced without one byte of
+    # evidence about the measure. Real producers are mundane, not hostile — a
+    # Measure with no `library` element, a Library whose content attachment is
+    # empty or went unparsed, a gateway serving a cached stub.
+    #
+    # A genuine measure's `$data-requirements` always declares SOMETHING: the
+    # operation's whole purpose is to return the dependency closure the engine
+    # computed. A response that declares no dependencies at all is therefore
+    # telling us nothing about evaluability rather than telling us there is
+    # nothing to check, and `unknown` is the only honest reading. The empty-array
+    # case is covered on purpose: a `module-definition`-typed Library with
+    # `dataRequirement: []` is shaped exactly like a valid answer and is the
+    # variant a resourceType-and-profile check would wave through.
+    if not library.get("dataRequirement") and not library.get("relatedArtifact"):
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error=(
+                "$data-requirements returned a Library that declares no data requirements and no "
+                "related artifacts, so nothing about this measure could be verified."
+            ),
+            duration_ms=elapsed(),
+        )
+
+    # A body that IS a Library but whose declared fields are the wrong shape
+    # (`dataRequirement` a string, a `codeFilter` entry that is not an object)
+    # makes `extract_valueset_canonicals` raise. Guarded here so this function
+    # honours its own "never raises" contract standalone, rather than only
+    # because `run_sweep` happens to wrap the call.
+    #
+    # Deliberately NOT fixed by teaching the extractor to skip malformed
+    # entries: skipping yields zero canonicals, zero missing, and falls through
+    # to `ready` — a false READY, the one output this feature must never
+    # produce. A shape we cannot parse means we learned nothing, so: `unknown`.
+    try:
+        canonicals = extract_valueset_canonicals(library)
+    except Exception as exc:
+        logger.warning("Readiness: $data-requirements Library had an unparseable shape: %s", exc)
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error="$data-requirements returned a Library whose dependency fields are not the expected shape.",
+            duration_ms=elapsed(),
+        )
+
     try:
         missing = await find_missing_valuesets(
             mcs_url, canonicals, auth_headers=auth_headers, timeout=timeout, transport=transport
         )
-    except UnsafePaginationLinkError as exc:
+    except (UnsafePaginationLinkError, PaginationBudgetExceededError) as exc:
         # A distinct branch so the operator sees the real reason (a rejected
-        # off-origin next link) instead of `hint_for_network_exception`'s
-        # generic transport-failure text, which does not apply here.
+        # off-origin next link, or a page walk that outran its budget) instead
+        # of `hint_for_network_exception`'s generic transport-failure text,
+        # which does not apply to either. Both are `unknown`, never
+        # `not_ready`: in both cases part of the ValueSet search went unread,
+        # so the missing list is incomplete by construction.
         return ReadinessVerdict(
             state=ReadinessState.unknown,
             error=f"Could not verify value sets: {exc}",
@@ -427,14 +566,30 @@ async def mark_all_checking(session: AsyncSession, mcs_id: int, measures: list[t
     """Force every listed measure into `checking`, inserting rows that are absent.
 
     Used by the manual re-check, where the point is to discard current verdicts.
+
+    Each insert gets its own SAVEPOINT for the reason `claim_unchecked`
+    documents at length: `uq_measure_readiness_key` is racy by construction and
+    losing that race must never surface as an error. Here the window is between
+    this call's `invalidate_mcs` DELETE and its INSERTs — a double-clicked
+    Re-check, a second tab, or a retry runs both halves twice and the second
+    flow's INSERT can land on a row the first already wrote. Unguarded, that
+    `IntegrityError` escapes `refresh_readiness` (which does not catch it) as
+    FastAPI's default 500, breaking the `OperationOutcome` shape every other
+    path on that router returns. Losing the race costs nothing: the winner
+    wrote the same `checking` placeholder and fired its own sweep.
     """
     await invalidate_mcs(session, mcs_id)
     for measure_id, version in measures:
-        session.add(
-            MeasureReadiness(
-                mcs_id=mcs_id, measure_id=measure_id, measure_version=version, state=ReadinessState.checking
-            )
-        )
+        try:
+            async with session.begin_nested():
+                session.add(
+                    MeasureReadiness(
+                        mcs_id=mcs_id, measure_id=measure_id, measure_version=version, state=ReadinessState.checking
+                    )
+                )
+                await session.flush()
+        except IntegrityError:
+            continue
     await session.commit()
 
 
@@ -529,8 +684,43 @@ async def run_sweep(mcs_id: int, measures: list[tuple[str, str]]) -> None:
                 session, mcs_id=mcs_id, mcs_url=mcs_url, mcs_auth_type=cfg.auth_type.value, owner_label=f"MCS {mcs_id}"
             )
         except Exception as exc:
+            # Do NOT degrade to an anonymous sweep. Every verdict downstream is
+            # derived from whatever view of the server the headers buy, so
+            # continuing with `{}` measures the ANONYMOUS view and then labels
+            # the rows as if they described the user's connection. Against a
+            # HAPI that permits unauthenticated reads — the common connectathon
+            # setup — that produces perfectly plausible `ready` rows for a
+            # dataset the user's credentials would never have been shown: the
+            # false READY this feature must never emit, and the one no operator
+            # can detect by looking at it. `resolve_mcs_auth_headers` raises
+            # rather than degrading for exactly this reason; a sweep that
+            # swallows the raise re-opens what it was protecting.
+            #
+            # The credential failure is ours, not the measure's, so it is
+            # `unknown` for every measure in the sweep — written, not left
+            # spinning, because `claim_unchecked` skips rows that already exist
+            # and a `checking` row nothing ever fills in is a spinner until
+            # restart. `sanitize_error`: the raw text of a SMART token-endpoint
+            # or TLS failure carries the URL, credentials and internal hostnames
+            # included, straight into a stored and rendered `error`.
             logger.warning("Readiness sweep could not authenticate to MCS %s: %s", mcs_id, exc)
-            auth_headers = {}
+            verdict = ReadinessVerdict(
+                state=ReadinessState.unknown,
+                error=(
+                    "Could not authenticate to the measure server, so readiness could not be checked. "
+                    f"Check this connection's credentials. ({sanitize_error(exc)})"
+                ),
+            )
+            for measure_id, version in measures:
+                try:
+                    await _store_verdict(session, mcs_id, measure_id, version, verdict)
+                except Exception:
+                    logger.exception("Could not store readiness auth-failure verdict for %s", measure_id)
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        logger.exception("Rollback after a failed readiness write also failed")
+            return
 
         async def one(measure_id: str, version: str) -> None:
             async with semaphore:
@@ -543,8 +733,15 @@ async def run_sweep(mcs_id: int, measures: list[tuple[str, str]]) -> None:
                     )
                 except Exception as exc:
                     # A raising check must not leave the row spinning until restart.
+                    # `sanitize_error`, not `{exc}`: this branch exists for the
+                    # exceptions nothing else vetted, and the raw text of an
+                    # httpx/SSL failure carries the MCS URL — credentials and
+                    # internal hostnames included — straight into a stored,
+                    # rendered `measure_readiness.error`.
                     logger.exception("Readiness check raised for %s", measure_id)
-                    verdict = ReadinessVerdict(state=ReadinessState.unknown, error=f"Check failed: {exc}")
+                    verdict = ReadinessVerdict(
+                        state=ReadinessState.unknown, error=f"Check failed: {sanitize_error(exc)}"
+                    )
             async with write_lock:
                 # The write is guarded too. Unguarded, one DB fault (pool
                 # exhaustion, a dropped connection) escaped `gather`, the

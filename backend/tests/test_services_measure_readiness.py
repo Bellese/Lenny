@@ -336,6 +336,50 @@ async def test_check_returns_not_ready_on_500_naming_a_missing_library():
     assert "Could not load source for library Status" in verdict.error
 
 
+async def test_check_returns_not_ready_with_a_generic_message_when_there_is_no_parseable_outcome():
+    """A non-2xx response that carries no OperationOutcome at all (plain text,
+    a proxy's HTML error page, ...) must still produce `not_ready` with SOME
+    message, not silently fall through with `error=None`.
+
+    `_error_diagnostic` only fires when `from_response` parses a top-level
+    OperationOutcome; a plain-text 500 body makes that None, and the generic
+    `f"HTTP {status} from $data-requirements."` fallback is what covers it.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(500, text="Internal Server Error"))
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+    )
+    assert verdict.state is ReadinessState.not_ready
+    assert verdict.error == "HTTP 500 from $data-requirements."
+    assert verdict.missing_libraries == []
+
+
+async def test_check_returns_unknown_when_the_2xx_body_is_not_valid_json():
+    """A 2xx body that is not even parseable JSON (a truncated response, an
+    upstream proxy's HTML) must not raise out of `check_measure_readiness` —
+    it promises never to — and must not silently fall through to `ready`
+    either. `resp.json()` itself is what raises here, not merely returning the
+    wrong shape (the `test_check_returns_unknown_when_the_body_is_json_but_not_an_object`
+    sibling covers that case; this one covers the parse failure itself).
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    transport = httpx.MockTransport(lambda request: httpx.Response(200, content=b"not valid json{{{"))
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+    )
+    assert verdict.state is ReadinessState.unknown
+    assert verdict.error == "$data-requirements returned a body that is not JSON."
+
+
 async def test_check_returns_not_ready_on_200_carrying_an_error_outcome():
     """A 2xx is not proof of success — same shape #415 fixed for submit_data."""
     import httpx
@@ -497,6 +541,29 @@ async def test_check_sends_no_period_parameters():
     assert "periodEnd" not in seen["url"]
 
 
+async def test_find_missing_valuesets_returns_empty_without_a_network_call_for_no_canonicals():
+    """A Library with zero `dataRequirement`/`relatedArtifact` canonicals (a
+    measure with no terminology dependencies at all) must not issue a
+    `/ValueSet` request — there is nothing to look up, and a query with an
+    empty `url=` filter is not "no filter", it is a different, wrong query.
+    """
+    import httpx
+
+    from app.services.measure_readiness import find_missing_valuesets
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        return httpx.Response(200, json=_vs_bundle([]))
+
+    missing = await find_missing_valuesets(
+        "https://mcs.example.com/fhir", [], auth_headers={}, timeout=5.0, transport=httpx.MockTransport(handler)
+    )
+    assert missing == []
+    assert calls == []
+
+
 async def test_find_missing_valuesets_chunks_long_lists():
     """URL length is finite; 23 canonicals must not become one query."""
     import httpx
@@ -625,10 +692,24 @@ async def test_find_missing_valuesets_stops_following_next_links_eventually():
 
     A server whose `next` link points back at itself would otherwise spin
     inside a check that is supposed to answer within the readiness timeout.
+
+    (Pre-existing test, expectation deliberately changed.) It used to assert
+    that the loop fell out of the budget and RETURNED `["http://vs/a"]` — i.e.
+    reported every canonical on the unread remainder as missing, which the
+    caller turns into `not_ready`. That is verbatim the harm the sibling exit
+    from this same loop refuses in `UnsafePaginationLinkError`'s docstring: a
+    false `not_ready` tells an operator their working server is broken. The
+    budget exists to stop the spin, not to license a wrong answer, so the cap
+    must raise and be mapped to `unknown`. The stop itself is still pinned —
+    the call count assertion is unchanged.
     """
     import httpx
 
-    from app.services.measure_readiness import _VALUESET_MAX_PAGES, find_missing_valuesets
+    from app.services.measure_readiness import (
+        _VALUESET_MAX_PAGES,
+        PaginationBudgetExceededError,
+        find_missing_valuesets,
+    )
 
     calls = []
 
@@ -638,15 +719,193 @@ async def test_find_missing_valuesets_stops_following_next_links_eventually():
         body["link"] = [{"relation": "next", "url": str(request.url)}]
         return httpx.Response(200, json=body)
 
-    missing = await find_missing_valuesets(
+    with pytest.raises(PaginationBudgetExceededError):
+        await find_missing_valuesets(
+            "https://mcs.example.com/fhir",
+            ["http://vs/a"],
+            auth_headers={},
+            timeout=5.0,
+            transport=httpx.MockTransport(handler),
+        )
+    assert len(calls) == _VALUESET_MAX_PAGES
+
+
+async def test_check_returns_unknown_not_not_ready_when_the_page_budget_runs_out():
+    """End-to-end counterpart: an exhausted page budget is `unknown`.
+
+    The server here HOLDS both value sets — the second is only ever visible on
+    a page the budget never reaches — so truncating the walk and reporting the
+    gap would mark a working server `not_ready` with a present value set listed
+    missing.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "$data-requirements" in str(request.url):
+            return httpx.Response(200, json=_dr_library(["http://vs/a", "http://vs/b"]))
+        body = _vs_bundle(["http://vs/a"])
+        body["link"] = [{"relation": "next", "url": str(request.url)}]
+        return httpx.Response(200, json=body)
+
+    verdict = await check_measure_readiness(
         "https://mcs.example.com/fhir",
-        ["http://vs/a"],
+        "CMS122",
         auth_headers={},
         timeout=5.0,
         transport=httpx.MockTransport(handler),
     )
-    assert missing == ["http://vs/a"]
-    assert len(calls) == _VALUESET_MAX_PAGES
+    assert verdict.state is ReadinessState.unknown
+    assert verdict.missing_valuesets == []
+    assert "incomplete" in (verdict.error or "")
+
+
+async def test_find_missing_valuesets_accepts_a_next_link_naming_the_default_port():
+    """`https://h` and `https://h:443` are ONE origin.
+
+    HAPI builds paging links from its configured `server_address`, which
+    routinely carries an explicit port the operator never typed into Lenny's
+    connection URL. A raw port comparison rejects that link and the whole check
+    collapses to `unknown` against a server that is working perfectly.
+    """
+    import httpx
+
+    from app.services.measure_readiness import find_missing_valuesets
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if "_getpages" in str(request.url):
+            return httpx.Response(200, json=_vs_bundle(["http://vs/b"]))
+        body = _vs_bundle(["http://vs/a"])
+        body["link"] = [{"relation": "next", "url": "https://mcs.example.com:443/fhir?_getpages=abc"}]
+        return httpx.Response(200, json=body)
+
+    missing = await find_missing_valuesets(
+        "https://mcs.example.com/fhir",
+        ["http://vs/a", "http://vs/b"],
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert missing == [], f"the default-port link was not followed; calls={calls}"
+    assert len(calls) == 2
+
+
+async def test_find_missing_valuesets_follows_a_relative_next_link():
+    """A relative `next` is legal FHIR and must be resolved, not rejected.
+
+    `urlparse("/fhir?_getpages=...")` has scheme `''` and hostname `None`, so
+    an origin check applied to the raw string sees a mismatch and reports
+    `unknown` on a healthy server.
+    """
+    import httpx
+
+    from app.services.measure_readiness import find_missing_valuesets
+
+    calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(str(request.url))
+        if "_getpages" in str(request.url):
+            return httpx.Response(200, json=_vs_bundle(["http://vs/b"]))
+        body = _vs_bundle(["http://vs/a"])
+        body["link"] = [{"relation": "next", "url": "/fhir?_getpages=abc"}]
+        return httpx.Response(200, json=body)
+
+    missing = await find_missing_valuesets(
+        "https://mcs.example.com/fhir",
+        ["http://vs/a", "http://vs/b"],
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert missing == [], f"the relative link was not followed; calls={calls}"
+    assert calls[1] == "https://mcs.example.com/fhir?_getpages=abc"
+
+
+async def test_find_missing_valuesets_rejects_a_protocol_relative_next_link():
+    """The bypass that resolving relative links would open if the check moved.
+
+    `//evil.example/ValueSet` has no scheme and no hostname of its own, so a
+    naive "it's relative, therefore it's ours" shortcut admits it — and
+    `urljoin` then resolves it to `https://evil.example/ValueSet`, a fully
+    off-origin host that would be fetched WITH the MCS credentials attached.
+    The origin check must run AFTER the join, never instead of it.
+    """
+    import httpx
+
+    from app.services.measure_readiness import UnsafePaginationLinkError, find_missing_valuesets
+
+    off_origin_calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "evil.example" in str(request.url):
+            off_origin_calls.append(request)
+            return httpx.Response(200, json=_vs_bundle(["http://vs/b"]))
+        body = _vs_bundle(["http://vs/a"])
+        body["link"] = [{"relation": "next", "url": "//evil.example/ValueSet?_offset=1"}]
+        return httpx.Response(200, json=body)
+
+    with pytest.raises(UnsafePaginationLinkError):
+        await find_missing_valuesets(
+            "https://mcs.example.com/fhir",
+            ["http://vs/a", "http://vs/b"],
+            auth_headers={"Authorization": "Bearer super-secret-token"},
+            timeout=5.0,
+            transport=httpx.MockTransport(handler),
+        )
+
+    assert off_origin_calls == [], "the protocol-relative link was resolved and then followed"
+
+
+async def test_find_missing_valuesets_rejects_a_next_link_with_an_unparseable_port():
+    """A bad port must be an SSRF REJECTION, not an escaping `ValueError`.
+
+    `urlparse("https://host:99999/").port` raises. Unhandled, that escapes the
+    origin guard into the caller's generic handler and is reported as a network
+    failure, so the operator never learns a link was refused — and the one
+    branch that is supposed to say "we refused to follow this" is bypassed by
+    the very input most likely to be hostile.
+    """
+    import httpx
+
+    from app.services.measure_readiness import UnsafePaginationLinkError, find_missing_valuesets
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = _vs_bundle(["http://vs/a"])
+        body["link"] = [{"relation": "next", "url": "https://mcs.example.com:99999/fhir?_getpages=abc"}]
+        return httpx.Response(200, json=body)
+
+    with pytest.raises(UnsafePaginationLinkError):
+        await find_missing_valuesets(
+            "https://mcs.example.com/fhir",
+            ["http://vs/a", "http://vs/b"],
+            auth_headers={},
+            timeout=5.0,
+            transport=httpx.MockTransport(handler),
+        )
+
+
+def test_same_origin_normalises_default_ports_and_still_rejects_other_origins():
+    """The shared guard, exercised directly on both directions of the fix."""
+    from app.services.fhir_client import _same_origin
+
+    assert _same_origin("https://mcs.example.com/fhir", "https://mcs.example.com:443/fhir?page=2")
+    assert _same_origin("https://mcs.example.com:443/fhir", "https://mcs.example.com/fhir?page=2")
+    assert _same_origin("http://localhost:8080/fhir", "http://localhost:8080/fhir?page=2")
+    assert _same_origin("http://localhost/fhir", "http://localhost:80/fhir?page=2")
+
+    # Still closed: a different host, a different scheme, a real port change,
+    # and a port that cannot be parsed at all.
+    assert not _same_origin("https://mcs.example.com/fhir", "https://evil.example/fhir")
+    assert not _same_origin("https://mcs.example.com/fhir", "http://mcs.example.com/fhir")
+    assert not _same_origin("https://mcs.example.com/fhir", "https://mcs.example.com:8443/fhir")
+    assert not _same_origin("https://mcs.example.com/fhir", "https://mcs.example.com:99999/fhir")
+    assert not _same_origin("https://mcs.example.com/fhir", "https://mcs.example.com:notaport/fhir")
 
 
 async def test_find_missing_valuesets_rejects_an_off_origin_next_link():
@@ -721,6 +980,48 @@ async def test_check_returns_unknown_not_not_ready_when_the_next_link_points_off
     assert verdict.state is ReadinessState.unknown
     assert verdict.missing_valuesets == []
     assert "different origin" in (verdict.error or "") or "origin" in (verdict.error or "")
+
+
+@pytest.mark.parametrize(
+    "mcs_url",
+    [
+        "http://10.0.2.15:8080/fhir",
+        "http://mcs.internal.corp/fhir",
+        "https://user:pass@mcs.example.com/fhir",
+    ],
+)
+async def test_the_pagination_rejection_error_does_not_publish_the_configured_url(mcs_url):
+    """This string is persisted and rendered, so it must not carry the MCS URL.
+
+    `sanitize_url` only redacts DOTLESS hosts, so an internal IP or an internal
+    corporate domain passes through it intact — which is exactly what
+    `routes/measures.py` refuses to do on its 200 path ("Identity only —
+    deliberately no `url`"). The operator already knows which connection they
+    are looking at, so naming it buys nothing and leaks the rest.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "$data-requirements" in str(request.url):
+            return httpx.Response(200, json=_dr_library(["http://vs/a"]))
+        body = _vs_bundle([])
+        body["link"] = [{"relation": "next", "url": "http://internal-metadata.evil.example/ValueSet?_offset=1"}]
+        return httpx.Response(200, json=body)
+
+    verdict = await check_measure_readiness(
+        mcs_url,
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert verdict.state is ReadinessState.unknown
+    error = verdict.error or ""
+    for leaked in ("10.0.2.15", "internal.corp", "user:pass", "mcs.example.com"):
+        assert leaked not in error, f"{leaked!r} leaked into a stored, rendered error: {error!r}"
 
 
 async def test_check_returns_unknown_when_the_body_is_json_but_not_an_object():
@@ -855,6 +1156,96 @@ async def test_check_returns_unknown_when_the_body_is_not_a_library(body, label)
     assert verdict.error == "$data-requirements did not return a Library resource."
 
 
+@pytest.mark.parametrize(
+    "body,label",
+    [
+        ({"resourceType": "Library", "id": "x", "status": "active"}, "a bare Library with no dependency fields"),
+        (
+            {"resourceType": "Library", "id": "x", "status": "active", "dataRequirement": [], "relatedArtifact": []},
+            "a Library declaring both fields empty",
+        ),
+        (
+            {
+                "resourceType": "Library",
+                "id": "effective-data-requirements",
+                "status": "active",
+                "type": {"coding": [{"code": "module-definition"}]},
+                "dataRequirement": [],
+                "relatedArtifact": [],
+            },
+            "a module-definition Library with empty arrays",
+        ),
+    ],
+)
+async def test_check_returns_unknown_when_the_library_declares_no_dependencies(body, label):
+    """The false READY that survived the `resourceType` guard.
+
+    Each body IS a Library, so the `resourceType != "Library"` check waves it
+    through — and then it yields zero canonicals, `find_missing_valuesets`
+    short-circuits on the empty list WITHOUT ONE NETWORK CALL, `missing` is
+    falsy, and the function returned `ready`. A green verdict produced without
+    a single byte of evidence about the measure is the worst output this
+    feature can emit, and the mundane producers are all real: a Measure with no
+    `library` element, a Library whose content attachment is empty or went
+    unparsed, a gateway serving a cached stub.
+
+    The third case is the reason a "check the profile/type" fix is not enough
+    on its own: it is correctly typed `module-definition` and still declares
+    nothing. `$data-requirements` exists to return the dependency closure, so a
+    response that declares none is telling us nothing rather than telling us
+    there is nothing to check.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    valueset_calls = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "$data-requirements" in str(request.url):
+            return httpx.Response(200, json=body)
+        valueset_calls.append(str(request.url))
+        return httpx.Response(200, json=_vs_bundle([]))
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+    assert verdict.state is ReadinessState.unknown, f"{label} produced {verdict.state}"
+    assert "declares no data requirements" in (verdict.error or "")
+    assert valueset_calls == [], "nothing was ever verified, so there was nothing to be `ready` about"
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+async def test_check_returns_unknown_on_a_redirect_not_not_ready(status):
+    """A 3xx is not evidence about the measure.
+
+    `follow_redirects` is off by design, so a redirect arrives here intact and
+    used to fall into the generic non-2xx branch — marking EVERY measure on the
+    connection `not_ready` because a proxy in front of the MCS upgrades http to
+    https or normalises a trailing slash. That tells the operator their
+    measures are broken when the only thing wrong is a URL.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(status, headers={"location": "https://elsewhere.example/fhir"})
+    )
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+    )
+    assert verdict.state is ReadinessState.unknown, f"HTTP {status} produced {verdict.state}"
+    assert verdict.missing_libraries == []
+    assert str(status) in (verdict.error or "")
+
+
 async def test_claim_unchecked_only_claims_measures_with_no_row(test_session, mcs_row):
     from app.models.measure_readiness import MeasureReadiness, ReadinessState
     from app.services.measure_readiness import claim_unchecked
@@ -963,11 +1354,22 @@ async def test_run_sweep_writes_a_verdict_per_measure(test_session, mcs_row, mon
 
 
 async def test_run_sweep_respects_the_concurrency_cap(test_session, mcs_row, monkeypatch):
-    """fhir_client.py:371-375 records this operation OOM-killing the engine."""
+    """fhir_client.py:371-375 records this operation OOM-killing the engine.
+
+    Both bounds are asserted, and `READINESS_CONCURRENCY` is moved off its
+    default first. `peak <= cap` alone cannot fail in the direction it claims:
+    a regression that serialised the sweep (semaphore hardcoded to 1) or one
+    that ignored the setting entirely would sail past it. Pinning `peak ==
+    settings.READINESS_CONCURRENCY` at a non-default value catches both — the
+    sweep must actually REACH the configured cap, and must read it from config.
+    """
     import asyncio
 
     import app.services.measure_readiness as svc
+    from app.config import settings
     from app.models.measure_readiness import ReadinessState
+
+    monkeypatch.setattr(settings, "READINESS_CONCURRENCY", 3)
 
     in_flight = 0
     peak = 0
@@ -986,7 +1388,7 @@ async def test_run_sweep_respects_the_concurrency_cap(test_session, mcs_row, mon
     measures = [(f"CMS{i}", "1.0.0") for i in range(8)]
     await svc.claim_unchecked(test_session, mcs_row.id, measures)
     await svc.run_sweep(mcs_row.id, measures)
-    assert peak <= 2
+    assert peak == settings.READINESS_CONCURRENCY
 
 
 async def test_run_sweep_leaves_no_row_stuck_in_checking_when_a_check_explodes(test_session, mcs_row, monkeypatch):
@@ -1123,6 +1525,82 @@ async def test_run_sweep_updates_the_claimed_checking_row_in_place(test_session,
     assert rows[0].checked_at is not None
 
 
+async def test_run_sweep_skips_quietly_when_the_mcs_row_is_gone(test_session, monkeypatch):
+    """The MCS can be deleted between `claim_unchecked` claiming a row and the
+    detached sweep actually running (a fast follow-up delete in Settings).
+    `run_sweep` must not raise and must not touch the database it can no
+    longer resolve a URL or credentials for — it just logs and returns,
+    leaving the caller's session and any claimed rows untouched.
+    """
+    import app.services.measure_readiness as svc
+
+    monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
+
+    # No MCSConfig row with this id exists at all — simulates the deleted
+    # connection without needing a real delete-then-cascade dance.
+    await svc.run_sweep(999999, [("CMS122", "0.5.000")])  # must not raise
+
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness
+
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert rows == []
+
+
+async def test_run_sweep_records_unknown_when_credential_resolution_fails(test_session, mcs_row, monkeypatch):
+    """A broken credential must not crash the sweep — and must not ANONYMISE it.
+
+    (Pre-existing test, expectation deliberately changed.) It used to assert
+    that the sweep continued with `auth_headers == {}` and stored a `ready`
+    row. Both halves were wrong in the same way: every verdict in the sweep is
+    derived from whatever view of the server the headers buy, so continuing
+    anonymously measures the ANONYMOUS view and then files the result as though
+    it described the user's connection. Against a HAPI that permits
+    unauthenticated reads — the ordinary connectathon setup — that yields
+    entirely plausible `ready` rows for a dataset the user's credentials would
+    never have been shown. `resolve_mcs_auth_headers` raises instead of
+    degrading for precisely this reason.
+
+    The credential failure is Lenny's, not the measure's, so the honest verdict
+    is `unknown` for every measure in the sweep. Written rather than left
+    spinning: `claim_unchecked` skips measures that already have a row, so a
+    `checking` row nobody fills in is a spinner until restart. The original
+    test's real content — "must not raise", "must not abandon rows" — is kept.
+    """
+    from sqlalchemy import select
+
+    import app.services.measure_readiness as svc
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    async def broken_auth(*args, **kwargs):
+        raise RuntimeError("token endpoint unreachable at https://tok.example/oauth?secret=abc")
+
+    checked = []
+
+    async def fake_check(mcs_url, measure_id, *, auth_headers, **kwargs):
+        checked.append((measure_id, auth_headers))
+        return svc.ReadinessVerdict(state=ReadinessState.ready)
+
+    monkeypatch.setattr("app.dependencies.resolve_mcs_auth_headers", broken_auth)
+    monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
+    monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
+
+    measures = [("CMS122", "0.5.000"), ("CMS124", "1.0.000")]
+    await svc.claim_unchecked(test_session, mcs_row.id, measures)
+    await svc.run_sweep(mcs_row.id, measures)  # must not raise
+
+    assert checked == [], "the sweep queried the measure server without the credentials it was told to use"
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert len(rows) == 2
+    for row in rows:
+        assert row.state is ReadinessState.unknown, "an unauthenticated view must never be filed as a verdict"
+        assert "credentials" in (row.error or "")
+        # `sanitize_error`, not `{exc}`: a token-endpoint failure's raw text
+        # carries the URL and whatever is embedded in it.
+        assert "secret=abc" not in (row.error or "")
+
+
 async def test_mark_all_checking_resets_existing_verdicts_and_adds_missing_rows(test_session, mcs_row):
     """The manual re-check path: every listed measure ends up `checking`.
 
@@ -1194,3 +1672,137 @@ async def test_claim_unchecked_survives_a_genuine_concurrent_race(test_engine, m
     results = await asyncio.gather(attempt(), attempt())
     combined = results[0] + results[1]
     assert combined == [("CMS777", "3.0.000")]
+
+
+async def test_check_redacts_credentials_echoed_back_in_a_server_diagnostic():
+    """The MCS's own diagnostic text is untrusted input, and we PERSIST it.
+
+    `redact_outcome` records why: HAPI echoes failed request bodies into
+    diagnostics, narrative and extension fields, so the Authorization header
+    Lenny just sent can come straight back in the error text. That text lands
+    in `measure_readiness.error` and is rendered verbatim in the measures
+    table, so an operator's bearer token would be readable in the UI and
+    durable in the database.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    outcome = {
+        "resourceType": "OperationOutcome",
+        "issue": [
+            {
+                "severity": "error",
+                "code": "processing",
+                "diagnostics": (
+                    "HAPI-0389: Failed to call access method; request was "
+                    "GET http://hapi-fhir-measure:8080/fhir/Measure/CMS122 with "
+                    "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJsZW5ueSJ9.s3cr3tsig"
+                ),
+            }
+        ],
+    }
+    transport = httpx.MockTransport(lambda request: httpx.Response(500, json=outcome))
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+    )
+
+    assert verdict.state is ReadinessState.not_ready
+    assert "eyJhbGciOiJIUzI1NiJ9" not in verdict.error
+    assert "s3cr3tsig" not in verdict.error
+    assert "hapi-fhir-measure" not in verdict.error
+    # Still useful to a human: the redaction must not eat the whole message.
+    assert "HAPI-0389" in verdict.error
+
+
+async def test_check_returns_unknown_when_the_library_internals_are_the_wrong_shape():
+    """A body that IS a Library but whose declared fields are mis-shaped.
+
+    `check_measure_readiness` promises never to raise, and until now honoured
+    that only because `run_sweep` happened to wrap the call — a 2xx Library
+    with `dataRequirement` as a string makes `extract_valueset_canonicals`
+    raise `AttributeError` straight out of the function.
+
+    `unknown` and not `ready` matters more than the exception: silently
+    skipping a mis-shaped field yields zero canonicals, zero missing, and falls
+    through to READY — the one output this feature must never produce.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    bodies = [
+        {"resourceType": "Library", "dataRequirement": "not-a-list"},
+        {"resourceType": "Library", "dataRequirement": [{"codeFilter": ["not-an-object"]}]},
+        {"resourceType": "Library", "dataRequirement": 42},
+        {"resourceType": "Library", "relatedArtifact": "not-a-list"},
+        {"resourceType": "Library", "dataRequirement": [{"codeFilter": [{"valueSet": 7}]}]},
+    ]
+    for body in bodies:
+        transport = httpx.MockTransport(lambda request, b=body: httpx.Response(200, json=b))
+        verdict = await check_measure_readiness(
+            "https://mcs.example.com/fhir", "CMS122", auth_headers={}, timeout=5.0, transport=transport
+        )
+        assert verdict.state is ReadinessState.unknown, f"body {body!r} produced {verdict.state}"
+        assert verdict.error is not None
+
+
+async def test_mark_all_checking_survives_a_lost_claim_race(test_session, mcs_row):
+    """Two overlapping re-checks must not raise out of `mark_all_checking`.
+
+    Same collision `claim_unchecked` documents, reproduced the same
+    deterministic way this file already uses: listing one key twice makes the
+    second insert hit `uq_measure_readiness_key` exactly as a genuine second
+    requester would, on a fixture that cannot race two real connections.
+    Non-colliding measures in the same batch must still be claimed — otherwise
+    the sweep never runs for them.
+    """
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+    from app.services.measure_readiness import mark_all_checking
+
+    await mark_all_checking(
+        test_session,
+        mcs_row.id,
+        [("CMS124", "1.0.000"), ("CMS124", "1.0.000"), ("CMS999", "2.0.000")],
+    )
+
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert {(r.measure_id, r.measure_version) for r in rows} == {("CMS124", "1.0.000"), ("CMS999", "2.0.000")}
+    assert {r.state for r in rows} == {ReadinessState.checking}
+
+
+async def test_run_sweep_sanitizes_the_last_resort_catch_all(test_session, mcs_row, monkeypatch):
+    """The catch-all in `run_sweep.one()` stores text straight into a rendered,
+    durable column — and by construction the exceptions reaching it are the
+    ones nothing else vetted.
+
+    An httpx/SSL failure's raw `str()` carries the MCS URL, credentials and
+    internal hostnames included. Every other error path in this codebase routes
+    exception text through `sanitize_error`; this one must too.
+    """
+    from sqlalchemy import select
+
+    import app.services.measure_readiness as svc
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    async def fake_check(mcs_url, measure_id, **kwargs):
+        raise RuntimeError(
+            "connect failed for https://svc:hunter2@mcs-internal:8080/fhir with Authorization: Bearer sk-live-abc123"
+        )
+
+    monkeypatch.setattr(svc, "check_measure_readiness", fake_check)
+    monkeypatch.setattr(svc, "_session_factory", lambda: _SessionCtx(test_session))
+
+    await svc.claim_unchecked(test_session, mcs_row.id, [("CMS122", "0.5.000")])
+    await svc.run_sweep(mcs_row.id, [("CMS122", "0.5.000")])
+
+    row = (await test_session.execute(select(MeasureReadiness))).scalars().one()
+    assert row.state is ReadinessState.unknown
+    assert "hunter2" not in row.error
+    assert "sk-live-abc123" not in row.error
+    assert "mcs-internal" not in row.error
+    assert row.error.startswith("Check failed: ")
