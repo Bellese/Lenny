@@ -39,6 +39,7 @@ from app.services.fhir_errors import (
     hint_for_network_exception,
     sanitize_url,
 )
+from app.services.measure_readiness import invalidate_mcs
 from app.services.validation import sanitize_error
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,9 @@ router.include_router(
         # job runs unauthenticated against its snapshotted mcs_url.
         job_fk_column=Job.mcs_id,
         audit_logger=logger,
+        # Repointing an MCS at a different server invalidates every readiness
+        # verdict cached for it (#434). The CDR router passes nothing.
+        on_url_change=invalidate_mcs,
     )
 )
 

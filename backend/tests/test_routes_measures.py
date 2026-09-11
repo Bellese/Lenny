@@ -1,7 +1,8 @@
 """Tests for measure endpoints (GET /measures, POST /measures/upload, DELETE /measures/{id})."""
 
 import json
-from unittest.mock import AsyncMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock, patch
 
 import httpx
 import pytest
@@ -10,6 +11,24 @@ import pytest_asyncio
 import app.routes.measures as measures_module
 
 pytestmark = pytest.mark.asyncio
+
+
+def _create_task_spy() -> Mock:
+    """Stand-in for `asyncio.create_task` that behaves like the real thing.
+
+    The route retains every spawned task in a module-level set and registers a
+    done-callback on it — the asyncio docs' remedy for a fire-and-forget task
+    being garbage collected mid-flight (final review, cheap minors). A fake
+    that returned `None` would therefore AttributeError instead of testing the
+    route. Closing the coroutine keeps Python from warning it was never
+    awaited.
+    """
+
+    def _fake(coro):
+        coro.close()
+        return Mock(spec=["add_done_callback"])
+
+    return Mock(side_effect=_fake)
 
 
 @pytest.fixture(autouse=True)
@@ -582,3 +601,507 @@ async def test_delete_measure_credential_failure_is_not_reported_as_not_found(cl
     assert detail["issue"][0]["code"] != "not-found"
     assert "Attendee MCS" in detail["issue"][0]["diagnostics"]
     mock_delete.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Readiness (issue #434)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_measures_with_no_active_mcs_row_reports_unknown_and_claims_nothing(client, test_session):
+    """The `mcs.id == 0` fallback (no active `MCSConfig` row at all — a stock
+    install before the seed has run, or a defensive edge case).
+
+    `measure_readiness.mcs_id` has a real FK to `mcs_configs`, so there is no
+    row to claim or write readiness rows against. Every measure must still
+    render a readiness object (`unknown`), and — unlike the cached/claimed
+    paths — no `checking` row may be written and no sweep may be spawned:
+    there is nothing to `run_sweep` against.
+    """
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    create_task = _create_task_spy()
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
+            resp = await client.get("/measures")
+
+    assert resp.status_code == 200
+    readiness = resp.json()["measures"][0]["readiness"]
+    assert readiness["state"] == "unknown"
+    assert readiness["error"] is None
+    create_task.assert_not_called()
+    assert (await test_session.execute(select(MeasureReadiness))).scalars().all() == []
+
+
+async def test_get_measures_reports_unknown_and_kicks_a_sweep(client, active_mcs):
+    """First view: no cached rows, so every measure reads `checking`, and
+    exactly one sweep is fired for the newly claimed measure.
+
+    A bare `lambda` cannot prove a sweep was fired: `claim_unchecked` writes
+    the `checking` row synchronously regardless of whether
+    `asyncio.create_task(run_sweep(...))` ever runs, so a route that dropped
+    that call entirely would still pass a test that only inspects the row.
+    `create_task` is therefore a spy here (still closing the coroutine so
+    Python does not warn it was never awaited), and its call count is checked.
+    """
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    create_task = _create_task_spy()
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
+            resp = await client.get("/measures")
+
+    assert resp.status_code == 200
+    measure = resp.json()["measures"][0]
+    assert measure["readiness"]["state"] == "checking"
+    create_task.assert_called_once()
+
+    # De-duplication guarantee: a second view of the same still-`checking`
+    # measure must not fire a second sweep.
+    create_task.reset_mock()
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
+            resp2 = await client.get("/measures")
+
+    assert resp2.status_code == 200
+    assert resp2.json()["measures"][0]["readiness"]["state"] == "checking"
+    create_task.assert_not_called()
+
+
+async def test_get_measures_serves_a_cached_verdict(client, active_mcs, test_session):
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    test_session.add(
+        MeasureReadiness(
+            mcs_id=active_mcs.id,
+            measure_id="CMS122",
+            measure_version="0.5.000",
+            state=ReadinessState.not_ready,
+            missing_libraries=["Status 1.15.000"],
+            missing_valuesets=["http://vs/a"],
+            error="Could not load source for library Status, version 1.15.000, namespace uri null.",
+        )
+    )
+    await test_session.commit()
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        resp = await client.get("/measures")
+
+    readiness = resp.json()["measures"][0]["readiness"]
+    assert readiness["state"] == "not_ready"
+    assert readiness["missing_libraries"] == ["Status 1.15.000"]
+    assert "Could not load source for library Status" in readiness["error"]
+
+
+async def test_get_measures_does_not_serve_another_connections_verdict(client, active_mcs, test_session):
+    """Verdicts are per-MCS. A row for a different connection must not leak.
+
+    Deviation from the brief: `mcs_id=active_mcs.id + 999` violates the FK on
+    `measure_readiness.mcs_id`, which this suite's `test_engine` fixture
+    deliberately enforces (PRAGMA foreign_keys=ON) so test semantics match
+    production's real FK. A second, real `MCSConfig` row is created instead so
+    the "different connection" is an actual row rather than a dangling id.
+    """
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    other_mcs = MCSConfig(
+        name="Other MCS",
+        mcs_url="https://other-mcs.example.com/fhir",
+        auth_type=AuthType.none,
+        is_active=False,
+        is_default=False,
+        is_read_only=False,
+    )
+    test_session.add(other_mcs)
+    await test_session.commit()
+    await test_session.refresh(other_mcs)
+
+    test_session.add(
+        MeasureReadiness(
+            mcs_id=other_mcs.id,
+            measure_id="CMS122",
+            measure_version="0.5.000",
+            state=ReadinessState.ready,
+        )
+    )
+    await test_session.commit()
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=_create_task_spy())):
+            resp = await client.get("/measures")
+
+    assert resp.json()["measures"][0]["readiness"]["state"] != "ready"
+
+
+async def test_refresh_accepts_and_marks_everything_checking(client, active_mcs, test_session):
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [
+            {"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}},
+            {"resource": {"resourceType": "Measure", "id": "CMS124", "version": "1.0.000", "status": "active"}},
+        ],
+    }
+    create_task = _create_task_spy()
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
+            resp = await client.post("/measures/readiness/refresh")
+
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "accepted"
+    assert resp.json()["measures"] == 2
+    create_task.assert_called_once()
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert {r.state for r in rows} == {ReadinessState.checking}
+
+
+async def test_refresh_reports_skipped_when_there_is_no_active_mcs_row(client):
+    """The `mcs.id == 0` fallback (no active `MCSConfig` row) writes nothing.
+
+    The response must say so rather than claiming a real, successful refresh
+    that never actually queued anything — `GET /measures` renders `unknown` in
+    exactly this state, and the two endpoints must agree.
+    """
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    create_task = _create_task_spy()
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=create_task)):
+            resp = await client.post("/measures/readiness/refresh")
+
+    assert resp.status_code == 202
+    assert resp.json() == {"status": "skipped", "measures": 0}
+    create_task.assert_not_called()
+
+
+async def test_refresh_succeeds_on_a_read_only_mcs(client, read_only_mcs, test_session):
+    """The whole feature is read-only against the measure server: a refresh
+    writes nothing to the MCS, so it must succeed even when the connection is
+    marked read-only. This locks in that a future "be consistent" refactor
+    re-adding the `_read_only_outcome` guard would break the connectathon
+    (BYO CDR / shared read-only server) case the feature targets.
+    """
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=_create_task_spy())):
+            resp = await client.post("/measures/readiness/refresh")
+
+    assert resp.status_code == 202
+    assert resp.json()["status"] == "accepted"
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert len(rows) == 1
+
+
+async def test_refresh_returns_502_when_the_measure_list_cannot_be_fetched(client, active_mcs, test_session):
+    """`refresh_readiness` must name the MCS in a proper OperationOutcome when
+    it cannot even list measures — the same shape every other MCS failure on
+    this router produces — rather than a bare 500, and it must not mark
+    anything `checking` for a sweep that was never going to run.
+    """
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness
+
+    with patch.object(measures_module, "list_measures", AsyncMock(side_effect=ConnectionError("Connection refused"))):
+        resp = await client.post("/measures/readiness/refresh")
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    assert "Attendee MCS" in detail["issue"][0]["diagnostics"]
+    assert (await test_session.execute(select(MeasureReadiness))).scalars().all() == []
+
+
+async def test_refresh_returns_502_on_a_credential_failure(client, active_mcs, test_session):
+    """A broken SMART/basic credential must surface as the same 502
+    OperationOutcome shape as the other routes on this file, not an
+    unguarded 500 — `refresh_readiness` calls `_resolve_auth` the same way
+    `get_measures`/`upload_measure`/`delete_measure_route` do.
+    """
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness
+
+    with (
+        patch.object(
+            measures_module,
+            "_build_auth_headers",
+            AsyncMock(side_effect=ValueError("token endpoint returned no access_token")),
+        ),
+        patch.object(measures_module, "list_measures", AsyncMock()) as mock_list,
+    ):
+        resp = await client.post("/measures/readiness/refresh")
+
+    assert resp.status_code == 502
+    detail = resp.json()["detail"]
+    assert detail["resourceType"] == "OperationOutcome"
+    assert "Attendee MCS" in detail["issue"][0]["diagnostics"]
+    mock_list.assert_not_awaited()
+    assert (await test_session.execute(select(MeasureReadiness))).scalars().all() == []
+
+
+async def test_measure_with_no_version_gets_a_readiness_object(client, active_mcs):
+    """A Measure without `version` must still render, not 500."""
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "NoVersion", "status": "active"}}],
+    }
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=_create_task_spy())):
+            resp = await client.get("/measures")
+
+    assert resp.status_code == 200
+    assert resp.json()["measures"][0]["readiness"]["state"] == "checking"
+
+
+async def test_uploading_a_bundle_invalidates_every_verdict_for_that_mcs(client, active_mcs, test_session):
+    """An uploaded Library can fix measures other than the one uploaded.
+
+    Invalidating only the uploaded measure would leave those stale and red.
+    """
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    for measure_id in ("CMS122", "CMS124"):
+        test_session.add(
+            MeasureReadiness(
+                mcs_id=active_mcs.id, measure_id=measure_id, measure_version="1", state=ReadinessState.not_ready
+            )
+        )
+    await test_session.commit()
+
+    bundle = json.dumps({"resourceType": "Bundle", "type": "transaction", "entry": []}).encode()
+    with patch.object(measures_module, "upload_measure_bundle", AsyncMock(return_value={"created": 1})):
+        resp = await client.post("/measures/upload", files={"file": ("bundle.json", bundle, "application/json")})
+
+    assert resp.status_code in (200, 201)
+    assert (await test_session.execute(select(MeasureReadiness))).scalars().all() == []
+
+
+async def test_deleting_a_measure_invalidates_verdicts_for_that_mcs(client, active_mcs, test_session):
+    from sqlalchemy import select
+
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    test_session.add(
+        MeasureReadiness(mcs_id=active_mcs.id, measure_id="CMS122", measure_version="1", state=ReadinessState.ready)
+    )
+    await test_session.commit()
+
+    with patch.object(measures_module, "delete_measure", AsyncMock(return_value=None)):
+        resp = await client.delete("/measures/CMS122")
+
+    assert resp.status_code == 204
+    assert (await test_session.execute(select(MeasureReadiness))).scalars().all() == []
+
+
+async def test_upload_survives_a_readiness_invalidation_fault(client, active_mcs):
+    """A fault in OUR database must not be reported as an upstream rejection.
+
+    The bundle has already been accepted and stored by the measure server by
+    the time verdicts are invalidated. With that local write inside the `try`,
+    a pool timeout or a dropped connection lands in the 502 handler and tells
+    the user "Measure engine rejected bundle" about a bundle the engine
+    accepted — so they upload it again. `get_measures` already forbids exactly
+    this ("must never ... blame the measure server for our database"); the
+    upload path gets the same discipline.
+    """
+    bundle = json.dumps({"resourceType": "Bundle", "type": "transaction", "entry": []}).encode()
+    with (
+        patch.object(measures_module, "upload_measure_bundle", AsyncMock(return_value={"created": 1})),
+        patch.object(measures_module, "invalidate_mcs", AsyncMock(side_effect=TimeoutError("pool timeout"))),
+    ):
+        resp = await client.post("/measures/upload", files={"file": ("bundle.json", bundle, "application/json")})
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["status"] == "success"
+
+
+async def test_delete_survives_a_readiness_invalidation_fault(client, active_mcs):
+    """Same discipline on delete: the FHIR-side deletion has already landed.
+
+    A local invalidation fault here used to escape as a 500 on a request whose
+    side effect succeeded.
+    """
+    with (
+        patch.object(measures_module, "delete_measure", AsyncMock(return_value=None)),
+        patch.object(measures_module, "invalidate_mcs", AsyncMock(side_effect=TimeoutError("pool timeout"))),
+    ):
+        resp = await client.delete("/measures/CMS122")
+
+    assert resp.status_code == 204, resp.text
+
+
+async def test_get_measures_survives_a_readiness_database_fault(client, active_mcs):
+    """A readiness DB fault must not hide the measure list or blame the MCS.
+
+    Readiness is a decoration written to Lenny's OWN database. Before this fix
+    the only guarded failure was `IntegrityError` (handled inside
+    `claim_unchecked`); anything else — pool exhaustion, a dropped
+    connection — fell through to the generic handler and became
+    `502 "Cannot reach measure engine 'Attendee MCS'"` with no measures at all,
+    accusing a measure server that had just answered successfully.
+    """
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    boom = AsyncMock(side_effect=RuntimeError("QueuePool limit of size 5 overflow 10 reached"))
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "claim_unchecked", boom):
+            resp = await client.get("/measures")
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [m["id"] for m in body["measures"]] == ["CMS122"]
+    assert body["measures"][0]["readiness"]["state"] == "unknown"
+    assert body["measures"][0]["readiness"]["error"] is None  # not a failure verdict
+    boom.assert_awaited()
+
+
+async def test_spawn_background_retains_the_task_until_it_completes():
+    """asyncio keeps only a WEAK reference to a running task.
+
+    A bare `asyncio.create_task(run_sweep(...))` whose result nobody holds can
+    be garbage collected mid-flight, which would abandon the sweep and leave
+    its rows in `checking` — the state nothing recovers from until a restart.
+    The task must be in the retention set while it runs, and out of it once it
+    finishes (or the set is a leak).
+    """
+    import asyncio
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def work():
+        started.set()
+        await release.wait()
+
+    before = set(measures_module._background_tasks)
+    measures_module._spawn_background(work())
+    await started.wait()
+
+    added = set(measures_module._background_tasks) - before
+    assert len(added) == 1, "the spawned task was not retained while running"
+
+    release.set()
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if not (set(measures_module._background_tasks) & added):
+            break
+    assert not (set(measures_module._background_tasks) & added), "the done-callback did not discard the task"
+
+
+async def test_refresh_is_rate_limited(client, active_mcs):
+    """`POST /measures/readiness/refresh` must carry the same 10/minute budget
+    as its sibling `POST /measures/upload`.
+
+    It is the most expensive route in this file: one `$data-requirements`
+    (measured at 6-11 s) plus chunked ValueSet searches per measure, against a
+    third-party server with our credentials attached. `READINESS_CONCURRENCY`
+    bounds the fan-out inside ONE sweep and says nothing about how many sweeps
+    are running; the UI's disabled button is client-side only, so a second tab,
+    a retry, or a script bypasses it entirely.
+    """
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [{"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}}],
+    }
+    statuses = []
+    with patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)):
+        with patch.object(measures_module, "asyncio", SimpleNamespace(create_task=_create_task_spy())):
+            for _ in range(11):
+                statuses.append((await client.post("/measures/readiness/refresh")).status_code)
+
+    assert statuses[:10] == [202] * 10
+    assert statuses[10] == 429
+
+
+async def test_refresh_does_not_500_when_a_concurrent_refresh_claims_the_same_row(client, active_mcs, test_session):
+    """Two overlapping refreshes (double-click, second tab, retry) must not 500.
+
+    `mark_all_checking` DELETEs the connection's verdicts and then INSERTs a
+    `checking` row per measure. Those are two steps, so a second flow can land
+    its own INSERT in the window between them and the first flow's INSERT then
+    hits `uq_measure_readiness_key`. `refresh_readiness` has no try/except, so
+    an unhandled `IntegrityError` surfaces as FastAPI's default 500 — breaking
+    the `OperationOutcome` shape every other path on this router returns.
+
+    The race is injected deterministically rather than raced for real: the
+    competing INSERT is committed from inside `invalidate_mcs`, which is
+    exactly the window it would land in. Whether both measures still end up
+    `checking` is asserted too — a fix that swallowed the collision by
+    abandoning the rest of the batch would leave `CMS124` unclaimed and its
+    sweep would never run.
+    """
+    from sqlalchemy import select
+
+    import app.services.measure_readiness as readiness_svc
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    bundle = {
+        "resourceType": "Bundle",
+        "entry": [
+            {"resource": {"resourceType": "Measure", "id": "CMS122", "version": "0.5.000", "status": "active"}},
+            {"resource": {"resourceType": "Measure", "id": "CMS124", "version": "1.0.000", "status": "active"}},
+        ],
+    }
+    real_invalidate = readiness_svc.invalidate_mcs
+
+    async def racing_invalidate(session, mcs_id):
+        removed = await real_invalidate(session, mcs_id)
+        session.add(
+            MeasureReadiness(
+                mcs_id=mcs_id,
+                measure_id="CMS122",
+                measure_version="0.5.000",
+                state=ReadinessState.checking,
+            )
+        )
+        await session.commit()
+        return removed
+
+    with (
+        patch.object(readiness_svc, "invalidate_mcs", racing_invalidate),
+        patch.object(measures_module, "list_measures", AsyncMock(return_value=bundle)),
+        patch.object(measures_module, "asyncio", SimpleNamespace(create_task=_create_task_spy())),
+    ):
+        resp = await client.post("/measures/readiness/refresh")
+
+    assert resp.status_code == 202
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert {(r.measure_id, r.state) for r in rows} == {
+        ("CMS122", ReadinessState.checking),
+        ("CMS124", ReadinessState.checking),
+    }

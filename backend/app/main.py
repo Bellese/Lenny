@@ -560,6 +560,17 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.exception("Admin operations reconcile failed — continuing startup")
 
+    # Reclaim readiness rows stranded in `checking` by a restart (#434).
+    try:
+        from app.db import async_session as _async_session
+        from app.services.measure_readiness import reclaim_stranded_checks
+
+        async with _async_session() as _session:
+            reclaimed = await reclaim_stranded_checks(_session)
+        logger.info("Measure readiness reclaimed", extra={"rows": reclaimed})
+    except Exception:
+        logger.exception("Measure readiness reclaim failed — continuing startup")
+
     # Load connectathon bundles at startup (no-op if directory missing)
     try:
         summary = await load_connectathon_bundles()

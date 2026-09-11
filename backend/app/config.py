@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     BATCH_SIZE: int = 100
     MAX_WORKERS: int = 4
     MAX_RETRIES: int = 3
+    # Readiness check (#434). $data-requirements measured at 6-11s per measure
+    # against the local engine, so this needs its own ceiling rather than
+    # borrowing MCSConfig.request_timeout_seconds (default 30).
+    READINESS_TIMEOUT_SECONDS: int = 60
+    # Concurrency cap for the sweep. fhir_client.py:371-375 records
+    # $data-requirements OOM-killing the measure engine when called per patient;
+    # a shared server deserves the same restraint.
+    READINESS_CONCURRENCY: int = 2
     PATIENT_DATA_STRATEGY: str = "batch"
     VALUESET_RELOAD_MODE: str = "delete"
     LOG_LEVEL: str = "INFO"

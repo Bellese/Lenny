@@ -180,6 +180,99 @@
   color: var(--text);
 }
 
+.retryBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Readiness answers a different question than Status ("Active"/"Draft"/
+   "Retired"), so it gets a different treatment: an outline/ghost pill
+   (transparent background, coloured border + text) instead of Status's
+   filled pill. `.readinessBadge` carries the shared outline shape; the
+   padding is reduced by the border's width on each axis so the outlined
+   pill occupies the same footprint as a filled `.badge` (2px 8px, no
+   border) instead of growing by the border. */
+.readinessBadge {
+  padding: 1px 7px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-muted);
+}
+
+.readinessReady {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.readinessChecking {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.readinessNotReady {
+  border-color: var(--err);
+  color: var(--err);
+}
+
+.readinessToggle {
+  /* `.readinessBadge` (always present alongside this class — see
+     ReadinessBadge in MeasuresPage.js) already supplies the 1px solid
+     border, so this only needs to add button-specific behaviour. */
+  cursor: pointer;
+  /* font-family, NOT the `font` shorthand: `font` also resets font-size,
+     font-weight and line-height, and this rule is declared after `.badge` —
+     so the shorthand made the two interactive badges render larger and
+     heavier than every other badge in the table. */
+  font-family: inherit;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.readinessToggle:hover {
+  background: var(--bg-sunken);
+  opacity: 0.78;
+}
+
+.detailRow > td {
+  background: var(--bg-sunken);
+}
+
+.readinessDetail h4 {
+  margin: 0.75rem 0 0.25rem;
+  font-size: 0.8125rem;
+}
+
+.readinessDetail ul {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.8125rem;
+}
+
+.readinessError {
+  margin: 0;
+  color: var(--err);
+  font-size: 0.8125rem;
+}
+
+/* An `unknown` verdict's explanation must not be styled like a failure: the
+   check could not complete, which says nothing bad about the measure. */
+.readinessNeutralError {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.8125rem;
+}
+
+.readinessNote {
+  margin: 0.375rem 0 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.staleNote {
+  margin-top: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
 @media (max-width: 820px) {
   .page {
     max-width: none;
@@ -193,12 +286,14 @@
     margin-bottom: 14px;
   }
 
-  .headerActions,
-  .btnPrimary {
+  .headerActions {
     width: 100%;
+    flex-direction: column;
   }
 
-  .btnPrimary {
+  .headerActions .btnPrimary,
+  .headerActions .retryBtn {
+    width: 100%;
     justify-content: center;
     min-height: 40px;
   }
@@ -240,6 +335,26 @@
     font-weight: 500;
     letter-spacing: 0.06em;
     text-transform: uppercase;
+  }
+
+  /* The expanded readiness panel is a full-width `<td colSpan={6}>` with no
+     data-label, so the generic card rule above (flex + space-between, meant
+     for a label/value pair) lays its paragraphs and lists out sideways. It
+     needs to stay a block. NOT visually verified — no device or browser
+     screenshot was taken for this rule. */
+  .card tr.detailRow {
+    padding: 0 16px 16px;
+  }
+
+  .card .detailRow > td {
+    display: block;
+    padding: 12px;
+    border-radius: var(--radius);
+    text-align: left;
+  }
+
+  .card .detailRow > td::before {
+    display: none;
   }
 
   .card td[data-label="Measure"] {

@@ -49,6 +49,10 @@ backend/app/
     mcs_config.py   MCSConfig (parallel of CDRConfig; is_read_only comes from the
                     shared mixin as of #396, plus an MCS-only wipe_before_job flag
                     gating the destructive pre-job wipe — see ADR-012)
+    measure_readiness.py
+                    MeasureReadiness (one cached verdict per `(mcs_id, measure_id,
+                    measure_version)`) + the four-state `ReadinessState` enum
+                    (`ready`, `not_ready`, `checking`, `unknown`; #434)
     base.py         SQLAlchemy declarative base
 
   routes/
@@ -56,7 +60,9 @@ backend/app/
     jobs.py         POST /jobs, GET /jobs, GET /jobs/{id}, POST /jobs/{id}/cancel,
                     GET /jobs/{id}/measure-report (FHIR Bundle of individual MeasureReports),
                     GET /jobs/{id}/comparison (actual vs. expected population counts)
-    measures.py     GET /measures, POST /measures/upload
+    measures.py     GET /measures, POST /measures/upload, DELETE /measures/{id},
+                    POST /measures/readiness/refresh (drops the active MCS's cached
+                    readiness verdicts and re-sweeps every measure; 202 + detached task)
     results.py      GET /results, GET /results/{job_id}
     groups.py       GET /api/groups, POST /api/groups/{id}/evaluate — experimental.
                     Admin-gated (`groups_enabled`); lists CQL-evaluatable Groups from
@@ -106,6 +112,14 @@ backend/app/
                          submit_data() uses. A mis-probed `stu5` that 400s/404s on the real POST
                          downgrades to base mode at runtime and retries once (workflows.py); the
                          stored `Job.submit_data_mode` still reflects the original probe verdict.
+                         `_same_origin()` guards every paginated `next` link against SSRF (a
+                         malicious or misconfigured server pointing pagination at a different
+                         host) and normalises default ports per scheme first — `https://h` and
+                         `https://h:443` are one origin — so a server that spells its own address
+                         with an explicit default port no longer looks like a different host and
+                         stops the walk early; an unparseable port rejects the link rather than
+                         raising (#434). Used by both the orchestrator's own pagination and by
+                         `measure_readiness.py`'s ValueSet lookups.
     bundle_loader.py     Startup bundle loader. Called once during FastAPI lifespan. Scans
                          seed/connectathon-bundles/, waits for HAPI readiness, then loads each
                          .json file via triage_test_bundle (Measure/Library → MCS, clinical
@@ -115,6 +129,20 @@ backend/app/
                          /run/secrets/cdr_fernet_key first, falls back to CDR_FERNET_KEY env var
                          (immediately popped to prevent subprocess leakage). self_check() runs at
                          startup to verify the key is valid.
+    measure_readiness.py Answers "can the active MCS actually evaluate this measure?" per
+                         measure: calls `$data-requirements` (the CQL compile check — fails
+                         when an included Library is unresolvable) then confirms every
+                         ValueSet canonical the server named is actually present. Results
+                         cache to `measure_readiness`, keyed by `(mcs_id, measure_id,
+                         measure_version)`; `run_sweep()` checks a batch of measures with
+                         concurrency capped by `READINESS_CONCURRENCY` and a per-measure
+                         timeout of `READINESS_TIMEOUT_SECONDS`. `invalidate_mcs()` clears
+                         cached verdicts for a connection (called on upload, delete, and MCS
+                         URL repoint); `reclaim_stranded_checks()` runs once at startup
+                         (main.py) to DELETE any row still `checking` from a prior crash —
+                         `claim_unchecked` only claims measures with no row, so the next
+                         `GET /measures` re-claims and re-sweeps it automatically. Reuses
+                         `fhir_client._same_origin` for its own ValueSet-pagination safety. (#434)
     validation.py        Test bundle parsing, ExpectedResult comparison, pass/fail logic.
     worker.py            Background task queue, priority ordering, job lifecycle management.
 ```
@@ -126,7 +154,12 @@ frontend/src/
   App.js              Main app with react-router-dom v6 routing
   pages/
     JobsPage.js       Create and monitor calculation jobs
-    MeasuresPage.js   Upload and view FHIR Measure bundles
+    MeasuresPage.js   Upload and view FHIR Measure bundles. Each row carries a readiness
+                      badge (ready/not ready/checking/not checked) that polls `GET /measures`
+                      every 5s while any measure is checking, expands to name missing
+                      Libraries/ValueSets on a not-ready or errored row, and a header
+                      "Re-check readiness" button that calls `POST /measures/readiness/refresh`
+                      and disables itself while a sweep is in flight (#434)
     ResultsPage.js    Aggregate population summaries + patient drill-down
     SettingsPage.js   CDR + MCS connection management (two stacked sections), admin tab
     ValidationPage.js Upload test bundles, view pass/fail results
@@ -239,6 +272,8 @@ Defined in `backend/app/config.py`. All overridable via environment variables.
 | `BATCH_SIZE` | `100` | Patients per `$evaluate-measure` batch |
 | `MAX_WORKERS` | `4` | Concurrent job worker threads |
 | `MAX_RETRIES` | `3` | Retry attempts for failed FHIR requests |
+| `READINESS_TIMEOUT_SECONDS` | `60` | Per-measure timeout for the readiness check's `$data-requirements` call (#434). Measured at 6–11s per measure against the local engine, so it needs its own ceiling rather than borrowing `MCSConfig.request_timeout_seconds` (default 30). A timeout renders as `unknown`, never as "not ready". |
+| `READINESS_CONCURRENCY` | `2` | How many readiness checks run at once during a sweep (#434). `$data-requirements` OOM-killed the measure engine once already (`fhir_client.py`), and the target server is usually shared, so the cap is deliberately low. |
 | `LOG_LEVEL` | `INFO` | Python logging level |
 | `ALLOWED_ORIGINS` | `"*"` | Comma-separated CORS allowed origins; `"*"` for wildcard (local dev default). Set to `https://${CADDY_HOST}` in production via `docker-compose.prod.yml`. |
 | `CDR_FERNET_KEY` | _(none)_ | Fernet key for encrypting CDR auth credentials at rest. Required in production. Generate with: `python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`. In prod, injected via Docker secret at `/run/secrets/cdr_fernet_key` (takes priority over env var). See `.env.example`. |

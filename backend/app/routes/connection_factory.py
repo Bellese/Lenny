@@ -14,6 +14,7 @@ model + schemas + URL field name.
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -118,6 +119,7 @@ def make_connection_router(
     default_name: str,
     job_fk_column: InstrumentedAttribute | None = None,
     audit_logger: logging.Logger | None = None,
+    on_url_change: Callable[[AsyncSession, int], Awaitable[Any]] | None = None,
 ) -> APIRouter:
     """Generate a 7-route APIRouter for a connection-management resource.
 
@@ -136,6 +138,9 @@ def make_connection_router(
             blocked error messages (e.g., `"Local CDR"`).
         job_fk_column: Optional `Job.<kind>_id` column for the delete-with-
             active-jobs check. Pass `None` if the kind has no Job FK yet.
+        on_url_change: Optional coroutine invoked after an update that changes
+            `url_field`. Lets a kind attach cache invalidation without this
+            factory knowing what a measure is. CDR passes nothing.
     """
 
     router = APIRouter()
@@ -281,6 +286,7 @@ def make_connection_router(
                 },
             )
 
+        url_before = getattr(cfg, url_field, None)
         # Apply the body's fields to the model. Auth type is converted to the
         # enum; auth_credentials respects the preserve-on-null rule above.
         for field_name in body.model_fields_set | set(body.model_dump().keys()):
@@ -292,6 +298,10 @@ def make_connection_router(
                 setattr(cfg, field_name, getattr(body, field_name))
         await session.commit()
         await session.refresh(cfg)
+        # Same connection id, different server: anything cached about the old
+        # host is now about the wrong machine.
+        if on_url_change is not None and getattr(cfg, url_field, None) != url_before:
+            await on_url_change(session, cfg.id)
         log.info(
             log_event,
             extra={

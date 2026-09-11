@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.3.0] - 2026-09-11
+
+### Added
+- **You can now see, before starting a job, whether a measure is actually complete on your measure server.** The Measures page carries a readiness column: green when the server holds everything the measure needs to be calculated, red when something is missing, and a question mark for measures that haven't been checked yet. Expanding a red row names what is absent — which Libraries the server couldn't resolve, and which value sets it doesn't hold — so you find out from a badge instead of from a job that fails twenty minutes in. Checks run in the background after the page loads, the column fills in as they finish, and a Re-check button re-runs them on demand. (#434)
+- **Readiness is re-checked automatically when the answer could have changed.** Uploading a bundle to the measure server, deleting a measure, or pointing a connection at a different server all clear the stored verdicts for that server, so the badges reflect what is on the server now rather than what was there when you first opened the page. (#434)
+
+### Changed
+- **Paged FHIR searches no longer stop early against servers that spell their own address differently.** When Lenny walks a multi-page search result it follows the `next` link the server supplies, and it refuses links pointing off the configured server's origin rather than send your credentials somewhere else. That origin comparison was literal: a server that named its default port explicitly (`:443` on https, `:80` on http) looked like a different host and the walk stopped, and a malformed port in a link raised an error instead of rejecting the link. Default ports are now recognised as equivalent and an unparseable port rejects the link cleanly. This applies to every paged search Lenny makes, not only the new readiness check. (#434)
+
+### Fixed
+- **A measure whose readiness could not be determined now says so, instead of guessing.** The check reports "unknown" — never green, never red — when the server's answer carries no information about the measure: an authentication failure, a redirect, a response that isn't a Library, a Library declaring no dependencies at all, or a value-set search that ran past its page budget before finishing. A wrong green badge would send you into a job that cannot succeed; a wrong red badge would stop you starting one that can. Both are now reported as "not determined", with the reason on the row. (#434)
+- **A fault inside Lenny is no longer reported as a fault on your measure server.** A database problem while clearing cached readiness verdicts used to surface as "Measure engine rejected bundle" on an upload that the measure server had in fact accepted, and could turn a successful measure deletion into a server error. Those paths now report what actually failed, and the upload or deletion stands. (#434)
+
 ## [0.2.2.0] - 2026-09-09
 
 ### Fixed
