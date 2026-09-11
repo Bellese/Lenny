@@ -76,20 +76,29 @@ function ReadinessBadge({ readiness, expanded, onToggle, measureName }) {
   const state = readiness?.state || 'unknown';
   const label = READINESS_LABELS[state] || READINESS_LABELS.unknown;
 
-  // Only ready/checking add a modifier class on top of the base badge —
-  // anything else (unknown) renders the base class alone, not
-  // `${styles.badge} ${styles.badge}` (Task 7 review Fix 2).
-  if (state === 'ready') return <span className={`${styles.badge} ${styles.badgeOk}`}>{label}</span>;
-  if (state === 'checking') return <span className={`${styles.badge} ${styles.badgeDraft}`}>{label}</span>;
-  if (!hasReadinessDetail(readiness)) return <span className={styles.badge}>{label}</span>;
+  // Readiness always renders on `.readinessBadge` (an outline/ghost
+  // treatment) rather than Status's filled `.badge` modifiers, so the two
+  // columns never read as the same kind of thing even before the label is
+  // read. Only ready/checking add a tone modifier on top of that shared
+  // outline — anything else (unknown) renders the neutral outline alone.
+  if (state === 'ready') {
+    return <span className={`${styles.badge} ${styles.readinessBadge} ${styles.readinessReady}`}>{label}</span>;
+  }
+  if (state === 'checking') {
+    return <span className={`${styles.badge} ${styles.readinessBadge} ${styles.readinessChecking}`}>{label}</span>;
+  }
+  if (!hasReadinessDetail(readiness)) {
+    return <span className={`${styles.badge} ${styles.readinessBadge}`}>{label}</span>;
+  }
 
-  // `unknown` keeps the neutral badge deliberately: it is not a verdict about
-  // the measure, and must never read as a failure. It only gains the toggle.
-  const toneClass = state === 'not_ready' ? `${styles.badgeBad} ` : '';
+  // `unknown` keeps the neutral outline deliberately: it is not a verdict
+  // about the measure, and must never read as a failure. It only gains the
+  // toggle.
+  const toneClass = state === 'not_ready' ? `${styles.readinessNotReady} ` : '';
   return (
     <button
       type="button"
-      className={`${styles.badge} ${toneClass}${styles.readinessToggle}`}
+      className={`${styles.badge} ${styles.readinessBadge} ${toneClass}${styles.readinessToggle}`}
       aria-expanded={expanded}
       aria-label={`Readiness details for ${measureName}`}
       title={readiness.error || undefined}

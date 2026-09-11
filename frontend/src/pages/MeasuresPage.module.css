@@ -185,15 +185,51 @@
   cursor: not-allowed;
 }
 
-.badgeBad {
-  background: var(--err-wash);
+/* Readiness answers a different question than Status ("Active"/"Draft"/
+   "Retired"), so it gets a different treatment: an outline/ghost pill
+   (transparent background, coloured border + text) instead of Status's
+   filled pill. `.readinessBadge` carries the shared outline shape; the
+   padding is reduced by the border's width on each axis so the outlined
+   pill occupies the same footprint as a filled `.badge` (2px 8px, no
+   border) instead of growing by the border. */
+.readinessBadge {
+  padding: 1px 7px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-muted);
+}
+
+.readinessReady {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.readinessChecking {
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.readinessNotReady {
+  border-color: var(--err);
   color: var(--err);
 }
 
 .readinessToggle {
-  border: none;
+  /* `.readinessBadge` (always present alongside this class — see
+     ReadinessBadge in MeasuresPage.js) already supplies the 1px solid
+     border, so this only needs to add button-specific behaviour. */
   cursor: pointer;
-  font: inherit;
+  /* font-family, NOT the `font` shorthand: `font` also resets font-size,
+     font-weight and line-height, and this rule is declared after `.badge` —
+     so the shorthand made the two interactive badges render larger and
+     heavier than every other badge in the table. */
+  font-family: inherit;
+  transition: opacity 120ms ease, background 120ms ease;
+}
+
+.readinessToggle:hover {
+  background: var(--bg-sunken);
+  opacity: 0.78;
 }
 
 .detailRow > td {

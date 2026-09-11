@@ -176,9 +176,9 @@ describe('MeasuresPage — readiness (#434)', () => {
 
   test('expanding a not-ready measure lists what is missing', async () => {
     renderMeasuresPage([measureWith(NOT_READY)]);
-    // The accessible name identifies the measure by its display name (#434
-    // Task 7 review Fix 1) — several not-ready rows must not read identically
-    // to a screen reader user tabbing through the table.
+    // The accessible name identifies the measure by its display name —
+    // several not-ready rows must not read identically to a screen reader
+    // user tabbing through the table.
     const badge = await screen.findByRole('button', {
       name: /Readiness details for Diabetes: Hemoglobin A1c Poor Control/i,
     });
@@ -385,6 +385,45 @@ describe('MeasuresPage — readiness (#434)', () => {
     });
 
     expect(await screen.findByText(/skipped/i)).toBeInTheDocument();
+  });
+
+  test('a re-check request that fails to even start is reported via toast', async () => {
+    // Distinct from the "skipped" case: this is refreshMeasureReadiness's
+    // promise REJECTING (network failure, 5xx) rather than resolving with a
+    // { status: 'skipped' } body — the catch branch of handleRecheck.
+    api.refreshMeasureReadiness = jest.fn().mockRejectedValue(new Error('Connection reset by peer'));
+    renderMeasuresPage([measureWith(NOT_READY)]);
+    await screen.findByText(/Not ready/i);
+
+    await act(async () => {
+      await userEvent.click(screen.getByRole('button', { name: /re-check readiness/i }));
+    });
+
+    expect(await screen.findByText(/Could not start readiness check/i)).toBeInTheDocument();
+    expect(screen.getByText(/Connection reset by peer/i)).toBeInTheDocument();
+    // The button must not be left stuck disabled by the failure.
+    expect(screen.getByRole('button', { name: /re-check readiness/i })).toBeEnabled();
+  });
+
+  test('clicking an expanded badge a second time collapses it manually', async () => {
+    // The automatic-collapse test elsewhere covers a poll settling the row
+    // out from under the user; this covers the plain manual toggle path —
+    // `onToggle={() => setExpandedId(isExpanded ? null : key)}`'s `null`
+    // branch, which nothing else in this file exercises.
+    renderMeasuresPage([measureWith(NOT_READY)]);
+    const badge = await screen.findByRole('button', {
+      name: /Readiness details for Diabetes: Hemoglobin A1c Poor Control/i,
+    });
+
+    await userEvent.click(badge);
+    expect(await screen.findByText(/Could not load source for library Status/)).toBeInTheDocument();
+    expect(badge).toHaveAttribute('aria-expanded', 'true');
+
+    await act(async () => {
+      await userEvent.click(badge);
+    });
+    expect(screen.queryByText(/Could not load source for library Status/)).not.toBeInTheDocument();
+    expect(badge).toHaveAttribute('aria-expanded', 'false');
   });
 
   test('an expanded row collapses when it stops having anything to show', async () => {
