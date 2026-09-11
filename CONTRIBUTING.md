@@ -90,6 +90,14 @@ In `backend/app/routes/settings.py`:
    `default_name="Local Terminology Server"`, and `job_fk_column=Job.ts_id`
    (or `None` if you haven't wired a Job FK for this kind yet — MCS shipped
    that way in PR #293 and added the FK in PR #294).
+5. If some other part of Lenny caches anything keyed off this connection
+   (measure readiness is keyed off the MCS's id, for example — see
+   `on_url_change=invalidate_mcs` in the MCS `make_connection_router(...)` call,
+   #434), pass `on_url_change=<your_invalidate_fn>`. It fires after an update
+   that actually changes `url_field`, so a repoint to a different server
+   invalidates a cache built against the old one instead of silently serving
+   verdicts about the wrong machine. Omit it if nothing caches anything about
+   this kind yet.
 
 The factory handles list, create, get, update, delete, activate, and
 `{prefix}/test-connection` routes uniformly. Custom kind-specific routes

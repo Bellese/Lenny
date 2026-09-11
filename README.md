@@ -38,7 +38,7 @@ Local dev (per `.env.example`) and CI use `docker-compose.prebaked.yml` (HAPI im
 
 ## Usage
 
-1. **Measures** — View loaded measures or upload new FHIR Measure bundles
+1. **Measures** — View loaded measures or upload new FHIR Measure bundles. Each measure shows a readiness badge (ready / not ready / checking / not checked) reporting whether the active MCS actually has everything the measure needs — missing Libraries or ValueSets are named on a not-ready row so you find out before a job fails partway through, not after. Checks run in the background and refresh automatically after an upload, delete, or connection switch; a "Re-check readiness" button re-runs them on demand.
 2. **Jobs** — Create a calculation job: select a measure, set the measurement period, optionally filter by FHIR Group, click Calculate
 3. **Results** — Inspect aggregate population summaries and drill into individual patient results
 4. **Validation** — Upload a FHIR test bundle with expected population results; Lenny runs the measure and compares actual vs. expected populations, reporting pass/fail per patient *(hidden by default; enable via Settings → Admin → Features → Validation toggle)*
