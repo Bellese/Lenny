@@ -519,3 +519,45 @@ async def test_changing_the_mcs_url_invalidates_its_readiness_verdicts(client, t
 
     rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
     assert rows == []
+
+
+async def test_updating_the_mcs_without_changing_the_url_preserves_readiness_verdicts(client, test_session):
+    """The counterpart to the test above: `on_url_change` must fire only when
+    `mcs_url` actually changes. A PUT that edits an unrelated field (name)
+    while resubmitting the same `mcs_url` is still the same server, so its
+    cached verdicts are still valid and must survive — an implementation that
+    invalidated on every PUT would silently defeat the whole cache and force
+    every measure back through `checking` on any unrelated settings edit.
+    """
+    from sqlalchemy import select
+
+    from app.models.connection_base import AuthType
+    from app.models.mcs_config import MCSConfig
+    from app.models.measure_readiness import MeasureReadiness, ReadinessState
+
+    cfg = MCSConfig(
+        name="Stable MCS",
+        mcs_url="https://stable.example.com/fhir",
+        auth_type=AuthType.none,
+        auth_credentials=None,
+        is_active=False,
+        is_default=False,
+    )
+    test_session.add(cfg)
+    await test_session.commit()
+    await test_session.refresh(cfg)
+
+    test_session.add(
+        MeasureReadiness(mcs_id=cfg.id, measure_id="CMS122", measure_version="1", state=ReadinessState.ready)
+    )
+    await test_session.commit()
+
+    resp = await client.put(
+        f"/settings/mcs-connections/{cfg.id}",
+        json={"name": "Renamed Stable MCS", "mcs_url": "https://stable.example.com/fhir", "auth_type": "none"},
+    )
+    assert resp.status_code == 200
+
+    rows = (await test_session.execute(select(MeasureReadiness))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].state is ReadinessState.ready
