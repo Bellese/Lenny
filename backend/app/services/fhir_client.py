@@ -1051,6 +1051,89 @@ async def evaluate_measure(
 SUBMIT_DATA_MODE_STU5 = "stu5"
 SUBMIT_DATA_MODE_BASE = "base-fallback"
 
+# Capability probing for the selected $submit-data contract (#413).
+#
+# A CapabilityStatement's `rest.resource.operation` carries only `name` and a
+# `definition` canonical — it expresses neither type-level support nor the
+# parameter list. Confirming the contract therefore means dereferencing the
+# OperationDefinition. At most this many are fetched per probe, so a
+# pathological CapabilityStatement cannot fan out into unbounded requests.
+_MAX_OPERATION_DEFINITION_PROBES = 3
+
+
+def _operation_definition_matches_contract(operation_definition: dict[str, Any]) -> bool:
+    """True when this OperationDefinition is the selected bundle contract.
+
+    All three checks are load-bearing:
+      - `code` is what governs the `$submit-data` invocation (it is a separate
+        field from the canonical URL's last segment — conflating the two is
+        the error #413 was originally filed on).
+      - `type: true` is required because the contract is type-level; an
+        instance-only operation does not answer POST Measure/$submit-data.
+      - a `bundle` INPUT parameter is what separates this contract from a
+        base-only server offering `measureReport` + `resource`.
+
+    `instance: true` alongside `type: true` is fine — HAPI 8.10.1 declares
+    both, and supporting the instance level does not remove the type level.
+    """
+    if operation_definition.get("code") != "submit-data":
+        return False
+    if operation_definition.get("type") is not True:
+        return False
+    return any(
+        param.get("name") == "bundle" and param.get("use") == "in"
+        for param in operation_definition.get("parameter", [])
+    )
+
+
+async def _resolve_operation_definition(
+    client: httpx.AsyncClient,
+    mcs_url: str,
+    definition: str,
+    auth_headers: dict[str, str],
+) -> dict[str, Any] | None:
+    """Resolve a CapabilityStatement operation's `definition` canonical.
+
+    `definition` is a URL chosen by a remote server, so a foreign origin is
+    NEVER dereferenced — that is the same SSRF vector `_same_origin` already
+    guards for pagination links. A foreign canonical is instead resolved the
+    FHIR way, by searching the MCS itself for a resource carrying that `url`.
+    This also keeps the probe correct for an air-gapped MCS whose
+    OperationDefinitions cite hl7.org canonicals it hosts locally.
+
+    Returns None whenever the definition cannot be resolved into an
+    OperationDefinition. The caller treats None as "contract not proven".
+    """
+    canonical = definition.split("|", 1)[0].strip()
+    if not canonical:
+        return None
+
+    if _same_origin(mcs_url, canonical):
+        resp = await client.get(canonical, headers=auth_headers)
+        if resp.status_code != 200:
+            return None
+        body = resp.json()
+        if isinstance(body, dict) and body.get("resourceType") == "OperationDefinition":
+            return body
+        return None
+
+    resp = await client.get(
+        f"{mcs_url}/OperationDefinition",
+        params={"url": canonical},
+        headers=auth_headers,
+    )
+    if resp.status_code != 200:
+        return None
+    bundle = resp.json()
+    if not isinstance(bundle, dict):
+        return None
+    for entry in bundle.get("entry", []):
+        resource = entry.get("resource")
+        if isinstance(resource, dict) and resource.get("resourceType") == "OperationDefinition":
+            return resource
+    return None
+
+
 _DEQM_SUBMIT_DATA_CANONICAL = "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/submit-data"
 _DEQM_SUBMIT_DATA_OP_NAME = "deqm-submit-data"
 

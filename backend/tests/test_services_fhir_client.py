@@ -14,7 +14,9 @@ from app.services.fhir_client import (
     _acquire_smart_token,
     _build_auth_headers,
     _chunk_request_entries,
+    _operation_definition_matches_contract,
     _remap_valueset_ids_for_hapi,
+    _resolve_operation_definition,
     delete_measure,
     detect_submit_data_mode,
     evaluate_measure,
@@ -2937,6 +2939,129 @@ class TestGetMeasureCanonical:
             )
             with pytest.raises(FhirOperationError):
                 await get_measure_canonical("m1", mcs_url="http://mcs")
+
+
+class TestOperationDefinitionMatchesContract:
+    def _od(self, **overrides) -> dict:
+        od = {
+            "resourceType": "OperationDefinition",
+            "code": "submit-data",
+            "type": True,
+            "instance": False,
+            "parameter": [{"name": "bundle", "use": "in", "min": 1, "max": "*"}],
+        }
+        od.update(overrides)
+        return od
+
+    def test_matches_type_level_submit_data_with_bundle_input(self):
+        assert _operation_definition_matches_contract(self._od()) is True
+
+    def test_matches_even_when_also_instance_level(self):
+        """HAPI 8.10.1 declares type:true AND instance:true. Supporting the
+        instance level too does not stop it supporting the type level."""
+        assert _operation_definition_matches_contract(self._od(instance=True)) is True
+
+    def test_rejects_instance_only_operation(self):
+        assert _operation_definition_matches_contract(self._od(type=False, instance=True)) is False
+
+    def test_rejects_wrong_code(self):
+        assert _operation_definition_matches_contract(self._od(code="deqm-submit-data")) is False
+
+    def test_rejects_when_bundle_parameter_absent(self):
+        """Base-only server: measureReport + resource, no bundle."""
+        od = self._od(
+            parameter=[
+                {"name": "measureReport", "use": "in", "min": 1, "max": "1"},
+                {"name": "resource", "use": "in", "min": 0, "max": "*"},
+            ]
+        )
+        assert _operation_definition_matches_contract(od) is False
+
+    def test_rejects_when_bundle_is_an_output_parameter(self):
+        od = self._od(parameter=[{"name": "bundle", "use": "out", "min": 1, "max": "*"}])
+        assert _operation_definition_matches_contract(od) is False
+
+    def test_rejects_missing_type_element(self):
+        od = self._od()
+        del od["type"]
+        assert _operation_definition_matches_contract(od) is False
+
+
+class TestResolveOperationDefinition:
+    _OD = {
+        "resourceType": "OperationDefinition",
+        "code": "submit-data",
+        "type": True,
+        "parameter": [{"name": "bundle", "use": "in", "max": "*"}],
+    }
+
+    async def test_same_origin_definition_is_fetched_directly(self):
+        get = AsyncMock(return_value=_make_response(200, self._OD))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://mcs/OperationDefinition/Measure-it-submit-data", {}
+                )
+        assert result == self._OD
+        assert get.call_args[0][0] == "http://mcs/OperationDefinition/Measure-it-submit-data"
+
+    async def test_version_suffix_is_stripped_before_fetching(self):
+        get = AsyncMock(return_value=_make_response(200, self._OD))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                await _resolve_operation_definition(client, "http://mcs", "http://mcs/OperationDefinition/x|5.0.0", {})
+        assert get.call_args[0][0] == "http://mcs/OperationDefinition/x"
+
+    async def test_foreign_origin_is_never_fetched_directly(self):
+        """SSRF guard: `definition` is a URL chosen by a remote server. It is
+        resolved by canonical search against the MCS, never dereferenced."""
+        bundle = {"resourceType": "Bundle", "entry": [{"resource": self._OD}]}
+        get = AsyncMock(return_value=_make_response(200, bundle))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://hl7.org/fhir/OperationDefinition/Measure-submit-data", {}
+                )
+        assert result == self._OD
+        assert get.call_args[0][0] == "http://mcs/OperationDefinition"
+        assert get.call_args.kwargs["params"] == {"url": "http://hl7.org/fhir/OperationDefinition/Measure-submit-data"}
+        for call in get.call_args_list:
+            assert "hl7.org" not in call[0][0]
+
+    async def test_returns_none_when_direct_fetch_is_not_200(self):
+        get = AsyncMock(return_value=_make_response(404, {"resourceType": "OperationOutcome"}))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://mcs/OperationDefinition/x", {}
+                )
+        assert result is None
+
+    async def test_returns_none_when_canonical_search_finds_nothing(self):
+        get = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle", "entry": []}))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://elsewhere.example/OperationDefinition/x", {}
+                )
+        assert result is None
+
+    async def test_returns_none_for_a_wrong_resource_type(self):
+        get = AsyncMock(return_value=_make_response(200, {"resourceType": "Patient", "id": "p1"}))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://mcs/OperationDefinition/x", {}
+                )
+        assert result is None
+
+    async def test_returns_none_for_an_empty_definition(self):
+        get = AsyncMock()
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(client, "http://mcs", "", {})
+        assert result is None
+        get.assert_not_awaited()
 
 
 class TestDetectSubmitDataMode:
