@@ -10,6 +10,7 @@ IG:   https://hl7.org/fhir/us/davinci-deqm/STU5/
 """
 
 import hashlib
+import json
 import re
 from typing import Any
 
@@ -91,6 +92,47 @@ def build_data_exchange_measure_report(
             {"reference": f"{r['resourceType']}/{r['id']}"} for r in resources if r.get("resourceType") and r.get("id")
         ],
     }
+
+
+def _canonical_json(resource: dict[str, Any]) -> str:
+    """Stable serialisation for content comparison — key order is not meaning."""
+    return json.dumps(resource, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def dedupe_by_identity(
+    resources: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """First-wins dedupe on `(resourceType, id)`.
+
+    Returns the deduped list in first-seen order, and the identities whose
+    later occurrences differed in content. Byte-identical duplicates are
+    dropped silently — repetition alone is not worth an operator's attention;
+    disagreement is.
+
+    Deduplication is deliberately WITHIN one subject. Callers must not reuse
+    one accumulator across subjects: a Practitioner shared by two subjects
+    belongs in both their Bundles, and suppressing the second would leave a
+    dangling reference in a Bundle the receiver may process on its own.
+
+    Precondition: every resource carries `resourceType` and `id`. The caller
+    filters first (see workflows.DeqmSubmitDataWorkflow.transfer_patient), and
+    deriving the MeasureReport and the payload from that same filtered list is
+    what keeps `evaluatedResource` aligned with the Bundle entries.
+    """
+    first_by_identity: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    conflicts: list[str] = []
+    for resource in resources:
+        identity = f"{resource['resourceType']}/{resource['id']}"
+        if identity not in first_by_identity:
+            first_by_identity[identity] = resource
+            order.append(identity)
+            continue
+        if identity in conflicts:
+            continue
+        if _canonical_json(resource) != _canonical_json(first_by_identity[identity]):
+            conflicts.append(identity)
+    return [first_by_identity[identity] for identity in order], conflicts
 
 
 def build_stu5_parameters(measure_report: dict[str, Any], resources: list[dict[str, Any]]) -> dict[str, Any]:

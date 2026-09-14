@@ -9,6 +9,7 @@ from app.services.deqm import (
     build_base_parameters,
     build_data_exchange_measure_report,
     build_stu5_parameters,
+    dedupe_by_identity,
 )
 
 _RESOURCES = [
@@ -171,3 +172,65 @@ class TestParameterEnvelopes:
         assert names == ["measureReport", "resource", "resource", "resource", "resource"]
         assert params["parameter"][0]["resource"] is mr
         assert params["parameter"][1]["resource"]["resourceType"] == "Organization"
+
+
+class TestDedupeByIdentity:
+    def test_identical_duplicates_collapse_without_conflict(self):
+        resources = [
+            {"resourceType": "Patient", "id": "p1", "gender": "female"},
+            {"resourceType": "Patient", "id": "p1", "gender": "female"},
+        ]
+        deduped, conflicts = dedupe_by_identity(resources)
+        assert deduped == [{"resourceType": "Patient", "id": "p1", "gender": "female"}]
+        assert conflicts == []
+
+    def test_conflicting_duplicates_keep_first_and_report(self):
+        first = {"resourceType": "Patient", "id": "p1", "gender": "female"}
+        second = {"resourceType": "Patient", "id": "p1", "gender": "male"}
+        deduped, conflicts = dedupe_by_identity([first, second])
+        assert deduped == [first]
+        assert conflicts == ["Patient/p1"]
+
+    def test_preserves_first_seen_order(self):
+        resources = [
+            {"resourceType": "Encounter", "id": "e1"},
+            {"resourceType": "Patient", "id": "p1"},
+            {"resourceType": "Encounter", "id": "e1"},
+            {"resourceType": "Condition", "id": "c1"},
+        ]
+        deduped, conflicts = dedupe_by_identity(resources)
+        assert [f"{r['resourceType']}/{r['id']}" for r in deduped] == [
+            "Encounter/e1",
+            "Patient/p1",
+            "Condition/c1",
+        ]
+        assert conflicts == []
+
+    def test_same_id_different_type_is_not_a_duplicate(self):
+        resources = [{"resourceType": "Patient", "id": "x"}, {"resourceType": "Encounter", "id": "x"}]
+        deduped, conflicts = dedupe_by_identity(resources)
+        assert len(deduped) == 2
+        assert conflicts == []
+
+    def test_conflict_reported_once_across_three_occurrences(self):
+        resources = [
+            {"resourceType": "Patient", "id": "p1", "gender": "female"},
+            {"resourceType": "Patient", "id": "p1", "gender": "male"},
+            {"resourceType": "Patient", "id": "p1", "gender": "other"},
+        ]
+        deduped, conflicts = dedupe_by_identity(resources)
+        assert len(deduped) == 1
+        assert conflicts == ["Patient/p1"]
+
+    def test_key_order_does_not_make_a_conflict(self):
+        """Canonical comparison: the same data spelled in a different key order
+        is the same resource, not a conflict. A CDR is under no obligation to
+        serialise keys consistently across two reads."""
+        a = {"resourceType": "Patient", "id": "p1", "gender": "female", "active": True}
+        b = {"active": True, "gender": "female", "id": "p1", "resourceType": "Patient"}
+        deduped, conflicts = dedupe_by_identity([a, b])
+        assert deduped == [a]
+        assert conflicts == []
+
+    def test_empty_list(self):
+        assert dedupe_by_identity([]) == ([], [])
