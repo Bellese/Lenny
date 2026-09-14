@@ -107,11 +107,22 @@ backend/app/
                          loaded returns HAPI-2788 rather than an empty set, and treating that as
                          "no such resources" silently changes populations. Also home to the
                          DEQM $submit-data capability probe: detect_submit_data_mode() reads the
-                         MCS CapabilityStatement at job creation and stamps `Job.submit_data_mode`
-                         as `stu5` or `base-fallback`, which decides which URL shape/envelope
-                         submit_data() uses. A mis-probed `stu5` that 400s/404s on the real POST
-                         downgrades to base mode at runtime and retries once (workflows.py); the
-                         stored `Job.submit_data_mode` still reflects the original probe verdict.
+                         MCS CapabilityStatement at job creation, then dereferences the
+                         OperationDefinition behind any advertised `submit-data` operation —
+                         a CapabilityStatement carries only `name` + a `definition` canonical, so
+                         type-level support and the `bundle` input are invisible to it. `stu5`
+                         requires `code: submit-data`, `type: true`, and a `bundle` input; every
+                         other case, including anything merely unconfirmable, is `base-fallback`.
+                         The retired DEQM `$deqm-submit-data` (retired upstream 2026-03-05) is
+                         deliberately NOT a classification signal (#413). A foreign-origin
+                         `definition` is never fetched — it is resolved via
+                         `OperationDefinition?url=` against the MCS itself. The verdict stamps
+                         `Job.submit_data_mode`, deciding which URL shape/envelope submit_data()
+                         uses: type-level `Measure/$submit-data` with 1..* `bundle` parameters, or
+                         instance-level `Measure/{id}/$submit-data`. A mis-probed `stu5` that
+                         400s/404s on the real POST downgrades to base mode at runtime and retries
+                         once (workflows.py); the stored `Job.submit_data_mode` still reflects the
+                         original probe verdict.
                          `_same_origin()` guards every paginated `next` link against SSRF (a
                          malicious or misconfigured server pointing pagination at a different
                          host) and normalises default ports per scheme first — `https://h` and
