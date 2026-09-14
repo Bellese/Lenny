@@ -435,18 +435,104 @@ is a follow-up issue.
 
 ## Implementation sequencing
 
-Three increments, each independently landable, in order:
+Three PRs, each independently landable and independently green, in order. Each
+leaves the product coherent — never half-built — so if the later ones slip,
+what shipped still stands on its own.
 
-1. **Contract.** URL, detection rewrite, retired-operation removal, per-subject
-   deduplication, `build_stu5_parameters` taking a list of one. No behavior
-   change beyond the endpoint and the probe.
-2. **Grouping.** The group protocol, per-chunk buffer, failure isolation, and the
-   downgrade interaction. Still no user-facing control — group size is 1.
-3. **Control.** `AppSetting` persistence, the `jobs` column and migration, the
-   API field, clamping, and the UI.
+### PR 1 — Contract
 
-Increment 1 delivers #413's core acceptance criteria on its own. If 2 and 3 slip,
-what has landed is coherent rather than half-built.
+URL, detection rewrite, retired-operation removal, per-subject deduplication,
+and `build_stu5_parameters` taking a list. The list has one element at every call
+site, so the wire output does not change beyond the endpoint. This PR alone
+satisfies #413's originally published acceptance criteria.
+
+- [ ] A STU5 submission POSTs to `[base]/Measure/$submit-data` — no measure-id
+      segment, no `deqm-` prefix.
+- [ ] Its `Parameters` body carries `bundle` parameters only; no top-level
+      `measureReport` or `resource` parameters appear in STU5 mode.
+- [ ] Each `bundle` is a collection Bundle for one subject, containing that
+      subject's MeasureReport and its gathered data of interest.
+- [ ] `evaluatedResource` references correspond one-for-one with Bundle entries,
+      with none dangling.
+- [ ] A resource identity gathered more than once appears once in the Bundle.
+      Byte-identical duplicates collapse silently; differing representations keep
+      the first and log a warning naming the identity.
+- [ ] A Practitioner or Organization shared by two subjects appears in both
+      subjects' Bundles — deduplication never crosses subjects.
+- [ ] The once-per-job reporter Organization is still PUT once and still
+      resolves; it is not re-inlined per subject.
+- [ ] Detection classifies `stu5` only when an advertised operation has
+      `code: submit-data`, `type: true`, and a `bundle` input parameter.
+- [ ] A server advertising only the retired `$deqm-submit-data` classifies
+      `base-fallback`, and the probe logs why.
+- [ ] A `definition` on a foreign origin is never fetched; resolution is
+      attempted via `OperationDefinition?url=` on the target server.
+- [ ] Detection still never raises and never blocks job creation; every
+      unconfirmable case resolves to `base-fallback`.
+- [ ] Base-fallback's endpoint and envelope are unchanged, with regression
+      coverage for #414 single-mode settlement and #415 OperationOutcome rejection.
+- [ ] Comments and docs distinguish the maintainer-selected contract from
+      published STU5 and from the current draft.
+
+### PR 2 — Grouping
+
+The group protocol, per-chunk buffer, failure isolation, and the downgrade
+interaction. No user-facing control yet: group size is 1 everywhere, so this PR
+is behavior-neutral by construction and its value is that the mechanics land
+under test before anything can select them.
+
+- [ ] At group size 1 the STU5 path is byte-identical to PR 1 — one POST per
+      subject, one `bundle` parameter.
+- [ ] At group size N a single POST carries N `bundle` parameters, one per
+      subject.
+- [ ] A group whose POST fails resubmits each subject individually; only the
+      subject owning the bad resource is marked failed and the rest are processed.
+- [ ] A pioneer group failing with a capability signal downgrades the job and
+      does **not** also isolate.
+- [ ] A pioneer group failing with a payload rejection isolates and does **not**
+      downgrade.
+- [ ] Isolation retries under the settled mode and never downgrades.
+- [ ] Two chunks running concurrently never mix subjects into each other's
+      submissions.
+- [ ] Per-patient accounting is unchanged: `processed`/`failed` counters,
+      `gather_failed_patients`, `partial_gather_patients`, and per-patient
+      `MeasureResult` rows all still reflect individual subjects.
+- [ ] `direct_load` and `base-fallback` report group size 1 and keep using
+      `transfer_patient` unchanged.
+- [ ] Phase 2 `$evaluate-measure` remains per-patient.
+
+### PR 3 — The user-facing control
+
+`AppSetting` persistence, the `jobs` column and migration, the API field,
+clamping, and the UI.
+
+- [ ] The job-creation form shows a **Bundles per submission** numeric input on
+      the DEQM workflow branch only; `direct_load` does not show it.
+- [ ] The input defaults to the remembered value, or **1** when nothing is
+      remembered.
+- [ ] Creating a job writes the chosen value to `AppSetting`
+      (`deqm_bundles_per_submission`), **including 1**, so the next job defaults
+      to it and returning to single-bundle submissions persists.
+- [ ] Helper text states that `0` means every subject in a processing batch, and
+      names the ceiling.
+- [ ] `POST /jobs` accepts `bundles_per_submission` as a non-negative integer;
+      a negative or non-integer value is rejected with 422.
+- [ ] `0` is accepted and resolves to the processing-chunk size
+      (`settings.BATCH_SIZE`).
+- [ ] The effective value is
+      `min(requested or CHUNK, server bundle max, CHUNK)`, and any clamp that
+      reduces the request is logged with its reason.
+- [ ] A server advertising `bundle` `max: "1"` clamps the group to 1 and still
+      classifies `stu5`.
+- [ ] `jobs.bundles_per_submission` stores the effective value for DEQM jobs and
+      `NULL` for `direct_load`; the column is added idempotently via the
+      `main.py:242` pattern.
+- [ ] The job API response returns the value the job actually used, not the
+      value the setting currently holds — a later setting change does not rewrite
+      an existing job's record.
+- [ ] A job that downgrades to `base-fallback` submits one subject per call
+      regardless of the stored value.
+- [ ] The control is absent from, and has no effect on, `direct_load` jobs.
 
 ## Rejected alternatives
 
