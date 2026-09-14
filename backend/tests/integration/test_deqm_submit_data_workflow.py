@@ -184,7 +184,9 @@ async def _create_and_run(
 
 
 async def test_deqm_job_records_base_fallback_mode(integration_client, integration_session_factory):
-    """Bundled HAPI has no $deqm-submit-data, so the probe must record base-fallback."""
+    """No advertised operation's OperationDefinition confirms the type-level
+    $submit-data bundle contract on bundled HAPI, so the probe must record
+    base-fallback."""
     resp = await integration_client.post(
         "/jobs",
         json={

@@ -33,10 +33,11 @@ from app.services.fhir_client import (
 )
 from app.services.fhir_errors import FhirOperationError
 
-# Capability-mismatch signals: a server that advertises $deqm-submit-data but
-# doesn't actually implement the type-level POST commonly answers with one of
-# these. Each is a statement about the SERVER, not about the payload, so it is
-# a credible capability verdict on its own.
+# Capability-mismatch signals: a server whose CapabilityStatement/
+# OperationDefinition probe confirmed the type-level $submit-data bundle
+# contract, but whose type-level POST doesn't actually work, commonly
+# answers with one of these. Each is a statement about the SERVER, not
+# about the payload, so it is a credible capability verdict on its own.
 #
 # 401/403 are deliberately excluded — auth failures, not capability mismatches,
 # and must not be masked as a silent downgrade. 429/5xx are excluded too —
@@ -375,11 +376,11 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             )
         except FhirOperationError as exc:
             # A mis-probed capability stamps Job.submit_data_mode="stu5" for a
-            # server that doesn't actually implement $deqm-submit-data. Rather
-            # than fail every patient in the job, downgrade to base mode and
-            # retry once. Because this runs before the mode is settled, no
-            # patient has been submitted under STU5 yet, so the downgrade
-            # cannot strand anyone in the other format.
+            # server that doesn't actually implement the type-level $submit-data
+            # bundle contract. Rather than fail every patient in the job,
+            # downgrade to base mode and retry once. Because this runs before
+            # the mode is settled, no patient has been submitted under STU5
+            # yet, so the downgrade cannot strand anyone in the other format.
             #
             # A bare status is only trusted when it is a statement about the
             # server (_DOWNGRADE_STATUS_CODES). A 400 is ambiguous, so it
@@ -391,7 +392,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             )
             if capability_signal:
                 logger.warning(
-                    "STU5 $deqm-submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
+                    "STU5 $submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
                     exc.status_code,
                     self._job_id,
                     extra={"job_id": self._job_id, "patient_id": patient_id, "status_code": exc.status_code},
@@ -444,7 +445,7 @@ async def build_submission_workflow(
             # measure is already named in the instance-level submit URL.
             raise ValueError(
                 f"Measure '{measure_id}' has no absolute canonical URL (got {canonical!r}), "
-                "which is required for DEQM STU5 $deqm-submit-data submissions."
+                "which is required for DEQM STU5 $submit-data submissions."
             )
         # DEQM STU5 says a submission's references should resolve WITHIN the
         # submission, which is why the reporter Organization used to travel
