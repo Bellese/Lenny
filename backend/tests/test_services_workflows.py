@@ -22,7 +22,7 @@ def _fhir_op_error_with_outcome(status_code: int, diagnostics: str) -> FhirOpera
     """#414: a 400's meaning lives in its OperationOutcome, not its status."""
     return FhirOperationError(
         operation="submit-data",
-        url="http://mcs/Measure/$deqm-submit-data",
+        url="http://mcs/Measure/$submit-data",
         status_code=status_code,
         outcome=FhirOperationOutcome.from_dict(
             {
@@ -37,7 +37,7 @@ def _fhir_op_error_with_outcome(status_code: int, diagnostics: str) -> FhirOpera
 def _fhir_op_error(status_code: int) -> FhirOperationError:
     return FhirOperationError(
         operation="submit-data",
-        url="http://mcs/Measure/$deqm-submit-data",
+        url="http://mcs/Measure/$submit-data",
         status_code=status_code,
         outcome=None,
         latency_ms=5,
@@ -196,9 +196,7 @@ class TestDeqmSubmitDataWorkflow:
         wf = _deqm_workflow(mode="stu5")
         submit = AsyncMock(
             side_effect=[
-                _fhir_op_error_with_outcome(
-                    400, "does not know how to handle POST operation[Measure/$deqm-submit-data]"
-                ),
+                _fhir_op_error_with_outcome(400, "does not know how to handle POST operation[Measure/$submit-data]"),
                 None,
             ]
         )
@@ -289,7 +287,7 @@ class TestDeqmSubmitDataWorkflow:
 
     @pytest.mark.parametrize("status_code", [405, 501])
     async def test_stu5_405_and_501_also_downgrade(self, status_code):
-        """F3: a server that advertises $deqm-submit-data but doesn't
+        """F3: a server that advertises $submit-data but doesn't
         implement the type-level POST commonly answers 405 or 501."""
         wf = _deqm_workflow(mode="stu5")
         submit = AsyncMock(side_effect=[_fhir_op_error(status_code), None])

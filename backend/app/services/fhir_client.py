@@ -1134,8 +1134,22 @@ async def _resolve_operation_definition(
     return None
 
 
-_DEQM_SUBMIT_DATA_CANONICAL = "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/submit-data"
-_DEQM_SUBMIT_DATA_OP_NAME = "deqm-submit-data"
+# The DEQM IG's own submission operation (`code: deqm-submit-data`, canonical
+# .../OperationDefinition/submit-data) was RETIRED upstream on 2026-03-05:
+#   deprecated  https://github.com/HL7/davinci-deqm/commit/65c053f76cae7d0dda784547be177d3fbc0b39f5
+#   retired     https://github.com/HL7/davinci-deqm/commit/bc0d01b6ee86e7d571e76e2ba0cafb640c376fa3
+#   guidance    https://github.com/HL7/davinci-deqm/commit/0d6b646861c1fe36371ef706f28ba4209e05968c
+# Lenny deliberately no longer matches it (#413, decision 1): a server offering
+# only the retired operation is classified base-fallback. Do NOT reintroduce it
+# as a classification signal — read
+# docs/superpowers/specs/2026-09-14-deqm-submit-data-contract-design.md first.
+# The name survives ONLY to explain the fallback in a log line.
+_RETIRED_DEQM_OP_NAME = "deqm-submit-data"
+
+# The operation `code` of the selected contract. NOT the canonical's last
+# segment — those are separate fields, and conflating them is the error #413
+# was originally filed on.
+_SUBMIT_DATA_OP_CODE = "submit-data"
 
 
 async def get_measure_canonical(
@@ -1179,45 +1193,64 @@ async def detect_submit_data_mode(
     auth_headers: dict[str, str] | None = None,
     timeout: float = 10.0,
 ) -> str:
-    """Probe the MCS CapabilityStatement for DEQM STU5 $deqm-submit-data.
+    """Probe the MCS for the selected type-level $submit-data bundle contract.
 
-    Returns SUBMIT_DATA_MODE_STU5 when the Measure resource advertises an
-    operation named `deqm-submit-data` or defined by the DEQM canonical.
-    Everything else — including an unreachable/unparseable /metadata — is
-    SUBMIT_DATA_MODE_BASE. Never raises: the probe decides the envelope,
-    it must not block job creation (the measure pre-flight already proved
-    the MCS reachable).
+    Returns SUBMIT_DATA_MODE_STU5 only when the server advertises an operation
+    whose OperationDefinition has `code: submit-data`, `type: true`, and a
+    `bundle` input parameter. A CapabilityStatement cannot express the last two,
+    so the definition is dereferenced (never across origins — see
+    `_resolve_operation_definition`).
+
+    Everything else is SUBMIT_DATA_MODE_BASE, including every case where the
+    contract merely cannot be CONFIRMED: an unreachable /metadata, a missing or
+    unfetchable OperationDefinition, a malformed body. That direction is the
+    safe one — base-fallback is the empirically verified path against HAPI,
+    whereas a false stu5 costs the job a pioneer round trip before
+    `_settle_mode_and_submit` downgrades it.
+
+    Never raises: the probe decides the envelope, it must not block job
+    creation (the measure pre-flight already proved the MCS reachable).
     """
+    headers = auth_headers or {}
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(f"{mcs_url}/metadata", headers=auth_headers or {})
+            resp = await client.get(f"{mcs_url}/metadata", headers=headers)
             resp.raise_for_status()
             capability = resp.json()
-        for rest in capability.get("rest", []):
-            operations = list(rest.get("operation", []))
-            for res in rest.get("resource", []):
-                if res.get("type") == "Measure":
-                    operations.extend(res.get("operation", []))
-            for op in operations:
-                if op.get("name") == _DEQM_SUBMIT_DATA_OP_NAME:
+
+            candidates: list[str] = []
+            saw_retired_operation = False
+            for rest in capability.get("rest", []):
+                operations = list(rest.get("operation", []))
+                for res in rest.get("resource", []):
+                    if res.get("type") == "Measure":
+                        operations.extend(res.get("operation", []))
+                for op in operations:
+                    name = op.get("name")
+                    if name == _RETIRED_DEQM_OP_NAME:
+                        saw_retired_operation = True
+                    elif name == _SUBMIT_DATA_OP_CODE and op.get("definition"):
+                        candidates.append(str(op["definition"]))
+
+            for definition in candidates[:_MAX_OPERATION_DEFINITION_PROBES]:
+                operation_definition = await _resolve_operation_definition(client, mcs_url, definition, headers)
+                if operation_definition is not None and _operation_definition_matches_contract(operation_definition):
                     return SUBMIT_DATA_MODE_STU5
-                definition = str(op.get("definition", ""))
-                # Exact match, or the canonical with a `|version` suffix — NOT any
-                # prefix. A loose startswith() let a server that merely cites the
-                # DEQM canonical (but implements only the base wire shape) get
-                # classified stu5, which then 400s on every $deqm-submit-data POST
-                # with no downgrade (see DeqmSubmitDataWorkflow.transfer_patient).
-                if definition == _DEQM_SUBMIT_DATA_CANONICAL or definition.startswith(
-                    f"{_DEQM_SUBMIT_DATA_CANONICAL}|"
-                ):
-                    return SUBMIT_DATA_MODE_STU5
+
+            if saw_retired_operation and not candidates:
+                logger.info(
+                    "MCS advertises only the retired DEQM $%s operation (retired upstream "
+                    "2026-03-05) — using base $submit-data",
+                    _RETIRED_DEQM_OP_NAME,
+                    extra={"mcs_url": sanitize_url(mcs_url)},
+                )
     except Exception as exc:
         # Deferred import: app.services.validation imports from this module at
         # module load time, so a top-level import here would be circular.
         from app.services.validation import sanitize_error
 
         logger.warning(
-            "CapabilityStatement probe for $deqm-submit-data failed — assuming base $submit-data",
+            "CapabilityStatement probe for the $submit-data bundle contract failed — assuming base $submit-data",
             extra={"mcs_url": sanitize_url(mcs_url), "error": sanitize_error(exc)},
         )
     return SUBMIT_DATA_MODE_BASE
@@ -1251,10 +1284,10 @@ async def submit_data(
     The two modes deliberately use DIFFERENT URL shapes — do not "simplify"
     them into one:
 
-    - STU5 mode POSTs to the type-level `Measure/$deqm-submit-data`. STU5's
-      OperationDefinition formally declares this operation type-level
-      (`instance: false`), so a spec-compliant STU5 server only implements it
-      there.
+    - STU5 mode POSTs to the type-level `Measure/$submit-data`. The contract
+      selected in #413 is type-level, and `detect_submit_data_mode` only
+      resolves to this mode after confirming the server's OperationDefinition
+      declares `type: true` with a `bundle` input.
     - Base-fallback mode POSTs to the instance-level
       `Measure/{measure_id}/$submit-data`. This is empirical, not spec-driven:
       probed against a local prebaked HAPI measure server, the type-level
@@ -1264,6 +1297,10 @@ async def submit_data(
       performed a real upsert (confirmed via `_history` after two identical
       POSTs). HAPI's clinical-reasoning module simply doesn't register the
       type-level operation, so base mode has to target the instance.
+    The two URLs now differ ONLY by the measure-id segment, which makes the
+    warning above more important, not less: collapsing them into one shape
+    would silently send every base-fallback job to an endpoint HAPI does not
+    implement.
 
     A 2xx is necessary but not sufficient (#415). HAPI returns a transaction
     Bundle on success, but a server may reject a submission inside a 200 by
@@ -1283,7 +1320,7 @@ async def submit_data(
     primary defense against the shared-Organization storm anymore.
     """
     if mode == SUBMIT_DATA_MODE_STU5:
-        url = f"{mcs_url}/Measure/$deqm-submit-data"
+        url = f"{mcs_url}/Measure/$submit-data"
     else:
         url = f"{mcs_url}/Measure/{measure_id}/$submit-data"
     headers = {"Content-Type": "application/fhir+json", **(auth_headers or {})}
