@@ -276,7 +276,11 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # filter) but still shipped as a `resource` parameter — the
         # MeasureReport and the payload disagree, and under HAPI's
         # transaction semantics one bad entry can 400 the whole patient.
-        filtered_resources = [r for r in gather.resources if "resourceType" in r and "id" in r]
+        # The predicate matches build_data_exchange_measure_report's own filter
+        # exactly — truthiness, not key presence — so a resource carrying an
+        # empty id is dropped from BOTH the Bundle entries and
+        # evaluatedResource, rather than shipping as an entry nothing refers to.
+        filtered_resources = [r for r in gather.resources if r.get("resourceType") and r.get("id")]
         # Dedupe BEFORE the MeasureReport is built, so evaluatedResource and the
         # Bundle entries stay 1:1 by construction rather than by a second rule
         # maintained somewhere else. Within this subject only — see

@@ -1232,8 +1232,17 @@ async def detect_submit_data_mode(
                     elif name == _SUBMIT_DATA_OP_CODE and op.get("definition"):
                         candidates.append(str(op["definition"]))
 
-            for definition in candidates[:_MAX_OPERATION_DEFINITION_PROBES]:
-                operation_definition = await _resolve_operation_definition(client, mcs_url, definition, headers)
+            # One canonical advertised at both rest.operation and
+            # rest.resource[Measure].operation is one definition, not two, and
+            # must not burn two of the three probe slots re-reading itself.
+            for definition in list(dict.fromkeys(candidates))[:_MAX_OPERATION_DEFINITION_PROBES]:
+                try:
+                    operation_definition = await _resolve_operation_definition(client, mcs_url, definition, headers)
+                except Exception:  # noqa: BLE001 - one unusable candidate must not hide the rest
+                    # A 200 carrying an HTML proxy error page raises out of the
+                    # JSON parse. Skip that candidate; the ones after it are
+                    # still worth probing.
+                    continue
                 if operation_definition is not None and _operation_definition_matches_contract(operation_definition):
                     return SUBMIT_DATA_MODE_STU5
 

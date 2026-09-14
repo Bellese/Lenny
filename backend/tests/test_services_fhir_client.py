@@ -1,7 +1,7 @@
 """Tests for the FHIR client service (fhir_client.py)."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -3056,13 +3056,47 @@ class TestResolveOperationDefinition:
                 )
         assert result is None
 
-    async def test_returns_none_for_an_empty_definition(self):
+    @pytest.mark.parametrize("definition", ["", "   ", "|5.0.0", "  |5.0.0"])
+    async def test_returns_none_for_a_blank_definition(self, definition):
         get = AsyncMock()
         async with httpx.AsyncClient() as client:
             with patch.object(client, "get", get):
-                result = await _resolve_operation_definition(client, "http://mcs", "", {})
+                result = await _resolve_operation_definition(client, "http://mcs", definition, {})
         assert result is None
         get.assert_not_awaited()
+
+    async def test_auth_headers_reach_a_same_origin_fetch(self):
+        """Dropping the headers would make every authenticated MCS answer 401,
+        and the probe would silently classify it base-fallback."""
+        get = AsyncMock(return_value=_make_response(200, self._OD))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                await _resolve_operation_definition(
+                    client, "http://mcs", "http://mcs/OperationDefinition/sd", {"Authorization": "Bearer t"}
+                )
+        assert get.call_args.kwargs["headers"] == {"Authorization": "Bearer t"}
+
+    async def test_auth_headers_reach_a_canonical_search(self):
+        get = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle", "entry": []}))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                await _resolve_operation_definition(
+                    client, "http://mcs", "http://hl7.org/fhir/OperationDefinition/x", {"Authorization": "Bearer t"}
+                )
+        assert get.call_args.kwargs["headers"] == {"Authorization": "Bearer t"}
+
+    async def test_a_non_operation_definition_entry_in_the_search_bundle_is_skipped(self):
+        bundle = {
+            "resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "OperationOutcome"}}, {"resource": self._OD}],
+        }
+        get = AsyncMock(return_value=_make_response(200, bundle))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://elsewhere.example/OperationDefinition/x", {}
+                )
+        assert result == self._OD
 
 
 class TestDetectSubmitDataMode:
@@ -3196,8 +3230,59 @@ class TestDetectSubmitDataMode:
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=get)
             assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
-        # 1 metadata call + at most _MAX_OPERATION_DEFINITION_PROBES definition reads
-        assert get.await_count <= 1 + _MAX_OPERATION_DEFINITION_PROBES
+        # 1 metadata call + exactly _MAX_OPERATION_DEFINITION_PROBES definition
+        # reads. Asserted as equality: `<=` also passes when the budget is
+        # spent early or no definition is read at all.
+        assert get.await_count == 1 + _MAX_OPERATION_DEFINITION_PROBES
+
+    async def test_a_repeated_canonical_does_not_consume_two_probe_slots(self):
+        """The same operation advertised at rest.operation and at
+        rest.resource[Measure].operation is one definition, not two."""
+        cap = {
+            "resourceType": "CapabilityStatement",
+            "rest": [
+                {
+                    "mode": "server",
+                    "operation": [{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}],
+                    "resource": [
+                        {
+                            "type": "Measure",
+                            "operation": [{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}],
+                        }
+                    ],
+                }
+            ],
+        }
+        get = self._responder(cap, self._BASE_ONLY_OD)
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=get)
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+        # 1 metadata call + 1 definition read, not 2.
+        assert get.await_count == 2
+
+    async def test_an_unparseable_candidate_does_not_abort_the_ones_after_it(self):
+        """A 200 carrying an HTML proxy error page raises out of the JSON parse.
+        The contracted definition advertised after it must still be probed."""
+
+        cap = self._capability(
+            [
+                {"name": "submit-data", "definition": "http://mcs/OperationDefinition/broken"},
+                {"name": "submit-data", "definition": "http://mcs/OperationDefinition/good"},
+            ]
+        )
+        unparseable = _make_response(200, {})
+        unparseable.json = MagicMock(side_effect=ValueError("not JSON"))
+
+        async def _get(url, *args, **kwargs):
+            if url.endswith("/metadata"):
+                return _make_response(200, cap)
+            if url.endswith("/broken"):
+                return unparseable
+            return _make_response(200, self._CONTRACT_OD)
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(side_effect=_get))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_STU5
 
     async def test_fallback_when_probe_raises(self):
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:

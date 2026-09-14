@@ -91,7 +91,7 @@ describe('JobsPage — data submission workflow', () => {
     ).toBeInTheDocument();
   });
 
-  test('DEQM job with base-fallback shows the STU5 warning badge', async () => {
+  test('DEQM job with base-fallback shows the instance-level fallback warning badge', async () => {
     api.getJobs = jest.fn().mockResolvedValue({
       jobs: [{ ...BASE_JOB, workflow: 'deqm_submit_data', submit_data_mode: 'base-fallback' }],
     });

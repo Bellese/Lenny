@@ -578,7 +578,9 @@ async def _process_single_batch(
                 try:
                     gather_result = await workflow.transfer_patient(cdr_url, patient_id, auth_headers)
                     logger.info(
-                        f"Transferred {len(gather_result.resources)} resources for {patient_id[:8]}",
+                        # The gathered count, not the submitted one: transfer_patient
+                        # filters and deduplicates before building the payload.
+                        f"Gathered {len(gather_result.resources)} resources for {patient_id[:8]}",
                         extra={"job_id": job_id, "patient_id": patient_id},
                     )
 

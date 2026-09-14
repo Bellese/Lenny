@@ -1,12 +1,18 @@
-"""DEQM STU5 data-exchange payload builders.
+"""DEQM data-exchange payload builders.
 
 Pure functions that assemble the DEQM Data Exchange MeasureReport and the two
-$submit-data Parameters envelopes (STU5 `bundle` form and base-FHIR
-`measureReport`+`resource` form). No I/O here — HTTP delivery lives in
+$submit-data Parameters envelopes: the type-level `bundle` form Lenny targets
+(1..* Bundles, one subject each) and the base-FHIR `measureReport`+`resource`
+form it falls back to. No I/O here — HTTP delivery lives in
 fhir_client.submit_data, orchestration in workflows.DeqmSubmitDataWorkflow.
 
-Spec: docs/superpowers/specs/2026-08-21-deqm-submit-data-workflow-design.md
-IG:   https://hl7.org/fhir/us/davinci-deqm/STU5/
+The `bundle` form is the contract Lenny selected in #413; it is NOT the
+published DEQM STU5 operation, whose own $deqm-submit-data was retired
+upstream. Read the contract spec before changing either envelope.
+
+Spec:     docs/superpowers/specs/2026-09-14-deqm-submit-data-contract-design.md
+Original: docs/superpowers/specs/2026-08-21-deqm-submit-data-workflow-design.md
+IG:       https://hl7.org/fhir/us/davinci-deqm/STU5/
 """
 
 import hashlib
