@@ -9,8 +9,8 @@ import { ToastProvider } from '../components/Toast';
 import * as api from '../api/client';
 
 // Covers Task 6: per-job data submission workflow selector + visibility into
-// the DEQM STU5 -> base $submit-data fallback when the active MCS doesn't
-// implement $deqm-submit-data.
+// the type-level -> instance-level $submit-data fallback when the active MCS
+// doesn't support the type-level operation with bundles.
 jest.mock('../api/client');
 
 function Harness() {
@@ -87,7 +87,7 @@ describe('JobsPage — data submission workflow', () => {
     await waitFor(() => expect(measureSelect.value).toBe('CMS999'));
     await userEvent.click(screen.getByRole('button', { name: /Start calculation/i }));
     expect(
-      await screen.findByText(/MCS does not support DEQM STU5 \$deqm-submit-data — falling back to base \$submit-data\./i)
+      await screen.findByText(/MCS does not support type-level \$submit-data with bundles — falling back to instance-level \$submit-data\./i)
     ).toBeInTheDocument();
   });
 
@@ -96,12 +96,12 @@ describe('JobsPage — data submission workflow', () => {
       jobs: [{ ...BASE_JOB, workflow: 'deqm_submit_data', submit_data_mode: 'base-fallback' }],
     });
     render(<Harness />);
-    const badge = await screen.findByTitle(/does not support DEQM STU5/i);
+    const badge = await screen.findByTitle(/does not support type-level \$submit-data/i);
     expect(badge).toHaveTextContent('DEQM');
     // The fallback explanation must survive without a mouse hover — a
     // screen reader needs an accessible name that carries the same
     // message as the title tooltip, not just the visible "DEQM ⚠" text.
-    expect(screen.getByLabelText(/does not support DEQM STU5/i)).toBe(badge);
+    expect(screen.getByLabelText(/does not support type-level \$submit-data/i)).toBe(badge);
   });
 
   // #414 AC3: the badge must track the mode the job ACTUALLY ran under, not the
@@ -115,11 +115,11 @@ describe('JobsPage — data submission workflow', () => {
       jobs: [{ ...BASE_JOB, workflow: 'deqm_submit_data', submit_data_mode: 'stu5' }],
     });
     render(<Harness />);
-    const badge = await screen.findByTitle('DEQM STU5 $deqm-submit-data');
+    const badge = await screen.findByTitle('DEQM $submit-data (type-level, bundle)');
     expect(badge).toHaveTextContent('DEQM');
     // The warning marker and the fallback wording belong to base-fallback only.
     expect(badge).not.toHaveTextContent('⚠');
-    expect(screen.queryByTitle(/does not support DEQM STU5/i)).not.toBeInTheDocument();
+    expect(screen.queryByTitle(/does not support type-level \$submit-data/i)).not.toBeInTheDocument();
   });
 
   test('the two modes render distinguishably in the same list', async () => {
@@ -134,8 +134,8 @@ describe('JobsPage — data submission workflow', () => {
     });
     render(<Harness />);
     await screen.findByText(/Ran as STU5/);
-    const clean = screen.getByTitle('DEQM STU5 $deqm-submit-data');
-    const fellBack = screen.getByTitle(/does not support DEQM STU5/i);
+    const clean = screen.getByTitle('DEQM $submit-data (type-level, bundle)');
+    const fellBack = screen.getByTitle(/does not support type-level \$submit-data/i);
     expect(clean).not.toBe(fellBack);
     expect(fellBack).toHaveTextContent('⚠');
     expect(clean).not.toHaveTextContent('⚠');
