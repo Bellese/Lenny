@@ -561,6 +561,101 @@ class TestDeqmSubmitDataWorkflow:
             submitted_types = [p["resource"]["resourceType"] for p in params["parameter"][1:]]
             assert "Organization" not in submitted_types
 
+    async def test_repeated_resource_appears_once_with_one_evaluated_reference(self):
+        """A gather that returns the same resource twice must not produce two
+        Bundle entries or two evaluatedResource references. The receiver treats
+        the Bundle as a transaction, and duplicate entries for one id are a
+        conflict rather than a harmless repeat."""
+        gather = GatherResult(
+            resources=[
+                {"resourceType": "Patient", "id": "p1"},
+                {"resourceType": "Condition", "id": "c1"},
+                {"resourceType": "Condition", "id": "c1"},
+            ]
+        )
+        wf = _deqm_workflow(mode="stu5")
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=gather)),
+            patch("app.services.workflows.submit_data", new=AsyncMock()) as submit,
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+        bundle = submit.call_args.kwargs["parameters"]["parameter"][0]["resource"]
+        entries = [e["resource"] for e in bundle["entry"]]
+        mr = entries[0]
+        identities = [f"{r['resourceType']}/{r['id']}" for r in entries[1:]]
+        assert identities == ["Patient/p1", "Condition/c1"]
+        refs = [e["reference"] for e in mr["evaluatedResource"]]
+        assert refs == ["Patient/p1", "Condition/c1"]
+
+    async def test_evaluated_references_resolve_to_bundle_entries(self):
+        """No dangling references: every evaluatedResource must name an entry
+        that is actually in the Bundle, and vice versa."""
+        gather = GatherResult(
+            resources=[
+                {"resourceType": "Patient", "id": "p1"},
+                {"resourceType": "Condition", "id": "c1"},
+                {"resourceType": "Encounter", "id": "e1"},
+            ]
+        )
+        wf = _deqm_workflow(mode="stu5")
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=gather)),
+            patch("app.services.workflows.submit_data", new=AsyncMock()) as submit,
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+        bundle = submit.call_args.kwargs["parameters"]["parameter"][0]["resource"]
+        entries = [e["resource"] for e in bundle["entry"]]
+        entry_ids = {f"{r['resourceType']}/{r['id']}" for r in entries[1:]}
+        refs = {e["reference"] for e in entries[0]["evaluatedResource"]}
+        assert refs == entry_ids
+
+    async def test_conflicting_duplicate_keeps_first_and_warns(self):
+        gather = GatherResult(
+            resources=[
+                {"resourceType": "Patient", "id": "p1", "gender": "female"},
+                {"resourceType": "Patient", "id": "p1", "gender": "male"},
+            ]
+        )
+        wf = _deqm_workflow(mode="stu5")
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=gather)),
+            patch("app.services.workflows.submit_data", new=AsyncMock()) as submit,
+            patch("app.services.workflows.logger.warning") as warn,
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+        bundle = submit.call_args.kwargs["parameters"]["parameter"][0]["resource"]
+        patients = [e["resource"] for e in bundle["entry"] if e["resource"]["resourceType"] == "Patient"]
+        assert patients == [{"resourceType": "Patient", "id": "p1", "gender": "female"}]
+        warn.assert_called_once()
+        assert "Patient/p1" in warn.call_args.kwargs["extra"]["identities"]
+
+    async def test_shared_resource_is_not_suppressed_across_subjects(self):
+        """Deduplication is per subject. A Practitioner gathered for two
+        patients belongs in BOTH their Bundles — each Bundle may be processed
+        on its own, so suppressing the second would leave a dangling
+        reference."""
+        shared = {"resourceType": "Practitioner", "id": "prac1"}
+        wf = _deqm_workflow(mode="stu5")
+        with (
+            patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(
+                    side_effect=[
+                        GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}, shared]),
+                        GatherResult(resources=[{"resourceType": "Patient", "id": "p2"}, shared]),
+                    ]
+                ),
+            ),
+            patch("app.services.workflows.submit_data", new=AsyncMock()) as submit,
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+            await wf.transfer_patient("http://cdr", "p2", {})
+        for call in submit.call_args_list:
+            bundle = call.kwargs["parameters"]["parameter"][0]["resource"]
+            types = [e["resource"]["resourceType"] for e in bundle["entry"]]
+            assert "Practitioner" in types
+
 
 class TestAcquisitionStrategy:
     """Direct, parametrized coverage of _acquisition_strategy (coverage-audit

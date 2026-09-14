@@ -18,6 +18,7 @@ from app.services.deqm import (
     build_base_parameters,
     build_data_exchange_measure_report,
     build_stu5_parameters,
+    dedupe_by_identity,
 )
 from app.services.fhir_client import (
     SUBMIT_DATA_MODE_BASE,
@@ -275,6 +276,23 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # MeasureReport and the payload disagree, and under HAPI's
         # transaction semantics one bad entry can 400 the whole patient.
         filtered_resources = [r for r in gather.resources if "resourceType" in r and "id" in r]
+        # Dedupe BEFORE the MeasureReport is built, so evaluatedResource and the
+        # Bundle entries stay 1:1 by construction rather than by a second rule
+        # maintained somewhere else. Within this subject only — see
+        # dedupe_by_identity on why a shared Practitioner must survive in every
+        # subject's Bundle.
+        filtered_resources, conflicts = dedupe_by_identity(filtered_resources)
+        if conflicts:
+            logger.warning(
+                "Conflicting representations of the same resource identity in gathered data "
+                "— keeping the first of each",
+                extra={
+                    "job_id": self._job_id,
+                    "patient_id": patient_id,
+                    "identities": conflicts[:10],
+                    "conflict_count": len(conflicts),
+                },
+            )
         measure_report = build_data_exchange_measure_report(
             job_id=self._job_id,
             patient_id=patient_id,
