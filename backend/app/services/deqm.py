@@ -12,6 +12,7 @@ IG:   https://hl7.org/fhir/us/davinci-deqm/STU5/
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 DEQM_DATA_EXCHANGE_PROFILE = "http://hl7.org/fhir/us/davinci-deqm/StructureDefinition/datax-measurereport-deqm"
@@ -135,8 +136,32 @@ def dedupe_by_identity(
     return [first_by_identity[identity] for identity in order], conflicts
 
 
-def build_stu5_parameters(measure_report: dict[str, Any], resources: list[dict[str, Any]]) -> dict[str, Any]:
-    """STU5 $deqm-submit-data envelope: one single-subject collection Bundle."""
+@dataclass(frozen=True)
+class SubjectBundle:
+    """One subject's submission payload: its MeasureReport and its resources.
+
+    `resources` must already be filtered and deduplicated — see
+    `dedupe_by_identity`. Pairing them in one object is what stops a caller
+    from accidentally deriving the MeasureReport from one list and the Bundle
+    entries from another.
+    """
+
+    measure_report: dict[str, Any]
+    resources: list[dict[str, Any]]
+
+
+def build_stu5_parameters(subjects: list[SubjectBundle]) -> dict[str, Any]:
+    """STU5 envelope: one `bundle` parameter per subject, 1..N.
+
+    Each parameter carries a collection Bundle for exactly one subject, its
+    MeasureReport first. Several subjects never share a Bundle: the receiver
+    processes each Bundle as a transaction, and merging subjects would make one
+    subject's bad resource fail the others.
+
+    With a single subject the output is byte-identical to the pre-#413 payload.
+    """
+    if not subjects:
+        raise ValueError("build_stu5_parameters requires at least one subject (`bundle` is 1..*)")
     return {
         "resourceType": "Parameters",
         "parameter": [
@@ -145,9 +170,10 @@ def build_stu5_parameters(measure_report: dict[str, Any], resources: list[dict[s
                 "resource": {
                     "resourceType": "Bundle",
                     "type": "collection",
-                    "entry": [{"resource": measure_report}] + [{"resource": r} for r in resources],
+                    "entry": [{"resource": subject.measure_report}] + [{"resource": r} for r in subject.resources],
                 },
             }
+            for subject in subjects
         ],
     }
 

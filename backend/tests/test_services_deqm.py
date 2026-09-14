@@ -2,10 +2,13 @@
 
 import re
 
+import pytest
+
 from app.services.deqm import (
     DEQM_DATA_EXCHANGE_PROFILE,
     DEQM_UPDATE_TYPE_EXT,
     LENNY_REPORTER_ORG,
+    SubjectBundle,
     build_base_parameters,
     build_data_exchange_measure_report,
     build_stu5_parameters,
@@ -152,7 +155,7 @@ class TestMeasureReportIdTruncation:
 class TestParameterEnvelopes:
     def test_stu5_parameters_single_bundle(self):
         mr = _mr()
-        params = build_stu5_parameters(mr, [LENNY_REPORTER_ORG, *_RESOURCES])
+        params = build_stu5_parameters([SubjectBundle(mr, [LENNY_REPORTER_ORG, *_RESOURCES])])
         assert params["resourceType"] == "Parameters"
         assert len(params["parameter"]) == 1
         p = params["parameter"][0]
@@ -163,6 +166,39 @@ class TestParameterEnvelopes:
         entry_types = [e["resource"]["resourceType"] for e in bundle["entry"]]
         # MeasureReport first, then reporter org + data-of-interest
         assert entry_types == ["MeasureReport", "Organization", "Patient", "Condition", "Encounter"]
+
+    def test_stu5_parameters_one_bundle_parameter_per_subject(self):
+        """1..N: each subject gets its own `bundle` parameter, never a shared
+        Bundle holding several subjects."""
+        mr_a = _mr()
+        mr_b = build_data_exchange_measure_report(
+            job_id=42,
+            patient_id="p2",
+            measure_canonical="http://example.org/Measure/CMS122|1.0.0",
+            period_start="2025-01-01",
+            period_end="2025-12-31",
+            resources=[{"resourceType": "Patient", "id": "p2"}],
+            timestamp="2026-08-21T12:00:00+00:00",
+        )
+        params = build_stu5_parameters(
+            [
+                SubjectBundle(mr_a, [{"resourceType": "Patient", "id": "p1"}]),
+                SubjectBundle(mr_b, [{"resourceType": "Patient", "id": "p2"}]),
+            ]
+        )
+        assert [p["name"] for p in params["parameter"]] == ["bundle", "bundle"]
+        subjects = [p["resource"]["entry"][0]["resource"]["subject"]["reference"] for p in params["parameter"]]
+        assert subjects == ["Patient/p1", "Patient/p2"]
+        for p in params["parameter"]:
+            assert p["resource"]["type"] == "collection"
+            mr_count = sum(1 for e in p["resource"]["entry"] if e["resource"]["resourceType"] == "MeasureReport")
+            assert mr_count == 1
+
+    def test_stu5_parameters_rejects_empty_subject_list(self):
+        """`bundle` is 1..* — a Parameters body with zero bundles is not a
+        submission, and sending one would be a silent no-op at the receiver."""
+        with pytest.raises(ValueError):
+            build_stu5_parameters([])
 
     def test_base_parameters_measurereport_plus_resources(self):
         mr = _mr()

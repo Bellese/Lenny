@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from app.config import settings
 from app.services.deqm import (
     LENNY_REPORTER_ORG,
+    SubjectBundle,
     build_base_parameters,
     build_data_exchange_measure_report,
     build_stu5_parameters,
@@ -300,7 +301,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # is deciding on another (#414).
         attempt_mode = self._mode
         if attempt_mode == SUBMIT_DATA_MODE_STU5:
-            parameters = build_stu5_parameters(measure_report, submitted)
+            parameters = build_stu5_parameters([SubjectBundle(measure_report, submitted)])
         else:
             parameters = build_base_parameters(measure_report, submitted)
 
@@ -319,7 +320,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             # and submit under whatever it decided.
             attempt_mode = self._mode
             parameters = (
-                build_stu5_parameters(measure_report, submitted)
+                build_stu5_parameters([SubjectBundle(measure_report, submitted)])
                 if attempt_mode == SUBMIT_DATA_MODE_STU5
                 else build_base_parameters(measure_report, submitted)
             )
@@ -345,7 +346,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         single point where the job's wire format is decided.
         """
         attempt_mode = self._mode
-        parameters = build_stu5_parameters(measure_report, submitted)
+        parameters = build_stu5_parameters([SubjectBundle(measure_report, submitted)])
         try:
             await submit_data(
                 mcs_url=self._mcs_url,
