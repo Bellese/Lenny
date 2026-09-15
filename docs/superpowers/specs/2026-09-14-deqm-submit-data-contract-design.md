@@ -106,9 +106,12 @@ and never appears as "batch size" in code, config, API, or UI.
 
 ### Capability detection
 
-`detect_submit_data_mode` keeps its signature, its `stu5` / `base-fallback`
-return values, and its hard guarantee that it never raises and never blocks job
-creation. The algorithm inside becomes two steps.
+The probe keeps its `stu5` / `base-fallback` verdicts and its hard guarantee that
+it never raises and never blocks job creation. The algorithm inside becomes two
+steps. (In PR 1 it is `detect_submit_data_mode`, returning the verdict as a bare
+string; PR 3 renames it to `detect_submit_data_capability` and widens the return
+to carry the declared `bundle` max as well — see § The bundles-per-submission
+control. The verdict and the guarantee are identical in both.)
 
 **Step 1 — candidates.** `GET {mcs_url}/metadata`. Collect operations from
 `rest[].operation[]` and from `rest[].resource[type=Measure].operation[]`; keep
@@ -404,10 +407,21 @@ base-fallback has no multi-bundle form.
 
 ### The bundles-per-submission control
 
+**Where the probe learns the ceiling.** The clamp below needs the server's
+declared `bundle` maximum, and after PR 1 nothing retains it:
+`detect_submit_data_mode` returns a bare mode string. PR 3 renames it to
+`detect_submit_data_capability`, returning a frozen
+`SubmitDataCapability(mode: str, bundle_max: int | None)`. The max is read off
+the same `bundle` input parameter the contract match already found: `"*"`
+becomes `None`, a digit string becomes an `int`, and anything else becomes
+`None`. An unparseable max resolves permissive because it is not evidence of a
+limit — the mode verdict is unaffected either way, so a malformed bound can
+never cost a job its STU5 path.
+
 **Effective value.** Resolved at job creation and clamped:
 
 ```
-effective = min(requested or CHUNK, server_bundle_max or ∞, CHUNK)
+effective = min(requested or CHUNK, server_bundle_max or INF, CHUNK)
 ```
 
 where `CHUNK` is `settings.BATCH_SIZE` and `requested == 0` means "no limit
@@ -416,25 +430,70 @@ beyond the chunk". A server advertising `bundle` `max: "1"` clamps any request t
 useful experiment. The clamp is recorded in the log line, so a silently reduced
 group size is explainable.
 
-**Persistence.** The remembered value is an `AppSetting` row — the key-value table
-already used this way for `groups_enabled` — under `deqm_bundles_per_submission`.
-There is no auth in Lenny, so the preference is app-global, consistent with how
-every other setting behaves. Job creation writes whatever the operator chose,
-1 included, so returning to single-bundle submissions sticks.
+**Job record, and why there is no settings row.** Two nullable integer columns on
+`jobs`, both NULL for `direct_load`:
 
-**Job record.** `jobs.bundles_per_submission` (nullable integer, NULL for
-non-DEQM jobs) snapshots the effective value, the way `submit_data_mode` already
-snapshots the probe verdict. A job then reports what it actually did rather than
-what the setting says today. The column is added with the established lightweight
-pattern at `main.py:242` (`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
+- `bundles_per_submission_requested` — what the operator asked for, verbatim,
+  `0` included.
+- `bundles_per_submission` — the effective value after clamping, the way
+  `submit_data_mode` already snapshots the probe verdict.
+
+Both are added with the established lightweight pattern at `main.py:242`
+(`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`).
+
+Storing both is what lets the preference survive a clamp. The remembered value is
+the **requested** column, so one job run against a `max: "1"` server does not
+permanently rewrite the operator's choice to 1; switching back to a capable MCS
+restores their intent. Reading the *effective* column instead would silently
+ratchet the preference down and never let it back up.
+
+An earlier draft of this spec persisted the preference as an `AppSetting` row
+under `deqm_bundles_per_submission`. That is no longer the design. The job row
+already records the value per job, `GET /jobs` already returns every job
+newest-first and unpaginated, and the creation form already holds that list — so
+the default is derived client-side from the most recent DEQM job, with no
+settings row, no new endpoint, and no second fetch. A settings row would have
+been a second source of truth for a fact the job table already carries.
+
+**A downgrade rewrites the stored value.** A job that downgrades to
+`base-fallback` mid-run submits one subject per call regardless of what was
+requested, so leaving `bundles_per_submission` at the pre-downgrade number would
+make the record claim something that never happened. The orchestrator already
+persists a runtime downgrade to `Job.submit_data_mode`; it writes the group size
+back to 1 in the same place.
 
 **API.** `POST /jobs` accepts `bundles_per_submission: int | None` (>= 0);
-the job response returns the effective value.
+a negative or non-integer value is rejected with 422. The job response returns
+both the requested and the effective value.
 
 **UI.** A numeric input on the DEQM branch of the job-creation form, defaulted
-from the setting, with helper text stating that 0 means every subject in a
-processing batch and that the ceiling is `BATCH_SIZE`. Not shown for
-`direct_load`, which has no such concept.
+from the most recent DEQM job's requested value — or 1 when no DEQM job exists.
+Not shown for `direct_load`, which has no such concept.
+
+The helper text states the ceiling as a **rule rather than a number**: `0`
+submits every subject in a processing batch, and larger values are reduced to the
+batch size. `BATCH_SIZE` is a backend environment value the frontend has never
+been given, and exposing it is the endpoint this design just removed. Naming the
+rule also stays correct if `BATCH_SIZE` is ever retuned, which a hardcoded `100`
+would not. The operator still learns the exact number when it matters: the
+creation response carries the effective value, so a clamp that actually bites is
+reported as a toast naming it.
+
+**The pioneer's lock hold (PR 2 finding M6).** `submit_prepared` currently holds
+`_mode_lock` across the whole of `_settle_mode_and_submit`, and that method's
+downgrade and isolation paths each issue N *sequential* POSTs. At group size 1
+that is one or two round trips and harmless, which is why PR 2 deferred it. This
+PR is what makes larger sizes selectable, so it is also what makes the stall
+reachable: a pioneer group of 100 would hold the barrier across up to 101 round
+trips while the other three concurrent chunks block on it.
+
+`_settle_mode_and_submit` therefore splits in two. `_settle_mode` runs under the
+lock, issues the single pioneer POST, writes `_mode` and `_downgraded`, and
+returns a decision — succeeded, downgrade-and-resend, isolate, or fail-all. The
+follow-up re-sends move outside the `async with`. `_mode_settled.set()` stays in
+the `finally`. Waiters still observe a fully settled mode, because the decision is
+committed before the event is set and before the lock is released, so #414's
+guarantee is unchanged: a job can still never be half STU5 and half base.
 
 ### Documentation and decision record
 
@@ -512,10 +571,23 @@ asserts that the downgrade-*rebuilt* base payload preserves it. Both land in thi
 PR, which rewrites the downgrade path anyway.
 
 **Clamping.** A request above the chunk size clamps to it; a request against a
-`max: "1"` server clamps to 1 and warns; `0` resolves to the chunk size.
+`max: "1"` server clamps to 1 and warns; `0` resolves to the chunk size. The
+capability probe's max parsing gets its own cases: `"*"`, a digit string, a
+missing `max`, and an unparseable one, the last three of which must not disturb
+the mode verdict.
 
-**Persistence.** Creating a job with a value writes it to `AppSetting`; the next
-job creation defaults to it; choosing 1 persists 1.
+**Persistence.** Creating a job stores the request and the effective value in
+their own columns; the creation form then defaults to the most recent DEQM job's
+*requested* value, so a job clamped from 50 to 1 still offers 50 next time, and
+choosing 1 offers 1. With no DEQM job at all the form offers 1. A `direct_load`
+job leaves both columns NULL and never contributes a default.
+
+**The narrowed pioneer lock.** A pioneer group that downgrades or isolates must
+release `_mode_lock` before its re-sends — the test holds a second group at the
+barrier and asserts it is admitted after the pioneer's *first* POST rather than
+its last. Paired with it, the #414 regression that no job mixes modes must stay
+green: the decision is committed before the event is set, and that ordering is
+what the narrowing must not break.
 
 **Regressions that this change could plausibly break**, and must stay green
 untouched: #414's single-mode settlement barrier and #415's
@@ -627,18 +699,18 @@ those are all PR 3.
 
 ### PR 3 — The user-facing control
 
-`AppSetting` persistence, the `jobs` column and migration, the API field,
-clamping, and the UI.
+The probe's capability return, the two `jobs` columns and their migration, the
+API field, clamping, the M6 lock narrowing, and the UI.
 
 - [ ] The job-creation form shows a **Bundles per submission** numeric input on
       the DEQM workflow branch only; `direct_load` does not show it.
-- [ ] The input defaults to the remembered value, or **1** when nothing is
-      remembered.
-- [ ] Creating a job writes the chosen value to `AppSetting`
-      (`deqm_bundles_per_submission`), **including 1**, so the next job defaults
-      to it and returning to single-bundle submissions persists.
-- [ ] Helper text states that `0` means every subject in a processing batch, and
-      names the ceiling.
+- [ ] The input defaults to the most recent DEQM job's requested value, or **1**
+      when no DEQM job exists.
+- [ ] The remembered value is the one the operator *requested*, not the clamped
+      result: after a job whose 50 was clamped to 1, the form still offers 50.
+- [ ] Helper text states that `0` means every subject in a processing batch and
+      that larger values are reduced to the batch size. It does not hardcode the
+      batch size itself.
 - [ ] `POST /jobs` accepts `bundles_per_submission` as a non-negative integer;
       a negative or non-integer value is rejected with 422.
 - [ ] `0` is accepted and resolves to the processing-chunk size
@@ -646,16 +718,25 @@ clamping, and the UI.
 - [ ] The effective value is
       `min(requested or CHUNK, server bundle max, CHUNK)`, and any clamp that
       reduces the request is logged with its reason.
+- [ ] `detect_submit_data_capability` returns the declared `bundle` max alongside
+      the mode: `"*"` and any unparseable value resolve to unbounded, a digit
+      string to that integer.
 - [ ] A server advertising `bundle` `max: "1"` clamps the group to 1 and still
       classifies `stu5`.
-- [ ] `jobs.bundles_per_submission` stores the effective value for DEQM jobs and
-      `NULL` for `direct_load`; the column is added idempotently via the
-      `main.py:242` pattern.
-- [ ] The job API response returns the value the job actually used, not the
-      value the setting currently holds — a later setting change does not rewrite
-      an existing job's record.
+- [ ] `jobs.bundles_per_submission` stores the effective value and
+      `jobs.bundles_per_submission_requested` the raw request, both `NULL` for
+      `direct_load`; the columns are added idempotently via the `main.py:242`
+      pattern.
+- [ ] The job API response returns the value the job actually used. A later job
+      created with a different value does not rewrite an existing job's record.
 - [ ] A job that downgrades to `base-fallback` submits one subject per call
-      regardless of the stored value.
+      regardless of the stored value, and its stored effective value is rewritten
+      to 1 where the runtime downgrade is already persisted.
+- [ ] The pioneer releases `_mode_lock` before its follow-up re-sends: a
+      downgrading or isolating pioneer group of N holds the barrier for one POST,
+      not N.
+- [ ] #414's guarantee still holds under the narrowed lock — no job submits some
+      subjects as STU5 and others as base.
 - [ ] The control is absent from, and has no effect on, `direct_load` jobs.
 
 ## Rejected alternatives
@@ -702,6 +783,33 @@ the chunk. Rejected: it would require a DEQM-specific path around the `Batch` ro
 model, per-chunk progress, and retry, and would build one JSON body holding every
 patient's data of interest — an untested memory profile on a pipeline with prior
 OOM history at 319 patients.
+
+**An `AppSetting` row for the remembered bundles-per-submission.** The key-value
+table already holds `groups_enabled`, so a `deqm_bundles_per_submission` row was
+the obvious home, and this spec originally specified it. Rejected: the job row
+must record the value anyway, `GET /jobs` already returns every job newest-first,
+and the creation form already holds that list — so the settings row would be a
+second source of truth for a fact the job table carries, plus an endpoint to read
+it back. Deriving the default from the most recent DEQM job costs no new API
+surface and cannot drift from what the jobs actually did.
+
+**Remembering the clamped value rather than the request.** One column instead of
+two. Rejected: a single job against a `max: "1"` server would rewrite the
+operator's preference to 1 permanently, and nothing would ever raise it back —
+the preference would ratchet down across MCS connections that have nothing to do
+with each other.
+
+**Naming `BATCH_SIZE` in the helper text.** What the acceptance criteria
+originally asked for. Rejected: the frontend has never been given that value, and
+exposing it means the endpoint this design removed. A hardcoded `100` would also
+go quietly wrong the first time `BATCH_SIZE` is retuned. The text states the rule;
+the creation response names the number when a clamp actually bites.
+
+**Capping the pioneer group at one subject.** An alternative M6 fix: make the
+first group always size 1 so the barrier is inherently short. Rejected: it costs
+an extra POST on every job and leaves the first group behaving differently from
+every other, which is a wrinkle each future reader has to learn. Narrowing the
+lock removes the stall without introducing a special case.
 
 **A shared buffer on the workflow instance.** Simpler to write. Rejected: one
 instance serves all four concurrent chunks, so it would interleave subjects
