@@ -112,6 +112,8 @@ class JobResponse(BaseModel):
     error_message: Optional[str]
     workflow: str = "direct_load"
     submit_data_mode: Optional[str] = None
+    bundles_per_submission: Optional[int] = None
+    bundles_per_submission_requested: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
@@ -163,6 +165,8 @@ def _job_to_response(job: Job) -> dict:
         "error_message": job.error_message,
         "workflow": job.workflow,
         "submit_data_mode": job.submit_data_mode,
+        "bundles_per_submission": job.bundles_per_submission,
+        "bundles_per_submission_requested": job.bundles_per_submission_requested,
     }
 
 

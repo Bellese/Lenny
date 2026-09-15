@@ -95,6 +95,16 @@ class Job(Base):
     # call ever happens. base-fallback renders as a warning that the MCS does
     # not support type-level $submit-data with bundles.
     submit_data_mode: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    # Issue #413 PR 3. Two columns, not one, because the remembered preference
+    # must survive a clamp: `_requested` is what the operator asked for and is
+    # what the creation form reads back, while `bundles_per_submission` is the
+    # clamped value the job actually ran under. Storing only the clamped value
+    # would let one job against a `bundle max: "1"` server ratchet the operator's
+    # preference down to 1 permanently, with nothing to ever raise it back.
+    #
+    # Both NULL for direct_load, which has no submission-grouping concept.
+    bundles_per_submission: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    bundles_per_submission_requested: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     batches: Mapped[list["Batch"]] = relationship(
         "Batch", back_populates="job", cascade="all, delete-orphan", lazy="selectin"

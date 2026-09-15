@@ -10,6 +10,16 @@ from app.services.fhir_client import SubmitDataCapability
 pytestmark = pytest.mark.asyncio
 
 
+def _valid_job_body() -> dict:
+    return {
+        "measure_id": "measure-1",
+        "measure_name": "Test Measure",
+        "period_start": "2024-01-01",
+        "period_end": "2024-12-31",
+        "cdr_url": "https://example.com/fhir",
+    }
+
+
 @pytest.fixture(autouse=True)
 def measure_present():
     """POST /jobs pre-flights the measure against the active MCS (issue #396).
@@ -47,6 +57,16 @@ async def test_create_job_valid(client):
     assert data["id"] is not None
     assert "cdr_name" in data
     assert "cdr_read_only" in data
+
+
+async def test_job_response_carries_both_bundle_columns_as_null_by_default(client):
+    """A direct_load job contributes no bundles-per-submission value at all:
+    both columns are NULL, and the response says so rather than inventing a 1."""
+    resp = await client.post("/jobs", json=_valid_job_body())
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["bundles_per_submission"] is None
+    assert body["bundles_per_submission_requested"] is None
 
 
 async def test_create_job_ssrf_cdr_url_blocked(client):
