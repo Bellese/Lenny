@@ -31,7 +31,13 @@ from app.services.fhir_client import (
 )
 from app.services.fhir_errors import redact_outcome, sanitize_url
 from app.services.validation import sanitize_error
-from app.services.workflows import SubmissionWorkflow, TransferPhaseError, build_submission_workflow
+from app.services.workflows import (
+    PreparedSubject,
+    SubjectOutcome,
+    SubmissionWorkflow,
+    TransferPhaseError,
+    build_submission_workflow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -662,19 +668,72 @@ async def _process_single_batch(
             # Partial-gather: some resource types failed but data was pushed.
             # Mapped to error_details dict for annotation after evaluate succeeds.
             partial_gather_patients: dict[str, dict] = {}
-            for patient_id in patient_ids:
+            # Subjects are walked in groups of workflow.submission_group_size.
+            # The buffer is a LOCAL: one workflow instance serves every
+            # concurrent chunk of the job, so buffering on the instance would
+            # interleave subjects from different chunks and misattribute their
+            # failures.
+            index = 0
+            while index < len(patient_ids):
+                # Read fresh, never snapshotted: a runtime downgrade in this or
+                # another chunk returns the job to one subject per POST, and a
+                # size captured before the loop would keep sending groups of N
+                # in a mode that has no multi-bundle form.
+                group_size = max(1, workflow.submission_group_size)
+                group = patient_ids[index : index + group_size]
+                index += len(group)
+
+                prepared: list[PreparedSubject] = []
+                for patient_id in group:
+                    if await _stop_or_delete_job(job_id):
+                        return
+                    try:
+                        prepared.append(await workflow.prepare_patient(cdr_url, patient_id, auth_headers))
+                    except Exception as prepare_exc:
+                        gather_failed_patients.add(patient_id)
+                        if not await _record_transfer_failure(
+                            job_id=job_id,
+                            batch_id=batch_id,
+                            patient_id=patient_id,
+                            patient_map=patient_map,
+                            exc=prepare_exc,
+                        ):
+                            return
+                        failed += 1
+
+                if not prepared:
+                    continue
                 if await _stop_or_delete_job(job_id):
+                    # The buffer is DISCARDED, not flushed. A stop must not land
+                    # data on the MCS after the operator asked the job to stop;
+                    # these subjects simply never happened, exactly as the rest
+                    # of the chunk never happens.
                     return
 
-                try:
-                    gather_result = await workflow.transfer_patient(cdr_url, patient_id, auth_headers)
-                    logger.info(
-                        # The gathered count, not the submitted one: transfer_patient
-                        # filters and deduplicates before building the payload.
-                        f"Gathered {len(gather_result.resources)} resources for {patient_id[:8]}",
-                        extra={"job_id": job_id, "patient_id": patient_id},
-                    )
+                outcomes: list[SubjectOutcome] = await workflow.submit_prepared(prepared)
+                for outcome in outcomes:
+                    if outcome.error is not None:
+                        gather_failed_patients.add(outcome.patient_id)
+                        if not await _record_transfer_failure(
+                            job_id=job_id,
+                            batch_id=batch_id,
+                            patient_id=outcome.patient_id,
+                            patient_map=patient_map,
+                            exc=outcome.error,
+                        ):
+                            return
+                        failed += 1
+                        continue
 
+                    gather_result = outcome.gather
+                    if gather_result is None:
+                        continue
+                    logger.info(
+                        # The gathered count, not the submitted one: the workflow
+                        # filters and deduplicates before building the payload.
+                        f"Gathered {len(gather_result.resources)} resources for {outcome.patient_id[:8]}",
+                        extra={"job_id": job_id, "patient_id": outcome.patient_id},
+                    )
                     if gather_result.has_partial_failure:
                         # Partial gather — continue to evaluate with available data (AT-2).
                         # Record which types failed so we can annotate the result after evaluate.
@@ -682,7 +741,7 @@ async def _process_single_batch(
                         succeeded_type_names = sorted(
                             {r.get("resourceType") for r in gather_result.resources if r.get("resourceType")}
                         )
-                        partial_gather_patients[patient_id] = {
+                        partial_gather_patients[outcome.patient_id] = {
                             "operation": "gather",
                             "failed_types": failed_type_names,
                             "succeeded_types": succeeded_type_names,
@@ -691,22 +750,10 @@ async def _process_single_batch(
                             "Partial CDR gather — continuing evaluation with available data",
                             extra={
                                 "job_id": job_id,
-                                "patient_id": patient_id,
+                                "patient_id": outcome.patient_id,
                                 "failed_types": failed_type_names,
                             },
                         )
-
-                except Exception as transfer_exc:
-                    gather_failed_patients.add(patient_id)
-                    if not await _record_transfer_failure(
-                        job_id=job_id,
-                        batch_id=batch_id,
-                        patient_id=patient_id,
-                        patient_map=patient_map,
-                        exc=transfer_exc,
-                    ):
-                        return
-                    failed += 1
 
             if await _stop_or_delete_job(job_id):
                 return

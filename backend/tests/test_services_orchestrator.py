@@ -20,7 +20,12 @@ from app.services.orchestrator import (
     _get_mcs_auth_headers,
     run_job,
 )
-from app.services.workflows import SubmissionWorkflow, TransferPhaseError
+from app.services.workflows import (
+    PreparedSubject,
+    SubjectOutcome,
+    SubmissionWorkflow,
+    TransferPhaseError,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -1911,3 +1916,243 @@ async def test_run_job_stages_prerequisites_after_the_wipe(test_session, session
         f"expected the wipe to precede prerequisite staging, got {calls}. "
         "Staging before the wipe means the full wipe deletes the DEQM reporter Organization."
     )
+
+
+class _RecordingGroupWorkflow(SubmissionWorkflow):
+    """A workflow that records the exact group shapes it was handed."""
+
+    name = "recording"
+
+    def __init__(self, group_size: int = 1, fail: set[str] | None = None):
+        self._group_size = group_size
+        self._fail = fail or set()
+        self.groups: list[list[str]] = []
+        self.prepared: list[str] = []
+
+    async def transfer_patient(self, cdr_url, patient_id, cdr_auth_headers):
+        # SubmissionWorkflow marks this abstract, so the stub must define it.
+        # Asserting rather than merely satisfying the ABC turns a silent
+        # fallback to the per-patient path into a loud failure.
+        raise AssertionError("the group path must not fall back to transfer_patient")
+
+    @property
+    def submission_group_size(self) -> int:
+        return self._group_size
+
+    async def prepare_patient(self, cdr_url, patient_id, cdr_auth_headers):
+        self.prepared.append(patient_id)
+        return PreparedSubject(
+            patient_id=patient_id,
+            gather=GatherResult(resources=[{"resourceType": "Patient", "id": patient_id}]),
+        )
+
+    async def submit_prepared(self, subjects):
+        self.groups.append([s.patient_id for s in subjects])
+        return [
+            SubjectOutcome(
+                patient_id=s.patient_id,
+                gather=s.gather,
+                error=(TransferPhaseError("submit", RuntimeError("bad")) if s.patient_id in self._fail else None),
+            )
+            for s in subjects
+        ]
+
+
+async def test_phase_one_walks_the_chunk_in_groups(test_session, session_factory):
+    """The orchestrator must hand submit_prepared groups of
+    submission_group_size, not one subject at a time."""
+    from app.models.job import Batch, BatchStatus
+    from app.services.orchestrator import _process_single_batch
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+        workflow="deqm_submit_data",
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+    patients = ["p1", "p2", "p3", "p4", "p5"]
+    batch = Batch(job_id=job.id, batch_number=1, patient_ids=patients, status=BatchStatus.pending)
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    workflow = _RecordingGroupWorkflow(group_size=2)
+    with (
+        _make_session_factory_patch(session_factory),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={"resourceType": "MeasureReport", "status": "complete", "group": []},
+        ),
+    ):
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map={p: {"resourceType": "Patient", "id": p} for p in patients},
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+            mcs_url="http://mcs/fhir",
+            workflow=workflow,
+        )
+
+    assert workflow.groups == [["p1", "p2"], ["p3", "p4"], ["p5"]], "the trailing partial group must still be submitted"
+    assert workflow.prepared == patients
+
+
+async def test_a_stop_mid_group_discards_the_buffer(test_session, session_factory):
+    """Buffered subjects are dropped, never flushed. Flushing would land data
+    on the MCS after the operator told the job to stop."""
+    from app.models.job import Batch, BatchStatus
+    from app.services.orchestrator import _process_single_batch
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+        workflow="deqm_submit_data",
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+    batch = Batch(job_id=job.id, batch_number=1, patient_ids=["p1", "p2", "p3"], status=BatchStatus.pending)
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    workflow = _RecordingGroupWorkflow(group_size=3)
+    # _process_single_batch checks once at the top of the retry loop, once per
+    # subject before gathering it (3), and once more after the buffer is full
+    # and before the group's POST. Letting the first four through and stopping
+    # on the fifth lands the stop exactly at that pre-POST gate, with all three
+    # subjects gathered and buffered.
+    calls = {"n": 0}
+
+    async def stop_after_two(_job_id):
+        calls["n"] += 1
+        return calls["n"] > 4
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch("app.services.orchestrator._stop_or_delete_job", new=AsyncMock(side_effect=stop_after_two)),
+    ):
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map={p: {"resourceType": "Patient", "id": p} for p in ["p1", "p2", "p3"]},
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+            mcs_url="http://mcs/fhir",
+            workflow=workflow,
+        )
+
+    assert workflow.prepared == ["p1", "p2", "p3"], "all three were gathered"
+    assert workflow.groups == [], "a stop must not flush the buffered subjects"
+
+
+async def test_group_size_is_read_per_group_not_snapshotted(test_session, session_factory):
+    """A downgrade mid-chunk must shrink the REMAINING groups to 1. Reading
+    submission_group_size once before the loop would keep submitting groups of
+    N in a mode that has no multi-bundle form."""
+    from app.models.job import Batch, BatchStatus
+    from app.services.orchestrator import _process_single_batch
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+        workflow="deqm_submit_data",
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+    patients = ["p1", "p2", "p3", "p4"]
+    batch = Batch(job_id=job.id, batch_number=1, patient_ids=patients, status=BatchStatus.pending)
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    class _ShrinkingWorkflow(_RecordingGroupWorkflow):
+        async def submit_prepared(self, subjects):
+            self._group_size = 1  # as a downgrade would
+            return await super().submit_prepared(subjects)
+
+    workflow = _ShrinkingWorkflow(group_size=2)
+    with (
+        _make_session_factory_patch(session_factory),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={"resourceType": "MeasureReport", "status": "complete", "group": []},
+        ),
+    ):
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map={p: {"resourceType": "Patient", "id": p} for p in patients},
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+            mcs_url="http://mcs/fhir",
+            workflow=workflow,
+        )
+
+    assert workflow.groups == [["p1", "p2"], ["p3"], ["p4"]]
+
+
+async def test_a_failed_outcome_is_persisted_and_skips_evaluate(test_session, session_factory):
+    """Per-patient accounting is unchanged: a subject whose submit failed gets
+    its error row and is excluded from Phase 2, while its group-mates proceed."""
+    from app.models.job import Batch, BatchStatus
+    from app.services.orchestrator import _process_single_batch
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+        workflow="deqm_submit_data",
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+    patients = ["p1", "p2", "p3"]
+    batch = Batch(job_id=job.id, batch_number=1, patient_ids=patients, status=BatchStatus.pending)
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    workflow = _RecordingGroupWorkflow(group_size=3, fail={"p2"})
+    with (
+        _make_session_factory_patch(session_factory),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={"resourceType": "MeasureReport", "status": "complete", "group": []},
+        ) as mock_eval,
+    ):
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map={p: {"resourceType": "Patient", "id": p} for p in patients},
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+            mcs_url="http://mcs/fhir",
+            workflow=workflow,
+        )
+
+    evaluated = [c.kwargs.get("patient_id") or c.args[1] for c in mock_eval.await_args_list]
+    # Phase 2 stays per-patient: one $evaluate-measure per surviving subject,
+    # never one per group.
+    assert evaluated == ["p1", "p3"]
+    rows = (await test_session.execute(select(MeasureResult).where(MeasureResult.job_id == job.id))).scalars().all()
+    failed_rows = [r for r in rows if r.error_phase == "submit"]
+    assert [r.patient_id for r in failed_rows] == ["p2"]
