@@ -1107,6 +1107,34 @@ class TestDeqmGrouping:
         params = submit.call_args.kwargs["parameters"]
         assert [p["name"] for p in params["parameter"]] == ["bundle"]
 
+    async def test_submit_group_itself_handles_a_single_subject(self):
+        """`submit_prepared`'s len(subjects) == 1 guard routes every real
+        settled single-subject call to _submit_individually, so _submit_group
+        is currently unreachable through the normal path at group size 1 (no
+        production config sets group_size > 1 today). That guard is
+        transitional — a later task removes it — so this test calls
+        _submit_group directly, bypassing submit_prepared's routing entirely,
+        to keep guarding its single-subject envelope while it would otherwise
+        go untested: without this, _submit_group's own size-1 handling could
+        silently break, or the method could be deleted outright, and
+        test_a_group_of_one_is_byte_identical_to_the_ungrouped_payload would
+        not notice, because it never reaches _submit_group at all.
+        """
+        wf = _deqm_workflow(mode="stu5")
+        subjects = await self._prepare(wf, ["p1"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            outcomes = await wf._submit_group(subjects)
+        submit.assert_awaited_once()
+        assert submit.call_args.kwargs["mode"] == "stu5"
+        params = submit.call_args.kwargs["parameters"]
+        assert [p["name"] for p in params["parameter"]] == ["bundle"]
+        bundle = params["parameter"][0]["resource"]
+        mr = bundle["entry"][0]["resource"]
+        assert mr["resourceType"] == "MeasureReport"
+        assert mr["subject"] == {"reference": "Patient/p1"}
+        assert [o.patient_id for o in outcomes] == ["p1"]
+        assert outcomes[0].error is None
+
     async def test_a_group_submitted_after_a_downgrade_goes_out_individually(self):
         """A chunk can form a group of N and then have another chunk's pioneer
         downgrade before it submits. Building a multi-bundle envelope for a
