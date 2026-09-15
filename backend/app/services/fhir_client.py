@@ -1108,8 +1108,20 @@ def _operation_definition_matches_contract(operation_definition: dict[str, Any])
       - a `bundle` INPUT parameter is what separates this contract from a
         base-only server offering `measureReport` + `resource`.
 
-    `instance: true` alongside `type: true` is fine — HAPI 8.10.1 declares
-    both, and supporting the instance level does not remove the type level.
+    `instance: true` alongside `type: true` is fine — supporting the instance
+    level does not remove the type level.
+
+    WHICH SERVERS ACTUALLY MATCH (measured 2026-09-15, #448): exactly one known
+    server, and it is a customization. `$submit-data` is implemented by the
+    `clinical-reasoning` dependency, not by HAPI core, and across every released
+    version of that project (v3.27.0-v4.12.0) plus `main`, its R4
+    SubmitDataProvider declares `@IdParam` (instance-only) with `measureReport`
+    + `resource` and NO `bundle` parameter. Stock `hapiproject/hapi` images
+    v8.10.0-3 and v8.12.0-1 both pin clinical-reasoning 4.9.0 and both answer a
+    type-level POST with 400 not-supported. So no bundled/stock server can reach
+    the `stu5` branch below; the CMS connectathon MCS can because it serves a
+    customized provider. Do NOT read this matcher as targeting a standards-
+    conforming class of servers -- it targets a shape, and one server has it.
     """
     if operation_definition.get("code") != "submit-data":
         return False

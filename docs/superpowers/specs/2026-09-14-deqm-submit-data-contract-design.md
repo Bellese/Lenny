@@ -31,10 +31,42 @@ the current draft, and must not be described as either. The 1..\* cardinality
 does match published STU5's `bundle` element, which was also 1..\*.
 
 There is a third shape in the wild that this design has to tell apart from the
-first two. HAPI 8.10.1 advertises, on its *base* `$submit-data`
+first two. The CMS connectathon MCS (`https://fhir-connectathon.test.cms.gov/fhir`,
+`software.version: 8.10.1`) advertises, on its *base* `$submit-data`
 (`Measure-it-submit-data`): `code: submit-data`, `type: true`, `instance: true`,
 parameters `measureReport` 1..1 + `resource` 0..* + **`bundle` 1..\***. On every
 axis the selected contract names, that server supports it.
+
+> **CORRECTED 2026-09-15 (#448).** This paragraph originally attributed the shape
+> to "HAPI 8.10.1", which reads as a property of a HAPI release. It is not. See
+> *Which servers implement this* below before relying on it.
+
+### Which servers implement this
+
+Measured 2026-09-15. **Exactly one known server implements the selected contract,
+and it is a customization** -- not a HAPI version, not a `clinical-reasoning`
+version, not a published image.
+
+- `$submit-data` is implemented by the `clinical-reasoning` dependency
+  (`cqframework/clinical-reasoning`), not by HAPI core. Its version moves
+  independently of HAPI's.
+- Stock images `hapiproject/hapi:v8.10.0-3` and `:v8.12.0-1` pin **the same**
+  `clinical-reasoning 4.9.0`, and both answer a type-level POST with
+  `400 not-supported`, advertising `Measure-i-submit-data` (instance-only, no
+  `bundle`).
+- Across **every released `clinical-reasoning` version (v3.27.0-v4.12.0) plus
+  `main`**, the R4 `SubmitDataProvider` declares `@IdParam` -- instance-only --
+  with `measureReport` 1..1 + `resource`, and **no `bundle` parameter**.
+  `CR_OPERATION_SUBMIT_DATA` is referenced in exactly one file in that repo.
+- HAPI **library** v8.10.1 does exist (released 2026-07-22) but was never
+  packaged as an image; the starter went `image/v8.10.0-3` (2026-07-15) then
+  straight to `image/v8.12.0-1`. The library version is not the thing that
+  carries this capability regardless.
+
+Consequence: `stu5` mode targets a *shape*, and today exactly one server has it.
+Detection remains correct -- it is structural, and any server offering the shape
+is legitimately matched -- but do not read `stu5` as "standards-conforming
+server". It currently means the CMS connectathon MCS.
 
 Meanwhile detection cannot see any of this. `CapabilityStatement.rest.resource.
 operation` carries only `name` and a `definition` canonical — it expresses
@@ -75,8 +107,16 @@ load-bearing; *Rejected alternatives* records what was given up.
    Support for the historical endpoint is dropped, not renamed.
 2. **Detection is purely structural.** A type-level `submit-data` accepting a
    `bundle` input classifies `stu5` whether or not the server mentions DEQM.
-   Capability is the contract. A plain HAPI 8.10.x therefore classifies `stu5`,
-   which is correct — the contract does work there.
+   Capability is the contract.
+
+   > **CORRECTED 2026-09-15 (#448).** This decision originally continued: *"A
+   > plain HAPI 8.10.x therefore classifies `stu5`, which is correct — the
+   > contract does work there."* **That is false.** Stock HAPI classifies
+   > `base-fallback` at 8.10.x *and* 8.12.x, because no released
+   > `clinical-reasoning` version offers a type-level `bundle` parameter. The
+   > decision itself — structural detection — stands unchanged and was
+   > validated against a real server; only its worked example was wrong. See
+   > *Which servers implement this* above.
 3. **The payload carries 1..N bundles**, each single-subject, each with that
    subject's MeasureReport and data of interest.
 4. **Bundles-per-submission is chosen by the operator at job creation.**
@@ -628,9 +668,21 @@ records `base-fallback` against it, and that assertion stays true and correct.
 The STU5 end-to-end test added here is fixture-backed via mock transport, and
 multi-bundle grouping is therefore also only fixture-verified.
 
-Per decision 2, a bump to HAPI 8.10.x would be the first thing to genuinely
-exercise the path, since that version advertises the contract structurally. That
-is a follow-up issue.
+> **CORRECTED 2026-09-15 (#448).** This section originally continued: *"Per
+> decision 2, a bump to HAPI 8.10.x would be the first thing to genuinely
+> exercise the path, since that version advertises the contract structurally."*
+> **A bump cannot exercise the path.** No published image implements the
+> type-level operation at any version — see *Which servers implement this*. #448
+> was filed on that false premise and has been rewritten around real-server
+> coverage instead.
+>
+> The path HAS now executed against a real server: five manual POSTs against the
+> CMS connectathon MCS on 2026-09-15 confirmed that a single-`bundle` envelope
+> and a two-`bundle` envelope are both accepted and stored, and that
+> `measureReport` -- declared `min: 1` -- is not enforced, so this design's
+> bundle-only payload is correct. Two findings came out of the same session: the
+> isolation claim above holds only at the storage layer (#449), and a
+> partially-applied multi-bundle submission reports as a plain failure (#449).
 
 ## Implementation sequencing
 

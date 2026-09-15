@@ -161,8 +161,23 @@ def build_stu5_parameters(subjects: list[SubjectBundle]) -> dict[str, Any]:
 
     Each parameter carries a collection Bundle for exactly one subject, its
     MeasureReport first. Several subjects never share a Bundle: the receiver
-    processes each Bundle as a transaction, and merging subjects would make one
-    subject's bad resource fail the others.
+    processes each Bundle as its own transaction, so one subject's bad resource
+    does not roll back the others.
+
+    HOW FAR THAT ISOLATION ACTUALLY GOES (measured 2026-09-15, #448/#449) -- it
+    holds at the STORAGE layer only:
+      - A resource that parses but fails on write (e.g. an illegal `id`) fails
+        just its own Bundle. The other subjects stay committed.
+      - A resource that fails to PARSE (e.g. an unknown enum code) rejects the
+        whole request body before any transaction runs, so every subject in the
+        submission is lost, including well-formed ones.
+    Splitting subjects across Bundles therefore buys nothing against malformed
+    content. What covers that case is the caller's isolation retry, not this
+    function -- see workflows._apply_settlement's `isolate-stu5` branch.
+
+    Note also that a partially-applied submission reports as a plain failure:
+    the storage-layer case above answers 400 naming only the bad subject, with
+    no indication that the others were committed. #449 has the evidence.
 
     With a single subject the output is byte-identical to the pre-#413 payload.
     """
