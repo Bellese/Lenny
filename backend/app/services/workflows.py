@@ -85,6 +85,26 @@ def _outcome_reports_unsupported_operation(exc: FhirOperationError) -> bool:
     return False
 
 
+# Statuses on which a failed GROUP submission is resubmitted subject by subject.
+# Each says something about the PAYLOAD, so one subject's bad resource is the
+# plausible cause and isolation finds the owner.
+#
+# 409 is here because HAPI's ResourceVersionConflictException (HAPI-0550/0823)
+# is a per-resource verdict, and it has already failed this workflow once.
+#
+# Everything else is deliberately absent. A 401, 403, 404, 405, 429, any 5xx, a
+# timeout, or a transport error is a statement about the SERVER or the
+# connection; resubmitting N times only asks a down server the same question N
+# more times. With a chunk of 100 that turns one failed POST into 101. Those
+# fail every subject in the group with the one verdict the server gave.
+_ISOLATE_STATUS_CODES = {400, 409, 422}
+
+
+def _is_payload_attributable(exc: Exception) -> bool:
+    """True when a group's failure plausibly belongs to ONE subject's payload."""
+    return isinstance(exc, FhirOperationError) and exc.status_code in _ISOLATE_STATUS_CODES
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -494,26 +514,33 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # base-fallback has no multi-bundle envelope.
         if self._mode != SUBMIT_DATA_MODE_STU5:
             return await self._submit_individually(subjects, SUBMIT_DATA_MODE_BASE)
-        if len(subjects) == 1:
-            # A lone settled-path subject keeps the per-subject try/except of
-            # _submit_individually — byte-identical wire payload to _submit_group
-            # for one subject, but it still catches a failure into a
-            # SubjectOutcome instead of raising, which transfer_patient's
-            # single-subject contract (and #414's mixed-mode-guard tests) rely
-            # on. _submit_group's unwrapped raise (Task 6 wraps it) is reserved
-            # for genuine multi-subject groups.
-            return await self._submit_individually(subjects, SUBMIT_DATA_MODE_STU5)
         return await self._submit_group(subjects)
 
     async def _submit_group(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
-        """One POST carrying every subject's bundle.
+        """One POST carrying every subject's bundle; isolate only on a payload
+        rejection.
 
         Each `bundle` parameter is a collection Bundle for exactly ONE subject:
         the receiver processes each Bundle as a transaction, so merging subjects
         would make one subject's bad resource fail the others.
         """
         parameters = build_stu5_parameters([SubjectBundle(s.measure_report, s.resources) for s in subjects])
-        await self._post(parameters, SUBMIT_DATA_MODE_STU5)
+        try:
+            await self._post(parameters, SUBMIT_DATA_MODE_STU5)
+        except Exception as exc:  # noqa: BLE001 - an outcome, not a raise, is the contract
+            # A single-subject group never isolates: retrying the one subject it
+            # holds would POST twice where the ungrouped path posts once, and
+            # size 1 would stop being byte-identical to PR 1.
+            if len(subjects) > 1 and _is_payload_attributable(exc):
+                return await self._submit_individually(subjects, SUBMIT_DATA_MODE_STU5)
+            return [
+                SubjectOutcome(
+                    patient_id=s.patient_id,
+                    gather=s.gather,
+                    error=TransferPhaseError("submit", exc),
+                )
+                for s in subjects
+            ]
         return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
 
     async def _settle_mode_and_submit(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:

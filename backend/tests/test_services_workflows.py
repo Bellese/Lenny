@@ -1161,3 +1161,96 @@ class TestDeqmGrouping:
         with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
             assert await wf.submit_prepared([]) == []
         submit.assert_not_awaited()
+
+
+class TestGroupFailureIsolation:
+    async def _prepare(self, wf, patient_ids):
+        subjects = []
+        for pid in patient_ids:
+            with patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": pid}])),
+            ):
+                subjects.append(await wf.prepare_patient("http://cdr", pid, {}))
+        return subjects
+
+    def _settled_stu5(self, group_size: int) -> DeqmSubmitDataWorkflow:
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = group_size
+        # Past the pioneer: this group may isolate, but never downgrade.
+        wf._mode_settled.set()
+        return wf
+
+    @pytest.mark.parametrize("status", [400, 409, 422])
+    async def test_a_payload_attributable_failure_isolates(self, status):
+        wf = self._settled_stu5(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        calls = {"n": 0}
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _fhir_op_error(status)  # the group POST
+            if len(parameters["parameter"]) == 1 and parameters["parameter"][0]["resource"]["entry"][0]["resource"][
+                "subject"
+            ]["reference"].endswith("p2"):
+                raise _fhir_op_error(status)  # p2 owns the bad resource
+            return None
+
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)):
+            outcomes = await wf.submit_prepared(subjects)
+
+        assert calls["n"] == 4, "one group POST plus one per subject"
+        assert [o.error is None for o in outcomes] == [True, False, True]
+        assert outcomes[1].patient_id == "p2"
+        assert outcomes[1].error.phase == "submit"
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 405, 429, 500, 503])
+    async def test_a_server_failure_fails_the_whole_group_in_one_post(self, status):
+        """Resubmitting N times only asks a down or unauthenticated server the
+        same question N more times. On a full chunk that is 101 POSTs for one
+        answer."""
+        wf = self._settled_stu5(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(status))) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 1
+        assert all(o.error is not None for o in outcomes)
+        assert all(o.error.phase == "submit" for o in outcomes)
+        assert [o.patient_id for o in outcomes] == ["p1", "p2", "p3"]
+
+    async def test_a_non_http_failure_fails_the_whole_group_in_one_post(self):
+        """A timeout is not a statement about anyone's payload."""
+        wf = self._settled_stu5(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch(
+            "app.services.workflows.submit_data",
+            new=AsyncMock(side_effect=asyncio.TimeoutError("timed out")),
+        ) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 1
+        assert all(isinstance(o.error.cause, asyncio.TimeoutError) for o in outcomes)
+
+    async def test_isolation_never_downgrades(self):
+        """Only _settle_mode_and_submit may change the mode (#414). A settled
+        group that isolates must leave the job's wire format alone."""
+        wf = self._settled_stu5(2)
+        subjects = await self._prepare(wf, ["p1", "p2"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(400))) as submit:
+            await wf.submit_prepared(subjects)
+        assert wf.mode == "stu5"
+        assert wf.downgraded is False
+        assert all(c.kwargs["mode"] == "stu5" for c in submit.await_args_list)
+
+    async def test_isolation_retries_under_the_settled_mode(self):
+        wf = self._settled_stu5(2)
+        subjects = await self._prepare(wf, ["p1", "p2"])
+        with patch(
+            "app.services.workflows.submit_data",
+            new=AsyncMock(side_effect=[_fhir_op_error(400), None, None]),
+        ) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 3
+        assert all(c.kwargs["mode"] == "stu5" for c in submit.await_args_list)
+        assert all(o.error is None for o in outcomes)
