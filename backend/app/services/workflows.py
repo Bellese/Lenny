@@ -9,6 +9,7 @@ identical for every workflow and stays in the orchestrator.
 import abc
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.config import settings
@@ -101,6 +102,41 @@ class TransferPhaseError(Exception):
         self.cause = cause
 
 
+@dataclass(frozen=True)
+class PreparedSubject:
+    """One subject's CDR work, done and ready to submit — no MCS I/O yet.
+
+    Splitting gather-and-build from submit is what lets several subjects share
+    one POST. A workflow with no separable build step leaves the payload fields
+    None; the base-class default then defers the whole transfer to
+    submit_prepared, which is why the CDR coordinates travel here too. Keeping
+    them on the subject rather than on the workflow instance is deliberate: one
+    workflow instance serves every concurrent chunk of a job, so per-subject
+    state on the instance would interleave across chunks.
+    """
+
+    patient_id: str
+    gather: GatherResult | None = None
+    measure_report: dict | None = None
+    resources: list[dict] | None = None
+    cdr_url: str | None = None
+    cdr_auth_headers: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class SubjectOutcome:
+    """What happened to one subject of a submitted group.
+
+    `error` is None on success. The orchestrator reads `gather` for its
+    partial-failure bookkeeping and the "Gathered N resources" log, exactly as
+    it read transfer_patient's return value before grouping.
+    """
+
+    patient_id: str
+    gather: GatherResult | None = None
+    error: TransferPhaseError | None = None
+
+
 def _acquisition_strategy(
     measure_id: str, mcs_url: str, mcs_auth_headers: dict[str, str] | None = None
 ) -> DataAcquisitionStrategy:
@@ -134,6 +170,53 @@ class SubmissionWorkflow(abc.ABC):
         Default is a no-op: direct_load needs nothing staged.
         """
         return None
+
+    @property
+    def submission_group_size(self) -> int:
+        """How many subjects may share one submission call.
+
+        1 means one subject per call — today's behavior, and the default for
+        every workflow that has no multi-subject wire format.
+        """
+        return 1
+
+    async def prepare_patient(self, cdr_url: str, patient_id: str, cdr_auth_headers: dict[str, str]) -> PreparedSubject:
+        """Do this subject's CDR work, with no MCS I/O. Raises TransferPhaseError.
+
+        Default: defer everything. direct_load pushes a Bundle of PUTs and has
+        nothing to assemble beforehand, so it returns an identity-only subject
+        and lets submit_prepared run the whole transfer. Raising here (rather
+        than returning a failed outcome) is what keeps a gather failure from
+        poisoning the group the subject was being collected into.
+        """
+        return PreparedSubject(patient_id=patient_id, cdr_url=cdr_url, cdr_auth_headers=cdr_auth_headers)
+
+    async def submit_prepared(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
+        """Submit a group; return one outcome per subject, never raising for one.
+
+        Default: fan back out to transfer_patient, one subject per call. This is
+        what keeps DirectLoadWorkflow — and any workflow implementing only
+        transfer_patient — working unchanged under the group protocol, with no
+        edits of its own.
+        """
+        outcomes: list[SubjectOutcome] = []
+        for subject in subjects:
+            try:
+                gather = await self.transfer_patient(
+                    subject.cdr_url or "",
+                    subject.patient_id,
+                    subject.cdr_auth_headers or {},
+                )
+            except TransferPhaseError as exc:
+                outcomes.append(SubjectOutcome(patient_id=subject.patient_id, error=exc))
+            except Exception as exc:  # noqa: BLE001 - an outcome, not a raise, is this method's contract
+                # "gather" is the historical label for an unclassified transfer
+                # failure (see TransferPhaseError), so an unwrapped exception
+                # lands in the same bucket the orchestrator already handles.
+                outcomes.append(SubjectOutcome(patient_id=subject.patient_id, error=TransferPhaseError("gather", exc)))
+            else:
+                outcomes.append(SubjectOutcome(patient_id=subject.patient_id, gather=gather))
+        return outcomes
 
     @abc.abstractmethod
     async def transfer_patient(self, cdr_url: str, patient_id: str, cdr_auth_headers: dict[str, str]) -> GatherResult:

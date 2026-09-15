@@ -12,6 +12,9 @@ from app.services.fhir_errors import FhirOperationError, FhirOperationOutcome
 from app.services.workflows import (
     DeqmSubmitDataWorkflow,
     DirectLoadWorkflow,
+    PreparedSubject,
+    SubjectOutcome,
+    SubmissionWorkflow,
     TransferPhaseError,
     _acquisition_strategy,
     build_submission_workflow,
@@ -869,3 +872,105 @@ class TestBuildSubmissionWorkflow:
                     period_start="2025-01-01",
                     period_end="2025-12-31",
                 )
+
+
+class TestGroupProtocolDefaults:
+    """The base-class defaults are what keep every pre-grouping workflow
+    working under the new protocol. A workflow that implements only
+    transfer_patient — which is every workflow in the codebase before this
+    PR, and _StubWorkflow in the orchestrator tests — must still transfer
+    correctly when the orchestrator drives it through prepare/submit."""
+
+    class _OnlyTransferPatient(SubmissionWorkflow):
+        name = "only-transfer"
+
+        def __init__(self, outcome):
+            self.outcome = outcome
+            self.calls: list[tuple[str, str, dict]] = []
+
+        async def transfer_patient(self, cdr_url, patient_id, cdr_auth_headers):
+            self.calls.append((cdr_url, patient_id, cdr_auth_headers))
+            if isinstance(self.outcome, Exception):
+                raise self.outcome
+            return self.outcome
+
+    async def test_default_group_size_is_one(self):
+        wf = self._OnlyTransferPatient(_GATHER)
+        assert wf.submission_group_size == 1
+
+    async def test_default_prepare_does_no_io_and_carries_cdr_coordinates(self):
+        """The default defers the whole transfer, so it must hand
+        submit_prepared the CDR arguments transfer_patient will need."""
+        wf = self._OnlyTransferPatient(_GATHER)
+        subject = await wf.prepare_patient("http://cdr", "p1", {"Authorization": "Bearer t"})
+        assert wf.calls == [], "the default prepare_patient must not touch the CDR"
+        assert isinstance(subject, PreparedSubject)
+        assert subject.patient_id == "p1"
+        assert subject.cdr_url == "http://cdr"
+        assert subject.cdr_auth_headers == {"Authorization": "Bearer t"}
+
+    async def test_default_submit_delegates_to_transfer_patient(self):
+        wf = self._OnlyTransferPatient(_GATHER)
+        subject = await wf.prepare_patient("http://cdr", "p1", {})
+        outcomes = await wf.submit_prepared([subject])
+        assert wf.calls == [("http://cdr", "p1", {})]
+        assert len(outcomes) == 1
+        assert isinstance(outcomes[0], SubjectOutcome)
+        assert outcomes[0].patient_id == "p1"
+        assert outcomes[0].gather is _GATHER
+        assert outcomes[0].error is None
+
+    async def test_default_submit_returns_the_failure_instead_of_raising(self):
+        """submit_prepared's contract is one outcome per subject. Raising
+        would abort the whole group for one subject's failure — the exact
+        thing the outcome list exists to prevent."""
+        boom = TransferPhaseError("gather", RuntimeError("cdr down"))
+        wf = self._OnlyTransferPatient(boom)
+        subject = await wf.prepare_patient("http://cdr", "p1", {})
+        outcomes = await wf.submit_prepared([subject])
+        assert outcomes[0].error is boom
+        assert outcomes[0].error.phase == "gather"
+        assert outcomes[0].gather is None
+
+    async def test_default_submit_wraps_a_bare_exception_as_a_gather_failure(self):
+        """A workflow that raises something other than TransferPhaseError must
+        still produce an outcome the orchestrator can persist. 'gather' is the
+        historical label for an unclassified transfer failure."""
+        wf = self._OnlyTransferPatient(ValueError("nope"))
+        subject = await wf.prepare_patient("http://cdr", "p1", {})
+        outcomes = await wf.submit_prepared([subject])
+        assert isinstance(outcomes[0].error, TransferPhaseError)
+        assert outcomes[0].error.phase == "gather"
+        assert isinstance(outcomes[0].error.cause, ValueError)
+
+    async def test_default_submit_isolates_failures_across_subjects(self):
+        """One subject failing must not deny the others their outcome."""
+
+        class _Selective(SubmissionWorkflow):
+            name = "selective"
+
+            async def transfer_patient(self, cdr_url, patient_id, cdr_auth_headers):
+                if patient_id == "p2":
+                    raise TransferPhaseError("submit", RuntimeError("bad"))
+                return _GATHER
+
+        wf = _Selective()
+        subjects = [await wf.prepare_patient("http://cdr", pid, {}) for pid in ("p1", "p2", "p3")]
+        outcomes = await wf.submit_prepared(subjects)
+        assert [o.patient_id for o in outcomes] == ["p1", "p2", "p3"]
+        assert [o.error is None for o in outcomes] == [True, False, True]
+
+    async def test_direct_load_works_through_the_group_protocol(self):
+        """DirectLoadWorkflow gains no lines in this PR; it must transfer
+        correctly purely via the inherited defaults."""
+        wf = DirectLoadWorkflow("M1", "http://mcs", {"Authorization": "Bearer t"})
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.push_resources", new=AsyncMock()) as push,
+        ):
+            subject = await wf.prepare_patient("http://cdr", "p1", {})
+            outcomes = await wf.submit_prepared([subject])
+        assert wf.submission_group_size == 1
+        push.assert_awaited_once()
+        assert outcomes[0].error is None
+        assert outcomes[0].gather is _GATHER
