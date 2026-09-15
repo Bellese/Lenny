@@ -92,7 +92,8 @@ class Job(Base):
     )
     # Wire-format decision from the creation-time CapabilityStatement probe:
     # "stu5" | "base-fallback". NULL for direct_load jobs, where no $submit-data
-    # call ever happens. base-fallback renders as an STU5-compliance warning.
+    # call ever happens. base-fallback renders as a warning that the MCS does
+    # not support type-level $submit-data with bundles.
     submit_data_mode: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
 
     batches: Mapped[list["Batch"]] = relationship(

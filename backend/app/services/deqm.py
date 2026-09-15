@@ -1,16 +1,24 @@
-"""DEQM STU5 data-exchange payload builders.
+"""DEQM data-exchange payload builders.
 
 Pure functions that assemble the DEQM Data Exchange MeasureReport and the two
-$submit-data Parameters envelopes (STU5 `bundle` form and base-FHIR
-`measureReport`+`resource` form). No I/O here — HTTP delivery lives in
+$submit-data Parameters envelopes: the type-level `bundle` form Lenny targets
+(1..* Bundles, one subject each) and the base-FHIR `measureReport`+`resource`
+form it falls back to. No I/O here — HTTP delivery lives in
 fhir_client.submit_data, orchestration in workflows.DeqmSubmitDataWorkflow.
 
-Spec: docs/superpowers/specs/2026-08-21-deqm-submit-data-workflow-design.md
-IG:   https://hl7.org/fhir/us/davinci-deqm/STU5/
+The `bundle` form is the contract Lenny selected in #413; it is NOT the
+published DEQM STU5 operation, whose own $deqm-submit-data was retired
+upstream. Read the contract spec before changing either envelope.
+
+Spec:     docs/superpowers/specs/2026-09-14-deqm-submit-data-contract-design.md
+Original: docs/superpowers/specs/2026-08-21-deqm-submit-data-workflow-design.md
+IG:       https://hl7.org/fhir/us/davinci-deqm/STU5/
 """
 
 import hashlib
+import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 DEQM_DATA_EXCHANGE_PROFILE = "http://hl7.org/fhir/us/davinci-deqm/StructureDefinition/datax-measurereport-deqm"
@@ -93,8 +101,73 @@ def build_data_exchange_measure_report(
     }
 
 
-def build_stu5_parameters(measure_report: dict[str, Any], resources: list[dict[str, Any]]) -> dict[str, Any]:
-    """STU5 $deqm-submit-data envelope: one single-subject collection Bundle."""
+def _canonical_json(resource: dict[str, Any]) -> str:
+    """Stable serialisation for content comparison — key order is not meaning."""
+    return json.dumps(resource, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def dedupe_by_identity(
+    resources: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """First-wins dedupe on `(resourceType, id)`.
+
+    Returns the deduped list in first-seen order, and the identities whose
+    later occurrences differed in content. Byte-identical duplicates are
+    dropped silently — repetition alone is not worth an operator's attention;
+    disagreement is.
+
+    Deduplication is deliberately WITHIN one subject. Callers must not reuse
+    one accumulator across subjects: a Practitioner shared by two subjects
+    belongs in both their Bundles, and suppressing the second would leave a
+    dangling reference in a Bundle the receiver may process on its own.
+
+    Precondition: every resource carries `resourceType` and `id`. The caller
+    filters first (see workflows.DeqmSubmitDataWorkflow.transfer_patient), and
+    deriving the MeasureReport and the payload from that same filtered list is
+    what keeps `evaluatedResource` aligned with the Bundle entries.
+    """
+    first_by_identity: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    conflicts: list[str] = []
+    for resource in resources:
+        identity = f"{resource['resourceType']}/{resource['id']}"
+        if identity not in first_by_identity:
+            first_by_identity[identity] = resource
+            order.append(identity)
+            continue
+        if identity in conflicts:
+            continue
+        if _canonical_json(resource) != _canonical_json(first_by_identity[identity]):
+            conflicts.append(identity)
+    return [first_by_identity[identity] for identity in order], conflicts
+
+
+@dataclass(frozen=True)
+class SubjectBundle:
+    """One subject's submission payload: its MeasureReport and its resources.
+
+    `resources` must already be filtered and deduplicated — see
+    `dedupe_by_identity`. Pairing them in one object is what stops a caller
+    from accidentally deriving the MeasureReport from one list and the Bundle
+    entries from another.
+    """
+
+    measure_report: dict[str, Any]
+    resources: list[dict[str, Any]]
+
+
+def build_stu5_parameters(subjects: list[SubjectBundle]) -> dict[str, Any]:
+    """STU5 envelope: one `bundle` parameter per subject, 1..N.
+
+    Each parameter carries a collection Bundle for exactly one subject, its
+    MeasureReport first. Several subjects never share a Bundle: the receiver
+    processes each Bundle as a transaction, and merging subjects would make one
+    subject's bad resource fail the others.
+
+    With a single subject the output is byte-identical to the pre-#413 payload.
+    """
+    if not subjects:
+        raise ValueError("build_stu5_parameters requires at least one subject (`bundle` is 1..*)")
     return {
         "resourceType": "Parameters",
         "parameter": [
@@ -103,9 +176,10 @@ def build_stu5_parameters(measure_report: dict[str, Any], resources: list[dict[s
                 "resource": {
                     "resourceType": "Bundle",
                     "type": "collection",
-                    "entry": [{"resource": measure_report}] + [{"resource": r} for r in resources],
+                    "entry": [{"resource": subject.measure_report}] + [{"resource": r} for r in subject.resources],
                 },
             }
+            for subject in subjects
         ],
     }
 

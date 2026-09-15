@@ -14,9 +14,11 @@ from datetime import datetime, timezone
 from app.config import settings
 from app.services.deqm import (
     LENNY_REPORTER_ORG,
+    SubjectBundle,
     build_base_parameters,
     build_data_exchange_measure_report,
     build_stu5_parameters,
+    dedupe_by_identity,
 )
 from app.services.fhir_client import (
     SUBMIT_DATA_MODE_BASE,
@@ -31,10 +33,11 @@ from app.services.fhir_client import (
 )
 from app.services.fhir_errors import FhirOperationError
 
-# Capability-mismatch signals: a server that advertises $deqm-submit-data but
-# doesn't actually implement the type-level POST commonly answers with one of
-# these. Each is a statement about the SERVER, not about the payload, so it is
-# a credible capability verdict on its own.
+# Capability-mismatch signals: a server whose CapabilityStatement/
+# OperationDefinition probe confirmed the type-level $submit-data bundle
+# contract, but whose type-level POST doesn't actually work, commonly
+# answers with one of these. Each is a statement about the SERVER, not
+# about the payload, so it is a credible capability verdict on its own.
 #
 # 401/403 are deliberately excluded — auth failures, not capability mismatches,
 # and must not be masked as a silent downgrade. 429/5xx are excluded too —
@@ -273,7 +276,28 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # filter) but still shipped as a `resource` parameter — the
         # MeasureReport and the payload disagree, and under HAPI's
         # transaction semantics one bad entry can 400 the whole patient.
-        filtered_resources = [r for r in gather.resources if "resourceType" in r and "id" in r]
+        # The predicate matches build_data_exchange_measure_report's own filter
+        # exactly — truthiness, not key presence — so a resource carrying an
+        # empty id is dropped from BOTH the Bundle entries and
+        # evaluatedResource, rather than shipping as an entry nothing refers to.
+        filtered_resources = [r for r in gather.resources if r.get("resourceType") and r.get("id")]
+        # Dedupe BEFORE the MeasureReport is built, so evaluatedResource and the
+        # Bundle entries stay 1:1 by construction rather than by a second rule
+        # maintained somewhere else. Within this subject only — see
+        # dedupe_by_identity on why a shared Practitioner must survive in every
+        # subject's Bundle.
+        filtered_resources, conflicts = dedupe_by_identity(filtered_resources)
+        if conflicts:
+            logger.warning(
+                "Conflicting representations of the same resource identity in gathered data "
+                "— keeping the first of each",
+                extra={
+                    "job_id": self._job_id,
+                    "patient_id": patient_id,
+                    "identities": conflicts[:10],
+                    "conflict_count": len(conflicts),
+                },
+            )
         measure_report = build_data_exchange_measure_report(
             job_id=self._job_id,
             patient_id=patient_id,
@@ -300,7 +324,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # is deciding on another (#414).
         attempt_mode = self._mode
         if attempt_mode == SUBMIT_DATA_MODE_STU5:
-            parameters = build_stu5_parameters(measure_report, submitted)
+            parameters = build_stu5_parameters([SubjectBundle(measure_report, submitted)])
         else:
             parameters = build_base_parameters(measure_report, submitted)
 
@@ -319,7 +343,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             # and submit under whatever it decided.
             attempt_mode = self._mode
             parameters = (
-                build_stu5_parameters(measure_report, submitted)
+                build_stu5_parameters([SubjectBundle(measure_report, submitted)])
                 if attempt_mode == SUBMIT_DATA_MODE_STU5
                 else build_base_parameters(measure_report, submitted)
             )
@@ -345,7 +369,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         single point where the job's wire format is decided.
         """
         attempt_mode = self._mode
-        parameters = build_stu5_parameters(measure_report, submitted)
+        parameters = build_stu5_parameters([SubjectBundle(measure_report, submitted)])
         try:
             await submit_data(
                 mcs_url=self._mcs_url,
@@ -356,11 +380,11 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             )
         except FhirOperationError as exc:
             # A mis-probed capability stamps Job.submit_data_mode="stu5" for a
-            # server that doesn't actually implement $deqm-submit-data. Rather
-            # than fail every patient in the job, downgrade to base mode and
-            # retry once. Because this runs before the mode is settled, no
-            # patient has been submitted under STU5 yet, so the downgrade
-            # cannot strand anyone in the other format.
+            # server that doesn't actually implement the type-level $submit-data
+            # bundle contract. Rather than fail every patient in the job,
+            # downgrade to base mode and retry once. Because this runs before
+            # the mode is settled, no patient has been submitted under STU5
+            # yet, so the downgrade cannot strand anyone in the other format.
             #
             # A bare status is only trusted when it is a statement about the
             # server (_DOWNGRADE_STATUS_CODES). A 400 is ambiguous, so it
@@ -372,7 +396,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             )
             if capability_signal:
                 logger.warning(
-                    "STU5 $deqm-submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
+                    "STU5 $submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
                     exc.status_code,
                     self._job_id,
                     extra={"job_id": self._job_id, "patient_id": patient_id, "status_code": exc.status_code},
@@ -425,7 +449,7 @@ async def build_submission_workflow(
             # measure is already named in the instance-level submit URL.
             raise ValueError(
                 f"Measure '{measure_id}' has no absolute canonical URL (got {canonical!r}), "
-                "which is required for DEQM STU5 $deqm-submit-data submissions."
+                "which is required for DEQM STU5 $submit-data submissions."
             )
         # DEQM STU5 says a submission's references should resolve WITHIN the
         # submission, which is why the reporter Organization used to travel

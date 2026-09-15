@@ -173,7 +173,7 @@ export default function JobsPage() {
       });
       toast.success('Calculation started');
       if (created?.submit_data_mode === 'base-fallback') {
-        toast.warning('MCS does not support DEQM STU5 $deqm-submit-data — falling back to base $submit-data.');
+        toast.warning('MCS does not support type-level $submit-data with bundles — falling back to instance-level $submit-data.');
       }
       setShowModal(false);
       setFormData(prev => ({ ...prev, period_start: '', period_end: '' }));
@@ -424,11 +424,11 @@ export default function JobsPage() {
                           <span
                             className={`${styles.workflowTag} ${isFallback ? styles.workflowTagWarn : ''}`}
                             title={isFallback
-                              ? 'MCS does not support DEQM STU5 $deqm-submit-data — base $submit-data fallback used.'
-                              : 'DEQM STU5 $deqm-submit-data'}
+                              ? 'MCS does not support type-level $submit-data with bundles — instance-level $submit-data fallback used.'
+                              : 'DEQM $submit-data (type-level, bundle)'}
                             aria-label={isFallback
-                              ? 'DEQM — MCS does not support DEQM STU5 $deqm-submit-data — base $submit-data fallback used.'
-                              : 'DEQM — DEQM STU5 $deqm-submit-data'}
+                              ? 'DEQM — MCS does not support type-level $submit-data with bundles — instance-level $submit-data fallback used.'
+                              : 'DEQM — DEQM $submit-data (type-level, bundle)'}
                           >
                             DEQM{isFallback ? ' ⚠' : ''}
                           </span>
@@ -511,7 +511,7 @@ export default function JobsPage() {
                 <select id="workflow-select" className={styles.select} value={formData.workflow}
                   onChange={e => setFormData(p => ({ ...p, workflow: e.target.value }))}>
                   <option value="direct_load">Direct load — $everything (default)</option>
-                  <option value="deqm_submit_data">DEQM Data Exchange — $submit-data (STU5)</option>
+                  <option value="deqm_submit_data">DEQM Data Exchange — $submit-data (bundle)</option>
                 </select>
               </div>
               <PeriodPicker

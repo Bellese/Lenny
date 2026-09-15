@@ -2,6 +2,15 @@
 
 **Date:** 2026-08-21
 **Status:** Approved (design reviewed section-by-section with Bill on 2026-08-21)
+**Amended:** 2026-09-14 by `2026-09-14-deqm-submit-data-contract-design.md` (#413).
+The STU5 wire contract below — `POST [base]/Measure/$deqm-submit-data`, and the
+CapabilityStatement probe that selects it — is superseded. STU5 mode now means
+type-level `POST [base]/Measure/$submit-data` with 1..* `bundle` parameters, and
+detection confirms the operation's `code`, type-level support, and `bundle` input
+against its OperationDefinition. The single-subject collection Bundle this spec
+defines is unchanged and is still what each `bundle` parameter carries; an
+operator may now send several of them per submission. Everything about
+base-fallback is unchanged.
 
 ## Context
 

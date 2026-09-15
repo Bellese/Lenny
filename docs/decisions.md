@@ -217,3 +217,31 @@ Repointing at `lenny-hapi-*:latest` was rejected: it would silently start feedin
 **Alternatives considered:** (a) A `contextvar` — rejected, see above. (b) Per-value parameters (`url`, `headers`, `read_only`, …) threaded separately — rejected: sixteen call sites × four values is where a partial thread-through hides. (c) Scoping the reads and deferring the wipe to a later slice — rejected, it would have armed #392's bug on the validation path (see above). (d) Snapshotting `is_read_only` with the rest — rejected, see above. (e) Removing the `target_url=None` / `measure_engine_url=None` back-compat defaults on `push_resources` and `evaluate_measure` so a missed call site raises `TypeError` at call time instead of failing a CI test — deliberately deferred: it ripples into the orchestrator and CDR paths and was out of scope. The consequence is that protection against a *future* missed call site is a CI-time AST check rather than a runtime error.
 
 **Known limitations, stated rather than papered over:** `wait_for_valueset_expansion` receives `mcs.url` but has no auth parameter, so against an authenticated remote MCS its polls will 401 and it will report "not expanded"; the caller treats non-expansion as a warning, so this degrades rather than fails, and threading auth through it is follow-up work. And no independent cross-model adversarial review has been run on this design or on the two already-shipped slices — Codex is not available on the development machine, so every review across #401, #402 and this change was same-model.
+
+## ADR-016: The retired DEQM `$deqm-submit-data` is dropped, not preserved behind a third mode (2026-09-14)
+
+**Context.** Lenny's STU5 path POSTed to `[base]/Measure/$deqm-submit-data`, correctly matching
+published US DEQM STU5 (5.0.0), whose operation `code` really is `deqm-submit-data`. HL7 retired
+that operation upstream on 2026-03-05 and redirected submission guidance to the core FHIR API. The
+maintainer selected a concrete replacement contract: type-level `POST [base]/Measure/$submit-data`
+carrying 1..* `bundle` parameters, each a single-subject collection Bundle.
+
+**Decision.** Two modes, not three. `stu5` now means the selected contract only. A server that
+advertises only the retired `$deqm-submit-data` is classified `base-fallback`. Detection is purely
+structural — `code: submit-data`, `type: true`, and a `bundle` input parameter, confirmed against
+the server's OperationDefinition — so an ordinary HAPI 8.10.x classifies `stu5`, which is correct:
+the contract genuinely works there.
+
+**Why not keep a third mode.** It would cost a new `jobs.submit_data_mode` value, a new badge state,
+and a third payload path to maintain and test, for a server shape Lenny has never successfully
+talked to. Claiming support we cannot demonstrate is worse than dropping it openly.
+
+**Consequences.** A published-STU5-only server that previously reached `$deqm-submit-data` now
+falls back to base mode; the probe logs an `info` line naming the retirement so the badge is
+explainable. Detection costs up to three extra HTTP reads at job creation, capped, non-raising, and
+never crossing origins. The STU5 branch still has no real-server execution — bundled HAPI is pinned
+at `v8.8.0-1`, which does not implement the type-level operation; a bump to 8.10.x is the follow-up
+that would first exercise it.
+
+**Full rationale and rejected alternatives:**
+`docs/superpowers/specs/2026-09-14-deqm-submit-data-contract-design.md`. Issue #413.

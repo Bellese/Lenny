@@ -1,12 +1,13 @@
 """Tests for the FHIR client service (fhir_client.py)."""
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
 
 from app.services.fhir_client import (
+    _MAX_OPERATION_DEFINITION_PROBES,
     SUBMIT_DATA_MODE_BASE,
     SUBMIT_DATA_MODE_STU5,
     BatchQueryStrategy,
@@ -14,7 +15,9 @@ from app.services.fhir_client import (
     _acquire_smart_token,
     _build_auth_headers,
     _chunk_request_entries,
+    _operation_definition_matches_contract,
     _remap_valueset_ids_for_hapi,
+    _resolve_operation_definition,
     delete_measure,
     detect_submit_data_mode,
     evaluate_measure,
@@ -2939,75 +2942,361 @@ class TestGetMeasureCanonical:
                 await get_measure_canonical("m1", mcs_url="http://mcs")
 
 
+class TestOperationDefinitionMatchesContract:
+    def _od(self, **overrides) -> dict:
+        od = {
+            "resourceType": "OperationDefinition",
+            "code": "submit-data",
+            "type": True,
+            "instance": False,
+            "parameter": [{"name": "bundle", "use": "in", "min": 1, "max": "*"}],
+        }
+        od.update(overrides)
+        return od
+
+    def test_matches_type_level_submit_data_with_bundle_input(self):
+        assert _operation_definition_matches_contract(self._od()) is True
+
+    def test_matches_even_when_also_instance_level(self):
+        """HAPI 8.10.1 declares type:true AND instance:true. Supporting the
+        instance level too does not stop it supporting the type level."""
+        assert _operation_definition_matches_contract(self._od(instance=True)) is True
+
+    def test_rejects_instance_only_operation(self):
+        assert _operation_definition_matches_contract(self._od(type=False, instance=True)) is False
+
+    def test_rejects_wrong_code(self):
+        assert _operation_definition_matches_contract(self._od(code="deqm-submit-data")) is False
+
+    def test_rejects_when_bundle_parameter_absent(self):
+        """Base-only server: measureReport + resource, no bundle."""
+        od = self._od(
+            parameter=[
+                {"name": "measureReport", "use": "in", "min": 1, "max": "1"},
+                {"name": "resource", "use": "in", "min": 0, "max": "*"},
+            ]
+        )
+        assert _operation_definition_matches_contract(od) is False
+
+    def test_rejects_when_bundle_is_an_output_parameter(self):
+        od = self._od(parameter=[{"name": "bundle", "use": "out", "min": 1, "max": "*"}])
+        assert _operation_definition_matches_contract(od) is False
+
+    def test_rejects_missing_type_element(self):
+        od = self._od()
+        del od["type"]
+        assert _operation_definition_matches_contract(od) is False
+
+
+class TestResolveOperationDefinition:
+    _OD = {
+        "resourceType": "OperationDefinition",
+        "code": "submit-data",
+        "type": True,
+        "parameter": [{"name": "bundle", "use": "in", "max": "*"}],
+    }
+
+    async def test_same_origin_definition_is_fetched_directly(self):
+        get = AsyncMock(return_value=_make_response(200, self._OD))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://mcs/OperationDefinition/Measure-it-submit-data", {}
+                )
+        assert result == self._OD
+        assert get.call_args[0][0] == "http://mcs/OperationDefinition/Measure-it-submit-data"
+
+    async def test_version_suffix_is_stripped_before_fetching(self):
+        get = AsyncMock(return_value=_make_response(200, self._OD))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                await _resolve_operation_definition(client, "http://mcs", "http://mcs/OperationDefinition/x|5.0.0", {})
+        assert get.call_args[0][0] == "http://mcs/OperationDefinition/x"
+
+    async def test_foreign_origin_is_never_fetched_directly(self):
+        """SSRF guard: `definition` is a URL chosen by a remote server. It is
+        resolved by canonical search against the MCS, never dereferenced."""
+        bundle = {"resourceType": "Bundle", "entry": [{"resource": self._OD}]}
+        get = AsyncMock(return_value=_make_response(200, bundle))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://hl7.org/fhir/OperationDefinition/Measure-submit-data", {}
+                )
+        assert result == self._OD
+        assert get.call_args[0][0] == "http://mcs/OperationDefinition"
+        assert get.call_args.kwargs["params"] == {"url": "http://hl7.org/fhir/OperationDefinition/Measure-submit-data"}
+        for call in get.call_args_list:
+            assert "hl7.org" not in call[0][0]
+
+    async def test_returns_none_when_direct_fetch_is_not_200(self):
+        get = AsyncMock(return_value=_make_response(404, {"resourceType": "OperationOutcome"}))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://mcs/OperationDefinition/x", {}
+                )
+        assert result is None
+
+    async def test_returns_none_when_canonical_search_finds_nothing(self):
+        get = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle", "entry": []}))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://elsewhere.example/OperationDefinition/x", {}
+                )
+        assert result is None
+
+    async def test_returns_none_for_a_wrong_resource_type(self):
+        get = AsyncMock(return_value=_make_response(200, {"resourceType": "Patient", "id": "p1"}))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://mcs/OperationDefinition/x", {}
+                )
+        assert result is None
+
+    @pytest.mark.parametrize("definition", ["", "   ", "|5.0.0", "  |5.0.0"])
+    async def test_returns_none_for_a_blank_definition(self, definition):
+        get = AsyncMock()
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(client, "http://mcs", definition, {})
+        assert result is None
+        get.assert_not_awaited()
+
+    async def test_auth_headers_reach_a_same_origin_fetch(self):
+        """Dropping the headers would make every authenticated MCS answer 401,
+        and the probe would silently classify it base-fallback."""
+        get = AsyncMock(return_value=_make_response(200, self._OD))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                await _resolve_operation_definition(
+                    client, "http://mcs", "http://mcs/OperationDefinition/sd", {"Authorization": "Bearer t"}
+                )
+        assert get.call_args.kwargs["headers"] == {"Authorization": "Bearer t"}
+
+    async def test_auth_headers_reach_a_canonical_search(self):
+        get = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle", "entry": []}))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                await _resolve_operation_definition(
+                    client, "http://mcs", "http://hl7.org/fhir/OperationDefinition/x", {"Authorization": "Bearer t"}
+                )
+        assert get.call_args.kwargs["headers"] == {"Authorization": "Bearer t"}
+
+    async def test_a_non_operation_definition_entry_in_the_search_bundle_is_skipped(self):
+        bundle = {
+            "resourceType": "Bundle",
+            "entry": [{"resource": {"resourceType": "OperationOutcome"}}, {"resource": self._OD}],
+        }
+        get = AsyncMock(return_value=_make_response(200, bundle))
+        async with httpx.AsyncClient() as client:
+            with patch.object(client, "get", get):
+                result = await _resolve_operation_definition(
+                    client, "http://mcs", "http://elsewhere.example/OperationDefinition/x", {}
+                )
+        assert result == self._OD
+
+
 class TestDetectSubmitDataMode:
+    _CONTRACT_OD = {
+        "resourceType": "OperationDefinition",
+        "code": "submit-data",
+        "type": True,
+        "instance": True,
+        "parameter": [{"name": "bundle", "use": "in", "min": 1, "max": "*"}],
+    }
+    _BASE_ONLY_OD = {
+        "resourceType": "OperationDefinition",
+        "code": "submit-data",
+        "type": True,
+        "instance": True,
+        "parameter": [
+            {"name": "measureReport", "use": "in", "min": 1, "max": "1"},
+            {"name": "resource", "use": "in", "min": 0, "max": "*"},
+        ],
+    }
+
     def _capability(self, operations: list[dict]) -> dict:
         return {
             "resourceType": "CapabilityStatement",
             "rest": [{"mode": "server", "resource": [{"type": "Measure", "operation": operations}]}],
         }
 
-    async def test_stu5_when_deqm_operation_name_present(self):
-        cap = self._capability([{"name": "deqm-submit-data", "definition": "http://x"}])
+    def _responder(self, capability: dict, operation_definition: dict | None):
+        """GET /metadata returns the capability; anything else returns the OD."""
+
+        async def _get(url, *args, **kwargs):
+            if url.endswith("/metadata"):
+                return _make_response(200, capability)
+            if operation_definition is None:
+                return _make_response(404, {"resourceType": "OperationOutcome"})
+            return _make_response(200, operation_definition)
+
+        return AsyncMock(side_effect=_get)
+
+    async def test_stu5_for_type_level_submit_data_with_bundle_input(self):
+        cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
-            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, cap)))
+            _mock_async_client(mock_httpx, get=self._responder(cap, self._CONTRACT_OD))
             assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_STU5
 
-    async def test_stu5_when_deqm_canonical_definition_present(self):
+    async def test_base_when_operation_is_instance_only(self):
+        cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
+        od = {**self._CONTRACT_OD, "type": False}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=self._responder(cap, od))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+
+    async def test_base_when_operation_takes_no_bundle(self):
+        """The distinction a CapabilityStatement alone cannot make: this server
+        offers a type-level $submit-data, but only in the measureReport +
+        resource shape."""
+        cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=self._responder(cap, self._BASE_ONLY_OD))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+
+    async def test_base_when_only_the_retired_deqm_operation_is_advertised(self):
+        """#413 decision 1: support for the retired $deqm-submit-data is dropped,
+        not renamed. A server offering only it is a base-fallback server. This
+        test is what fails if someone restores historical support without
+        revisiting the design doc."""
         cap = self._capability(
-            [{"name": "whatever", "definition": "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/submit-data"}]
+            [
+                {
+                    "name": "deqm-submit-data",
+                    "definition": "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/submit-data",
+                }
+            ]
         )
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
-            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, cap)))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_STU5
+            _mock_async_client(mock_httpx, get=self._responder(cap, self._CONTRACT_OD))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
 
-    async def test_fallback_when_only_base_submit_data(self):
+    async def test_retired_only_server_is_logged(self):
+        cap = self._capability([{"name": "deqm-submit-data", "definition": "http://mcs/OperationDefinition/x"}])
+        with (
+            patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx,
+            patch("app.services.fhir_client.logger.info") as info,
+        ):
+            _mock_async_client(mock_httpx, get=self._responder(cap, None))
+            await detect_submit_data_mode(mcs_url="http://mcs")
+        assert any("retired" in str(c.args[0]).lower() for c in info.call_args_list)
+
+    async def test_base_when_candidate_has_no_definition(self):
+        cap = self._capability([{"name": "submit-data"}])
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=self._responder(cap, self._CONTRACT_OD))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+
+    async def test_base_when_operation_definition_is_unfetchable(self):
+        cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=self._responder(cap, None))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+
+    async def test_foreign_origin_definition_is_not_contacted(self):
         cap = self._capability(
             [{"name": "submit-data", "definition": "http://hl7.org/fhir/OperationDefinition/Measure-submit-data"}]
         )
+        get = self._responder(cap, None)
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
-            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, cap)))
+            _mock_async_client(mock_httpx, get=get)
             assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+        for call in get.call_args_list:
+            assert "hl7.org" not in call[0][0]
 
-    async def test_stu5_when_deqm_canonical_has_version_suffix(self):
-        """I4: `canonical|version` must still match — not just the bare canonical."""
-        cap = self._capability(
-            [
+    async def test_operation_on_rest_root_is_also_considered(self):
+        cap = {
+            "resourceType": "CapabilityStatement",
+            "rest": [
                 {
-                    "name": "whatever",
-                    "definition": "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/submit-data|5.0.0",
+                    "mode": "server",
+                    "operation": [{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}],
                 }
-            ]
-        )
+            ],
+        }
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
-            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, cap)))
+            _mock_async_client(mock_httpx, get=self._responder(cap, self._CONTRACT_OD))
             assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_STU5
 
-    async def test_base_when_definition_only_a_prefix_of_the_canonical(self):
-        """I4: tightened match. A server that cites the DEQM canonical as a mere
-        PREFIX (e.g. appends a path segment instead of a `|version`) — not an
-        exact match or `|version` suffix — must not be classified stu5. A loose
-        startswith() here 400s every $deqm-submit-data POST with no downgrade
-        for a server that never actually implements it."""
+    async def test_at_most_three_operation_definitions_are_fetched(self):
+        cap = self._capability(
+            [{"name": "submit-data", "definition": f"http://mcs/OperationDefinition/sd{i}"} for i in range(10)]
+        )
+        get = self._responder(cap, self._BASE_ONLY_OD)
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=get)
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+        # 1 metadata call + exactly _MAX_OPERATION_DEFINITION_PROBES definition
+        # reads. Asserted as equality: `<=` also passes when the budget is
+        # spent early or no definition is read at all.
+        assert get.await_count == 1 + _MAX_OPERATION_DEFINITION_PROBES
+
+    async def test_a_repeated_canonical_does_not_consume_two_probe_slots(self):
+        """The same operation advertised at rest.operation and at
+        rest.resource[Measure].operation is one definition, not two."""
+        cap = {
+            "resourceType": "CapabilityStatement",
+            "rest": [
+                {
+                    "mode": "server",
+                    "operation": [{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}],
+                    "resource": [
+                        {
+                            "type": "Measure",
+                            "operation": [{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}],
+                        }
+                    ],
+                }
+            ],
+        }
+        get = self._responder(cap, self._BASE_ONLY_OD)
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=get)
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+        # 1 metadata call + 1 definition read, not 2.
+        assert get.await_count == 2
+
+    async def test_an_unparseable_candidate_does_not_abort_the_ones_after_it(self):
+        """A 200 carrying an HTML proxy error page raises out of the JSON parse.
+        The contracted definition advertised after it must still be probed."""
+
         cap = self._capability(
             [
-                {
-                    "name": "whatever",
-                    "definition": "http://hl7.org/fhir/us/davinci-deqm/OperationDefinition/submit-data-extended",
-                }
+                {"name": "submit-data", "definition": "http://mcs/OperationDefinition/broken"},
+                {"name": "submit-data", "definition": "http://mcs/OperationDefinition/good"},
             ]
         )
+        unparseable = _make_response(200, {})
+        unparseable.json = MagicMock(side_effect=ValueError("not JSON"))
+
+        async def _get(url, *args, **kwargs):
+            if url.endswith("/metadata"):
+                return _make_response(200, cap)
+            if url.endswith("/broken"):
+                return unparseable
+            return _make_response(200, self._CONTRACT_OD)
+
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
-            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, cap)))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            _mock_async_client(mock_httpx, get=AsyncMock(side_effect=_get))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_STU5
 
     async def test_fallback_when_probe_raises(self):
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=AsyncMock(side_effect=httpx.ConnectError("boom")))
             assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
 
+    async def test_never_raises_when_capability_body_is_malformed(self):
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, {"rest": "not-a-list"})))
+            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+
 
 class TestSubmitData:
-    async def test_posts_to_deqm_operation_in_stu5_mode(self):
+    async def test_posts_to_type_level_operation_in_stu5_mode(self):
         post = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle"}))
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, post=post)
@@ -3017,7 +3306,7 @@ class TestSubmitData:
                 mode=SUBMIT_DATA_MODE_STU5,
                 measure_id="M1",
             )
-        assert post.call_args[0][0] == "http://mcs/Measure/$deqm-submit-data"
+        assert post.call_args[0][0] == "http://mcs/Measure/$submit-data"
 
     async def test_posts_to_instance_level_operation_in_base_mode(self):
         # Empirically verified against a local prebaked HAPI measure server: the
@@ -3039,9 +3328,10 @@ class TestSubmitData:
     async def test_base_and_stu5_modes_produce_different_url_shapes(self):
         # Regression guard for the ruling this test file encodes: base-fallback
         # is instance-level (Measure/{id}/$submit-data) because that's the only
-        # shape HAPI accepts; STU5 is type-level (Measure/$deqm-submit-data)
-        # because STU5's OperationDefinition formally declares the operation
-        # type-level (`instance: false`). The two must never collapse to one shape.
+        # shape HAPI's clinical-reasoning module accepts; the selected STU5
+        # contract is type-level (Measure/$submit-data). The two now differ only
+        # by the measure-id segment, so collapsing them into one shape is an
+        # easy mistake to make and this test is what catches it.
         post = AsyncMock(return_value=_make_response(200, {"resourceType": "Bundle"}))
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, post=post)
@@ -3062,7 +3352,7 @@ class TestSubmitData:
             stu5_url = post.call_args[0][0]
 
         assert base_url == "http://mcs/Measure/M1/$submit-data"
-        assert stu5_url == "http://mcs/Measure/$deqm-submit-data"
+        assert stu5_url == "http://mcs/Measure/$submit-data"
         assert base_url != stu5_url
 
     async def test_409_conflict_retries_and_succeeds(self):

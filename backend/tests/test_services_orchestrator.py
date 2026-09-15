@@ -987,7 +987,7 @@ async def test_batch_persists_runtime_downgrade_to_job_submit_data_mode(test_ses
         if mode == "stu5":
             raise FhirOperationError(
                 operation="submit-data",
-                url="http://mcs/Measure/$deqm-submit-data",
+                url="http://mcs/Measure/$submit-data",
                 status_code=404,
                 outcome=None,
                 latency_ms=5,

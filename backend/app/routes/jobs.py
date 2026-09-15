@@ -307,8 +307,9 @@ async def create_job(
 
     # For DEQM jobs, decide the $submit-data wire format now and snapshot it.
     # The probe never raises (detect_submit_data_mode swallows errors into
-    # base-fallback), so it cannot block creation; base-fallback renders as an
-    # STU5-compliance warning in the UI from the moment the job appears.
+    # base-fallback), so it cannot block creation; base-fallback renders in the
+    # UI as a "no type-level $submit-data with bundles" warning from the moment
+    # the job appears.
     submit_data_mode: str | None = None
     if body.workflow == "deqm_submit_data":
         submit_data_mode = await detect_submit_data_mode(
