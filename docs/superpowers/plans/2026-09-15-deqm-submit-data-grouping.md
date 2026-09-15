@@ -467,6 +467,12 @@ class _RecordingGroupWorkflow(SubmissionWorkflow):
         self.groups: list[list[str]] = []
         self.prepared: list[str] = []
 
+    async def transfer_patient(self, cdr_url, patient_id, cdr_auth_headers):
+        # SubmissionWorkflow marks this abstract, so the stub must define it.
+        # Asserting rather than merely satisfying the ABC turns a silent
+        # fallback to the per-patient path into a loud failure.
+        raise AssertionError("the group path must not fall back to transfer_patient")
+
     @property
     def submission_group_size(self) -> int:
         return self._group_size
@@ -1219,6 +1225,11 @@ Append to `backend/tests/test_services_workflows.py`:
 
 ```python
 class TestDeqmGrouping:
+    """These exercise the SETTLED submit path. The pioneer — the first group
+    to submit while the mode is still undecided — belongs to the #414 barrier
+    and is covered separately; settling the event here keeps each test aimed at
+    one mechanism."""
+
     async def _prepare(self, wf, patient_ids):
         subjects = []
         for pid in patient_ids:
@@ -1235,6 +1246,7 @@ class TestDeqmGrouping:
     async def test_a_group_of_n_is_one_post_with_n_bundles(self):
         wf = _deqm_workflow(mode="stu5")
         wf._group_size = 3
+        wf._mode_settled.set()  # past the pioneer
         subjects = await self._prepare(wf, ["p1", "p2", "p3"])
         with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
             outcomes = await wf.submit_prepared(subjects)
@@ -1251,6 +1263,7 @@ class TestDeqmGrouping:
         fail the others."""
         wf = _deqm_workflow(mode="stu5")
         wf._group_size = 2
+        wf._mode_settled.set()  # past the pioneer
         subjects = await self._prepare(wf, ["p1", "p2"])
         with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
             await wf.submit_prepared(subjects)
@@ -1269,6 +1282,7 @@ class TestDeqmGrouping:
         """The regression that would make this PR non-neutral: a size-1 group
         must produce the same single-bundle envelope PR 1 shipped."""
         wf = _deqm_workflow(mode="stu5")
+        wf._mode_settled.set()  # past the pioneer
         subjects = await self._prepare(wf, ["p1"])
         with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
             await wf.submit_prepared(subjects)
@@ -1345,7 +1359,7 @@ Note `_submit_group` currently lets a failure propagate — Task 6 wraps it. Unt
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `cd backend && python3 -m pytest tests/test_services_workflows.py -v`
-Expected: PASS for `TestDeqmGrouping`. Pre-existing size-1 failure tests may now surface the raise; if any fail, that is Task 6's work — note which ones and proceed.
+Expected: PASS — `TestDeqmGrouping` and every pre-existing test. No pre-existing test settles `_mode_settled`, so every one of them routes to the pioneer and none can reach `_submit_group`; its unwrapped failure path is therefore unreachable until Task 6 wraps it. **Do not commit with a red suite.** If something is red, it is a defect in this task, not deferred work for Task 6.
 
 - [ ] **Step 5: Commit**
 
