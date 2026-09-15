@@ -1034,6 +1034,183 @@ async def test_batch_persists_runtime_downgrade_to_job_submit_data_mode(test_ses
     )
 
 
+async def test_a_runtime_downgrade_rewrites_the_stored_group_size_to_one(test_session, session_factory):
+    """base-fallback has no multi-bundle form, so a downgraded job submitted one
+    subject per call. Leaving the column at 20 would make the record claim
+    something that never happened. `bundles_per_submission_requested` records
+    what the operator asked for and must NOT be rewritten."""
+    from app.models.job import Batch, BatchStatus
+    from app.services.fhir_errors import FhirOperationError
+    from app.services.orchestrator import _process_single_batch
+    from app.services.workflows import DeqmSubmitDataWorkflow
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+        workflow="deqm_submit_data",
+        submit_data_mode="stu5",  # the probe's verdict
+        bundles_per_submission=20,
+        bundles_per_submission_requested=20,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    batch = Batch(job_id=job.id, batch_number=1, patient_ids=["p1"], status=BatchStatus.pending)
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    workflow = DeqmSubmitDataWorkflow(
+        job_id=job.id,
+        measure_id="CMS999",
+        mcs_url="http://mcs/fhir",
+        mcs_auth_headers=None,
+        measure_canonical="http://example.org/Measure/CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        mode="stu5",
+    )
+
+    # STU5 is not implemented on this server; base-mode submissions succeed.
+    async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+        if mode == "stu5":
+            raise FhirOperationError(
+                operation="submit-data",
+                url="http://mcs/Measure/$submit-data",
+                status_code=404,
+                outcome=None,
+                latency_ms=5,
+            )
+        return None
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch.object(
+            workflow._strategy,
+            "gather_patient_data",
+            new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}])),
+        ),
+        patch.object(workflow, "ensure_target_prerequisites", new=AsyncMock()),
+        patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={"resourceType": "MeasureReport", "status": "complete", "group": []},
+        ),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
+    ):
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map={"p1": {"resourceType": "Patient", "id": "p1"}},
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+            mcs_url="http://mcs/fhir",
+            workflow=workflow,
+        )
+
+    assert workflow.downgraded is True
+    refreshed = await test_session.get(Job, job.id)
+    await test_session.refresh(refreshed)
+    assert refreshed.submit_data_mode == "base-fallback"
+    assert refreshed.bundles_per_submission == 1
+    assert refreshed.bundles_per_submission_requested == 20  # the request is NOT rewritten
+
+
+async def test_a_job_that_does_not_downgrade_keeps_its_group_size(test_session, session_factory):
+    """A job that settles on stu5 without ever downgrading keeps the group
+    size it was created with — only a runtime downgrade should touch it.
+
+    The job is created with submit_data_mode=None (not "stu5") so that the
+    outer `if settled_mode and job.submit_data_mode != settled_mode:` guard
+    is actually entered once the workflow settles at "stu5" — otherwise this
+    test cannot distinguish "the inner STU5 check protects
+    bundles_per_submission" from "the whole persistence branch never ran at
+    all". With the outer guard entered and settled_mode == SUBMIT_DATA_MODE_STU5,
+    the inner check is the only thing standing between this job and having its
+    bundles_per_submission clobbered to 1 — which is exactly the mutation this
+    test must catch."""
+    from app.models.job import Batch, BatchStatus
+    from app.services.orchestrator import _process_single_batch
+    from app.services.workflows import DeqmSubmitDataWorkflow
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+        workflow="deqm_submit_data",
+        submit_data_mode=None,  # not yet settled — forces the outer guard to run
+        bundles_per_submission=20,
+        bundles_per_submission_requested=20,
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+
+    batch = Batch(job_id=job.id, batch_number=1, patient_ids=["p1"], status=BatchStatus.pending)
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    workflow = DeqmSubmitDataWorkflow(
+        job_id=job.id,
+        measure_id="CMS999",
+        mcs_url="http://mcs/fhir",
+        mcs_auth_headers=None,
+        measure_canonical="http://example.org/Measure/CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        mode="stu5",
+    )
+
+    # STU5 succeeds on this server, so the workflow never downgrades.
+    async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+        return None
+
+    with (
+        _make_session_factory_patch(session_factory),
+        patch.object(
+            workflow._strategy,
+            "gather_patient_data",
+            new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}])),
+        ),
+        patch.object(workflow, "ensure_target_prerequisites", new=AsyncMock()),
+        patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={"resourceType": "MeasureReport", "status": "complete", "group": []},
+        ),
+        patch("app.services.orchestrator.wipe_patient_data", new_callable=AsyncMock),
+        patch("app.services.orchestrator.wipe_patients_by_id", new_callable=AsyncMock),
+    ):
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map={"p1": {"resourceType": "Patient", "id": "p1"}},
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+            mcs_url="http://mcs/fhir",
+            workflow=workflow,
+        )
+
+    assert workflow.downgraded is False
+    refreshed = await test_session.get(Job, job.id)
+    await test_session.refresh(refreshed)
+    # The outer guard DID run (submit_data_mode went from None to "stu5"),
+    # so this assertion is only true because the inner STU5 check blocked
+    # the rewrite — not because the persistence branch was skipped entirely.
+    assert refreshed.submit_data_mode == "stu5"
+    assert refreshed.bundles_per_submission == 20
+
+
 async def test_process_batch_uses_everything_strategy(test_session, session_factory, monkeypatch):
     """DirectLoadWorkflow selects BatchQueryStrategy ($everything) by default;
     _process_single_batch just drives the pre-built workflow it's handed."""
@@ -1808,7 +1985,42 @@ async def test_run_job_passes_job_fields_to_build_submission_workflow(test_sessi
         submit_data_mode="stu5",
         period_start="2024-01-01",
         period_end="2024-12-31",
+        bundles_per_submission=None,
     )
+
+
+async def test_the_jobs_stored_group_size_reaches_the_factory(test_session, session_factory):
+    """The column is inert unless the orchestrator actually forwards it."""
+    job_id = await _setup_job(test_session)
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        job.workflow = "deqm_submit_data"
+        job.bundles_per_submission = 7
+        await session.commit()
+
+    patients = [{"resourceType": "Patient", "id": "p1", "name": [{"family": "Test"}]}]
+    stub = _StubWorkflow(GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]))
+
+    with contextlib.ExitStack() as stack:
+        for p in _run_job_patches(session_factory, patients, stub):
+            stack.enter_context(p)
+        build_mock = stack.enter_context(
+            patch(
+                "app.services.orchestrator.build_submission_workflow",
+                new_callable=AsyncMock,
+                return_value=stub,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.orchestrator.evaluate_measure",
+                new_callable=AsyncMock,
+                return_value={"resourceType": "MeasureReport", "group": []},
+            )
+        )
+        await run_job(job_id)
+
+    assert build_mock.await_args.kwargs["bundles_per_submission"] == 7
 
 
 async def test_run_job_build_submission_workflow_failure_skips_wipe_and_fails_job(test_session, session_factory):

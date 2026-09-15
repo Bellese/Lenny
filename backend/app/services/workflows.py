@@ -14,6 +14,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Literal
 
 from app.config import settings
 from app.services.deqm import (
@@ -158,6 +159,24 @@ class SubjectOutcome:
     patient_id: str
     gather: GatherResult | None = None
     error: TransferPhaseError | None = None
+
+
+@dataclass(frozen=True)
+class _Settlement:
+    """What the pioneer's single POST decided, so the re-sends can happen
+    outside the mode lock (finding M6).
+
+    `action` is one of:
+      "done"         — the group POST succeeded; every subject is good.
+      "resend-base"  — a capability signal; the job downgraded and the group
+                       must be re-sent one subject at a time in base mode.
+      "isolate-stu5" — a payload rejection on a group of more than one; re-send
+                       each subject alone under the settled STU5 mode.
+      "fail"         — one verdict for the whole group; `error` carries it.
+    """
+
+    action: Literal["done", "resend-base", "isolate-stu5", "fail"]
+    error: Exception | None = None
 
 
 def _acquisition_strategy(
@@ -314,8 +333,8 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # to reach the submit step under STU5 becomes the pioneer and is the
         # only one allowed to downgrade. Everyone else waits for its verdict
         # and then submits under the settled mode, with no downgrade path of
-        # their own. One group's submission is therefore serialized; the rest
-        # run fully concurrent as before.
+        # their own. One group's mode-deciding POST is therefore serialized;
+        # its re-sends and every other group run fully concurrent (finding M6).
         #
         # The barrier only engages while the mode is STU5. base-fallback has
         # nowhere to downgrade to, and per the v0.1.0.0 notes every server
@@ -504,14 +523,22 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         if not subjects:
             return []
         if not self._mode_settled.is_set():
+            settlement: _Settlement | None = None
             async with self._mode_lock:
                 if not self._mode_settled.is_set():
                     try:
-                        return await self._settle_mode_and_submit(subjects)
+                        settlement = await self._settle_mode(subjects)
                     finally:
                         # In a finally: a pioneer group that fails outright must
                         # still release every group waiting on its verdict.
                         self._mode_settled.set()
+            # Deliberately outside the `async with`: the re-sends are N
+            # sequential POSTs, and holding the barrier across them would stall
+            # every other chunk for the whole group (finding M6). The mode is
+            # already decided and published at this point, so nothing a waiter
+            # does can race it.
+            if settlement is not None:
+                return await self._apply_settlement(settlement, subjects)
             # Settled by the pioneer while we queued on the lock; fall through
             # and submit under whatever it decided.
         # Re-read the settled mode rather than trusting the size this group was
@@ -548,13 +575,16 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             ]
         return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
 
-    async def _settle_mode_and_submit(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
-        """The pioneer group's submission: the only one that may downgrade (#414).
+    async def _settle_mode(self, subjects: list[PreparedSubject]) -> _Settlement:
+        """Decide the job's wire format with ONE POST. Runs under
+        self._mode_lock with self._mode_settled unset, so it is the single
+        point where the mode is decided (#414).
 
-        Runs under self._mode_lock with self._mode_settled unset, so it is the
-        single point where the job's wire format is decided. The caller sets the
-        event in a finally, so a group that fails outright still releases every
-        group waiting on its verdict.
+        Returns the decision rather than acting on it: the follow-up re-sends
+        are N sequential POSTs, and holding the barrier across them would stall
+        every other chunk for the whole group (finding M6). Writes to self._mode
+        and self._downgraded happen HERE, inside the lock and before the caller
+        sets the event, so a waiter can never observe a half-decided mode.
         """
         parameters = build_stu5_parameters([SubjectBundle(s.measure_report, s.resources) for s in subjects])
         try:
@@ -595,27 +625,36 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
                 self._downgraded = True
                 # Capability first, isolation second, never both: base-fallback
                 # has no multi-bundle form, so this is a re-send, not a retry.
-                return await self._submit_individually(subjects, SUBMIT_DATA_MODE_BASE)
+                return _Settlement("resend-base")
             if len(subjects) > 1 and _is_payload_attributable(exc):
-                return await self._submit_individually(subjects, SUBMIT_DATA_MODE_STU5)
-            return [
-                SubjectOutcome(
-                    patient_id=s.patient_id,
-                    gather=s.gather,
-                    error=TransferPhaseError("submit", exc),
-                )
-                for s in subjects
-            ]
+                return _Settlement("isolate-stu5")
+            return _Settlement("fail", exc)
         except Exception as exc:  # noqa: BLE001 - an outcome, not a raise, is the contract
+            return _Settlement("fail", exc)
+        return _Settlement("done")
+
+    async def _apply_settlement(self, settlement: _Settlement, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
+        """Carry out what _settle_mode decided, OUTSIDE the mode lock.
+
+        Every branch returns exactly one outcome per subject — losing one here
+        would silently drop a patient from the job's counters.
+        """
+        if settlement.action == "resend-base":
+            return await self._submit_individually(subjects, SUBMIT_DATA_MODE_BASE)
+        if settlement.action == "isolate-stu5":
+            return await self._submit_individually(subjects, SUBMIT_DATA_MODE_STU5)
+        if settlement.action == "fail":
             return [
                 SubjectOutcome(
                     patient_id=s.patient_id,
                     gather=s.gather,
-                    error=TransferPhaseError("submit", exc),
+                    error=TransferPhaseError("submit", settlement.error),
                 )
                 for s in subjects
             ]
-        return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
+        if settlement.action == "done":
+            return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
+        raise AssertionError(settlement.action)  # pragma: no cover - Literal makes this unreachable
 
 
 async def build_submission_workflow(
@@ -628,6 +667,7 @@ async def build_submission_workflow(
     submit_data_mode: str | None,
     period_start: str,
     period_end: str,
+    bundles_per_submission: int | None = None,
 ) -> SubmissionWorkflow:
     """Build the job's workflow. For DEQM, fetches the measure canonical from
     the MCS — raising (job fails fast) when the Measure can't be read, or when
@@ -680,5 +720,8 @@ async def build_submission_workflow(
             period_start=period_start,
             period_end=period_end,
             mode=resolved_mode,
+            # None is a row created before #413 PR 3 added the column; those
+            # jobs submitted one subject per POST, so that is what None means.
+            group_size=bundles_per_submission or 1,
         )
     return DirectLoadWorkflow(measure_id, mcs_url, mcs_auth_headers)

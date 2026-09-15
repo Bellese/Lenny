@@ -240,6 +240,11 @@ async def _run_schema_migrations(conn) -> None:
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS mcs_wipe_before_job BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS workflow VARCHAR(32) NOT NULL DEFAULT 'direct_load'",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS submit_data_mode VARCHAR(32)",
+            # Issue #413 PR 3. NULL on existing rows is correct: every job
+            # created before this column existed ran one subject per POST, and
+            # NULL renders as "not applicable" rather than as a number nobody chose.
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS bundles_per_submission INTEGER",
+            "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS bundles_per_submission_requested INTEGER",
             "ALTER TABLE validation_runs ADD COLUMN IF NOT EXISTS delete_requested BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS started_at TIMESTAMPTZ",
             "ALTER TABLE validation_runs ADD COLUMN IF NOT EXISTS mcs_id INTEGER "

@@ -20,6 +20,7 @@ from app.dependencies import resolve_job_mcs_auth_headers
 from app.models.config import CDRConfig
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
 from app.services.fhir_client import (
+    SUBMIT_DATA_MODE_STU5,
     BatchQueryStrategy,
     FhirOperationError,
     _build_auth_headers,
@@ -195,6 +196,7 @@ async def run_job(job_id: int) -> None:
             job_measure_id = job_row.measure_id
             job_period_start = job_row.period_start
             job_period_end = job_row.period_end
+            job_bundles_per_submission = job_row.bundles_per_submission
 
         if group_id:
             logger.info("Gathering patients from Group", extra={"job_id": job_id, "group_id": group_id})
@@ -237,6 +239,7 @@ async def run_job(job_id: int) -> None:
             submit_data_mode=job_submit_data_mode,
             period_start=job_period_start,
             period_end=job_period_end,
+            bundles_per_submission=job_bundles_per_submission,
         )
 
         # Step 4a: Clear the prior run's data off the MCS (issue #392).
@@ -1007,6 +1010,14 @@ async def _process_single_batch(
                             },
                         )
                         job.submit_data_mode = settled_mode
+                        # base-fallback has no multi-bundle form, so a
+                        # downgraded job submitted one subject per call no
+                        # matter what was chosen. The requested column is
+                        # deliberately NOT touched: it records what the operator
+                        # asked for, and the creation form reads it back as the
+                        # remembered preference.
+                        if settled_mode != SUBMIT_DATA_MODE_STU5 and job.bundles_per_submission not in (None, 1):
+                            job.bundles_per_submission = 1
                     await session.commit()
 
             return  # Success — exit retry loop

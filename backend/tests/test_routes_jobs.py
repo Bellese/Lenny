@@ -1,11 +1,26 @@
 """Tests for job endpoints (POST /jobs, GET /jobs, GET /jobs/{id}, POST /jobs/{id}/cancel)."""
 
+import logging
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
 
+from app.config import settings
+from app.routes.jobs import _effective_bundles_per_submission
+from app.services.fhir_client import SubmitDataCapability
+
 pytestmark = pytest.mark.asyncio
+
+
+def _valid_job_body() -> dict:
+    return {
+        "measure_id": "measure-1",
+        "measure_name": "Test Measure",
+        "period_start": "2024-01-01",
+        "period_end": "2024-12-31",
+        "cdr_url": "https://example.com/fhir",
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +60,16 @@ async def test_create_job_valid(client):
     assert data["id"] is not None
     assert "cdr_name" in data
     assert "cdr_read_only" in data
+
+
+async def test_job_response_carries_both_bundle_columns_as_null_by_default(client):
+    """A direct_load job contributes no bundles-per-submission value at all:
+    both columns are NULL, and the response says so rather than inventing a 1."""
+    resp = await client.post("/jobs", json=_valid_job_body())
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["bundles_per_submission"] is None
+    assert body["bundles_per_submission_requested"] is None
 
 
 async def test_create_job_ssrf_cdr_url_blocked(client):
@@ -1564,7 +1589,10 @@ class TestJobWorkflowSelection:
         assert resp.status_code == 422
 
     async def test_deqm_job_records_probe_result(self, client, measure_present):
-        with patch("app.routes.jobs.detect_submit_data_mode", new=AsyncMock(return_value="base-fallback")) as probe:
+        with patch(
+            "app.routes.jobs.detect_submit_data_capability",
+            new=AsyncMock(return_value=SubmitDataCapability(mode="base-fallback")),
+        ) as probe:
             resp = await client.post(
                 "/jobs",
                 json={
@@ -1581,7 +1609,7 @@ class TestJobWorkflowSelection:
         probe.assert_awaited_once()
 
     async def test_direct_load_job_skips_probe(self, client, measure_present):
-        with patch("app.routes.jobs.detect_submit_data_mode", new=AsyncMock()) as probe:
+        with patch("app.routes.jobs.detect_submit_data_capability", new=AsyncMock()) as probe:
             resp = await client.post(
                 "/jobs",
                 json={
@@ -1593,3 +1621,155 @@ class TestJobWorkflowSelection:
             )
         assert resp.status_code == 201
         probe.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "requested,bundle_max,chunk,expected",
+    [
+        (None, None, 100, 1),  # said nothing -> conservative default
+        (0, None, 100, 100),  # explicit "unlimited" -> the chunk
+        (5, None, 100, 5),  # under every ceiling -> honoured
+        (500, None, 100, 100),  # above the chunk -> clamped to the chunk
+        (50, 1, 100, 1),  # server says max 1 -> clamped to 1
+        (50, 10, 100, 10),  # server ceiling bites before the chunk
+        (0, 10, 100, 10),  # "unlimited" still respects the server
+        (5, 10, 3, 3),  # chunk is the tightest ceiling
+    ],
+)
+def test_effective_bundles_per_submission(requested, bundle_max, chunk, expected):
+    assert _effective_bundles_per_submission(requested, bundle_max, chunk) == expected
+
+
+def test_zero_and_none_are_not_the_same_request():
+    """`or` on an integer would merge them. 0 is an explicit 'every subject in
+    the chunk'; None is 'the caller said nothing' and must stay conservative."""
+    assert _effective_bundles_per_submission(0, None, 100) == 100
+    assert _effective_bundles_per_submission(None, None, 100) == 1
+
+
+async def test_negative_bundles_per_submission_is_rejected(client):
+    body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": -1}
+    resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 422
+
+
+async def test_non_integer_bundles_per_submission_is_rejected(client):
+    body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": "lots"}
+    resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 422
+
+
+async def test_a_later_job_does_not_rewrite_an_earlier_jobs_record(client):
+    """Each job's row is a snapshot of what THAT job did. With the preference
+    living on the job rows rather than in a settings table, this is structural
+    rather than enforced — the test is what stops a future refactor from
+    reintroducing a shared mutable default that back-writes history."""
+    with patch(
+        "app.routes.jobs.detect_submit_data_capability",
+        AsyncMock(return_value=SubmitDataCapability(mode="stu5", bundle_max=None)),
+    ):
+        first = await client.post(
+            "/jobs", json={**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 5}
+        )
+        assert first.status_code == 201
+        second = await client.post(
+            "/jobs", json={**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 40}
+        )
+        assert second.status_code == 201
+    reread = await client.get(f"/jobs/{first.json()['id']}")
+    assert reread.status_code == 200
+    assert reread.json()["bundles_per_submission"] == 5
+    assert reread.json()["bundles_per_submission_requested"] == 5
+
+
+async def test_direct_load_job_stores_neither_value(client):
+    body = {**_valid_job_body(), "workflow": "direct_load", "bundles_per_submission": 20}
+    resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["bundles_per_submission"] is None
+    assert resp.json()["bundles_per_submission_requested"] is None
+
+
+async def test_a_clamped_request_is_logged_with_its_reason(client, caplog):
+    """A silently reduced group size is unexplainable in the field. The log
+    line is the only place the operator's 50 and the server's 1 appear together."""
+    with patch(
+        "app.routes.jobs.detect_submit_data_capability",
+        AsyncMock(return_value=SubmitDataCapability(mode="stu5", bundle_max=1)),
+    ):
+        body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 50}
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["bundles_per_submission"] == 1
+    assert resp.json()["bundles_per_submission_requested"] == 50
+    assert any("bundles per submission" in m.lower() for m in caplog.messages)
+
+
+async def test_an_explicit_zero_clamped_down_by_the_server_is_logged(client, caplog):
+    """An explicit `0` ("as many as fit in the chunk") resolves UP to
+    BATCH_SIZE before any ceiling applies. If the server's `bundle_max` then
+    clamps that DOWN, the operator silently got far fewer bundles per POST
+    than "as many as fit" implied, and needs the same explanation a nonzero
+    request gets. Comparing against the raw `0` (as opposed to the resolved
+    candidate) would miss this reduction entirely."""
+    with patch(
+        "app.routes.jobs.detect_submit_data_capability",
+        AsyncMock(return_value=SubmitDataCapability(mode="stu5", bundle_max=10)),
+    ):
+        body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 0}
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["bundles_per_submission"] == 10
+    assert resp.json()["bundles_per_submission_requested"] == 0
+    assert any("bundles per submission" in m.lower() for m in caplog.messages)
+
+
+async def test_an_explicit_zero_with_no_server_max_logs_nothing(client, caplog):
+    """Resolving `0` UP to the chunk size is not a reduction — it is exactly
+    what "as many as fit" asked for. This is the case the `!= 0` guard in the
+    original logging condition existed to protect, and is what stops a future
+    edit from making the warning fire on every unlimited request."""
+    with patch(
+        "app.routes.jobs.detect_submit_data_capability",
+        AsyncMock(return_value=SubmitDataCapability(mode="stu5", bundle_max=None)),
+    ):
+        body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 0}
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["bundles_per_submission"] == settings.BATCH_SIZE  # resolved up, unclamped
+    assert resp.json()["bundles_per_submission_requested"] == 0
+    assert not any("bundles per submission" in m.lower() for m in caplog.messages)
+
+
+async def test_base_fallback_mode_forces_effective_group_size_to_one(client, caplog):
+    """base-fallback has no multi-bundle envelope: DeqmSubmitDataWorkflow always
+    collapses to a group size of 1 outside STU5. A requested 50 must not be
+    stored as the effective value merely because no server `bundle_max` caught
+    it — the job would then run at 1 while its own record claims 50."""
+    with patch(
+        "app.routes.jobs.detect_submit_data_capability",
+        AsyncMock(return_value=SubmitDataCapability(mode="base-fallback", bundle_max=None)),
+    ):
+        body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 50}
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["bundles_per_submission"] == 1
+    assert resp.json()["bundles_per_submission_requested"] == 50
+    assert any("bundles per submission" in m.lower() for m in caplog.messages)
+
+
+async def test_stu5_mode_is_not_clamped_to_one(client):
+    """Guards against a fix that clamps every job to 1 regardless of mode."""
+    with patch(
+        "app.routes.jobs.detect_submit_data_capability",
+        AsyncMock(return_value=SubmitDataCapability(mode="stu5", bundle_max=None)),
+    ):
+        body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 50}
+        resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["bundles_per_submission"] == 50
+    assert resp.json()["bundles_per_submission_requested"] == 50

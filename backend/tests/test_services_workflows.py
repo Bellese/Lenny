@@ -7,7 +7,13 @@ import pytest
 
 from app.config import settings
 from app.services.deqm import LENNY_REPORTER_ORG
-from app.services.fhir_client import BatchQueryStrategy, DataRequirementsStrategy, GatherResult
+from app.services.fhir_client import (
+    SUBMIT_DATA_MODE_BASE,
+    SUBMIT_DATA_MODE_STU5,
+    BatchQueryStrategy,
+    DataRequirementsStrategy,
+    GatherResult,
+)
 from app.services.fhir_errors import FhirOperationError, FhirOperationOutcome
 from app.services.workflows import (
     DeqmSubmitDataWorkflow,
@@ -1230,7 +1236,7 @@ class TestGroupFailureIsolation:
         assert all(isinstance(o.error.cause, asyncio.TimeoutError) for o in outcomes)
 
     async def test_isolation_never_downgrades(self):
-        """Only _settle_mode_and_submit may change the mode (#414). A settled
+        """Only _settle_mode may change the mode (#414). A settled
         group that isolates must leave the job's wire format alone."""
         wf = self._settled_stu5(2)
         subjects = await self._prepare(wf, ["p1", "p2"])
@@ -1347,12 +1353,12 @@ class TestPioneerGroup:
 
     async def test_the_barrier_releases_even_when_the_pioneer_group_fails(self):
         """A pioneer group whose submission fails must still publish a verdict
-        and release every waiter: `_settle_mode_and_submit` catches the failure
-        and turns it into error outcomes, then sets `_mode_settled` on that
-        normal-return path, so other groups never wait forever on a verdict
-        that never arrives. (The `finally` this method also has covers the
-        raise path, not this one — removing `.set()` itself still fails five
-        other tests, so it stays well covered.)"""
+        and release every waiter: `_settle_mode` catches the failure and turns
+        it into a "fail" _Settlement, then submit_prepared's `finally` sets
+        `_mode_settled` on that normal-return path, so other groups never wait
+        forever on a verdict that never arrives. (That `finally` also covers
+        the raise path, not this one — removing `.set()` itself still fails
+        five other tests, so it stays well covered.)"""
         wf = self._pioneer(2)
         subjects = await self._prepare(wf, ["p1", "p2"])
         with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(503))):
@@ -1386,6 +1392,84 @@ class TestPioneerGroup:
         assert modes.count("stu5") == 1, "only the pioneer may attempt STU5"
         assert wf.mode == "base-fallback"
         assert all(m == "base-fallback" for m in modes[1:])
+
+
+class TestPioneerReleasesTheBarrierEarly:
+    async def _prepare(self, wf, patient_ids):
+        subjects = []
+        for pid in patient_ids:
+            with patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": pid}])),
+            ):
+                subjects.append(await wf.prepare_patient("http://cdr", pid, {}))
+        return subjects
+
+    def _pioneer(self, group_size: int) -> DeqmSubmitDataWorkflow:
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = group_size
+        return wf  # _mode_settled is unset: this group IS the pioneer
+
+    async def test_the_barrier_opens_after_the_pioneers_first_post_not_its_last(self):
+        """Finding M6. The pioneer's re-sends must happen outside _mode_lock:
+        a downgrading group of N otherwise blocks every other chunk for N
+        sequential round trips, which is only reachable once operators can
+        select N (#413 PR 3)."""
+        wf = self._pioneer(3)
+        subjects = await self._prepare(wf, ["p0", "p1", "p2"])
+        posts: list[str] = []
+        barrier_open_after: list[int] = []
+
+        async def _post(parameters, mode):
+            posts.append(mode)
+            if len(posts) == 1:
+                raise FhirOperationError(
+                    operation="submit-data", url="http://mcs", status_code=404, outcome=None, latency_ms=1
+                )
+            # By the time a re-send runs, a waiter must already be admissible.
+            if not wf._mode_lock.locked():
+                barrier_open_after.append(len(posts))
+
+        wf._post = AsyncMock(side_effect=_post)
+        outcomes = await wf.submit_prepared(subjects)
+
+        assert len(outcomes) == 3
+        assert posts[0] == SUBMIT_DATA_MODE_STU5
+        assert posts[1:] == [SUBMIT_DATA_MODE_BASE] * 3
+        # The lock was already free on the FIRST re-send, i.e. post #2.
+        assert barrier_open_after and barrier_open_after[0] == 2
+
+    async def test_the_mode_is_already_decided_when_the_barrier_opens(self):
+        """#414 must survive the narrowing: self._mode and self._downgraded are
+        written inside the lock, before the event is set, so no POST can ever
+        observe an open barrier next to a half-decided mode."""
+        wf = self._pioneer(2)
+        subjects = await self._prepare(wf, ["a", "b"])
+        calls: list[int] = []
+
+        async def _post(parameters, mode):
+            calls.append(len(calls))
+            if len(calls) == 1:
+                # The pioneer POST, still inside the lock, still undecided.
+                raise FhirOperationError(
+                    operation="submit-data", url="http://mcs", status_code=404, outcome=None, latency_ms=1
+                )
+            # Every later POST is a re-send running outside the lock. If the
+            # barrier is open, the decision must already be visible and final.
+            assert wf._mode_settled.is_set()
+            assert wf.mode == SUBMIT_DATA_MODE_BASE
+            assert wf.downgraded is True
+            assert mode == SUBMIT_DATA_MODE_BASE
+
+        wf._post = AsyncMock(side_effect=_post)
+        outcomes = await wf.submit_prepared(subjects)
+
+        assert len(calls) == 3  # one pioneer POST, then one re-send per subject
+        assert len(outcomes) == 2
+        assert all(o.error is None for o in outcomes)
+        assert wf.mode == SUBMIT_DATA_MODE_BASE
+        assert wf.downgraded is True
 
 
 class TestCrossChunkSafety:
@@ -1481,3 +1565,57 @@ class TestDedupeAcrossModes:
         base = [s for s in sent if s["mode"] == "base-fallback"][0]["parameters"]
         resources = [p["resource"] for p in base["parameter"] if p["name"] == "resource"]
         assert [(r["resourceType"], r["id"]) for r in resources] == [("Patient", "p1"), ("Condition", "c1")]
+
+
+class TestGroupSizeThreading:
+    async def test_factory_passes_the_stored_value_to_the_workflow(self):
+        with patch(
+            "app.services.workflows.get_measure_canonical",
+            AsyncMock(return_value="http://example.org/Measure/CMS999"),
+        ):
+            wf = await build_submission_workflow(
+                workflow="deqm_submit_data",
+                job_id=1,
+                measure_id="CMS999",
+                mcs_url="http://mcs",
+                mcs_auth_headers=None,
+                submit_data_mode=SUBMIT_DATA_MODE_STU5,
+                period_start="2025-01-01",
+                period_end="2025-12-31",
+                bundles_per_submission=20,
+            )
+        assert wf.submission_group_size == 20
+
+    async def test_a_legacy_null_resolves_to_one(self):
+        """Rows created before the column existed read as None. One subject per
+        POST is what those jobs actually did, so that is what None must mean."""
+        with patch(
+            "app.services.workflows.get_measure_canonical",
+            AsyncMock(return_value="http://example.org/Measure/CMS999"),
+        ):
+            wf = await build_submission_workflow(
+                workflow="deqm_submit_data",
+                job_id=1,
+                measure_id="CMS999",
+                mcs_url="http://mcs",
+                mcs_auth_headers=None,
+                submit_data_mode=SUBMIT_DATA_MODE_STU5,
+                period_start="2025-01-01",
+                period_end="2025-12-31",
+                bundles_per_submission=None,
+            )
+        assert wf.submission_group_size == 1
+
+    async def test_direct_load_ignores_the_value_entirely(self):
+        wf = await build_submission_workflow(
+            workflow="direct_load",
+            job_id=1,
+            measure_id="CMS999",
+            mcs_url="http://mcs",
+            mcs_auth_headers=None,
+            submit_data_mode=None,
+            period_start="2025-01-01",
+            period_end="2025-12-31",
+            bundles_per_submission=50,
+        )
+        assert wf.submission_group_size == 1
