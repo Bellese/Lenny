@@ -493,6 +493,97 @@ async def _get_mcs_url(job_id: int) -> str:
     return settings.MEASURE_ENGINE_URL
 
 
+async def _record_transfer_failure(
+    *,
+    job_id: int,
+    batch_id: int,
+    patient_id: str,
+    patient_map: dict[str, dict[str, Any]],
+    exc: Exception,
+) -> bool:
+    """Persist one patient's Phase-1 transfer failure as a MeasureResult row.
+
+    Extracted so a gather failure (raised by prepare_patient) and a submit
+    failure (returned as a SubjectOutcome) reach the database by exactly the
+    same path — with grouping, those are two different call sites for what must
+    remain one behavior.
+
+    Returns False when the job was stopped before the row was written; the
+    caller returns without counting the failure, which is what the inline
+    version did.
+    """
+    if isinstance(exc, TransferPhaseError):
+        error_phase = exc.phase
+        push_exc: Exception = exc.cause
+    else:
+        error_phase = "gather"
+        push_exc = exc
+    patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
+    sanitized_msg = sanitize_error(push_exc)
+    error_details: dict[str, Any] = {"operation": error_phase, "error": sanitized_msg}
+    if isinstance(push_exc, FhirOperationError):
+        error_details["url"] = push_exc.url
+        error_details["status_code"] = push_exc.status_code
+        error_details["latency_ms"] = push_exc.latency_ms
+        if push_exc.outcome:
+            error_details["raw_outcome"] = redact_outcome(push_exc.outcome.raw)
+    error_report = _error_measure_report(
+        patient_id,
+        push_exc,
+        push_exc.outcome.raw if isinstance(push_exc, FhirOperationError) and push_exc.outcome else None,
+    )
+    populations = {
+        "initial_population": False,
+        "denominator": False,
+        "numerator": False,
+        "denominator_exclusion": False,
+        "numerator_exclusion": False,
+        "error": True,
+        "error_message": sanitized_msg,
+        "error_phase": error_phase,
+    }
+    logger.warning(
+        "Failed to transfer patient data",
+        extra={
+            "job_id": job_id,
+            "batch_id": batch_id,
+            "patient_id": patient_id,
+            "error": sanitized_msg,
+            "error_phase": error_phase,
+        },
+    )
+    if await _stop_or_delete_job(job_id):
+        return False
+    async with async_session() as session:
+        existing_row = (
+            await session.execute(
+                select(MeasureResult).where(
+                    MeasureResult.job_id == job_id,
+                    MeasureResult.patient_id == patient_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_row:
+            existing_row.measure_report = error_report
+            existing_row.populations = populations
+            existing_row.error_details = error_details
+            existing_row.error_phase = error_phase
+        else:
+            session.add(
+                MeasureResult(
+                    job_id=job_id,
+                    patient_id=patient_id,
+                    patient_name=patient_name,
+                    measure_report=error_report,
+                    populations=populations,
+                    error_details=error_details,
+                    error_phase=error_phase,
+                )
+            )
+        await session.commit()
+    return True
+
+
 async def _process_single_batch(
     job_id: int,
     batch_id: int,
@@ -606,83 +697,15 @@ async def _process_single_batch(
                         )
 
                 except Exception as transfer_exc:
-                    if isinstance(transfer_exc, TransferPhaseError):
-                        error_phase = transfer_exc.phase
-                        push_exc: Exception = transfer_exc.cause
-                    else:
-                        error_phase = "gather"
-                        push_exc = transfer_exc
                     gather_failed_patients.add(patient_id)
-                    patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
-                    sanitized_msg = sanitize_error(push_exc)
-                    error_details: dict[str, Any] = {"operation": error_phase, "error": sanitized_msg}
-                    if isinstance(push_exc, FhirOperationError):
-                        error_details["url"] = push_exc.url
-                        error_details["status_code"] = push_exc.status_code
-                        error_details["latency_ms"] = push_exc.latency_ms
-                        if push_exc.outcome:
-                            error_details["raw_outcome"] = redact_outcome(push_exc.outcome.raw)
-                    error_report = _error_measure_report(
-                        patient_id,
-                        push_exc,
-                        push_exc.outcome.raw if isinstance(push_exc, FhirOperationError) and push_exc.outcome else None,
-                    )
-                    logger.warning(
-                        "Failed to transfer patient data",
-                        extra={
-                            "job_id": job_id,
-                            "batch_id": batch_id,
-                            "patient_id": patient_id,
-                            "error": sanitized_msg,
-                            "error_phase": error_phase,
-                        },
-                    )
-                    if await _stop_or_delete_job(job_id):
+                    if not await _record_transfer_failure(
+                        job_id=job_id,
+                        batch_id=batch_id,
+                        patient_id=patient_id,
+                        patient_map=patient_map,
+                        exc=transfer_exc,
+                    ):
                         return
-                    async with async_session() as session:
-                        existing_row = (
-                            await session.execute(
-                                select(MeasureResult).where(
-                                    MeasureResult.job_id == job_id,
-                                    MeasureResult.patient_id == patient_id,
-                                )
-                            )
-                        ).scalar_one_or_none()
-                        if existing_row:
-                            existing_row.measure_report = error_report
-                            existing_row.populations = {
-                                "initial_population": False,
-                                "denominator": False,
-                                "numerator": False,
-                                "denominator_exclusion": False,
-                                "numerator_exclusion": False,
-                                "error": True,
-                                "error_message": sanitized_msg,
-                                "error_phase": error_phase,
-                            }
-                            existing_row.error_details = error_details
-                            existing_row.error_phase = error_phase
-                        else:
-                            result = MeasureResult(
-                                job_id=job_id,
-                                patient_id=patient_id,
-                                patient_name=patient_name,
-                                measure_report=error_report,
-                                populations={
-                                    "initial_population": False,
-                                    "denominator": False,
-                                    "numerator": False,
-                                    "denominator_exclusion": False,
-                                    "numerator_exclusion": False,
-                                    "error": True,
-                                    "error_message": sanitized_msg,
-                                    "error_phase": error_phase,
-                                },
-                                error_details=error_details,
-                                error_phase=error_phase,
-                            )
-                            session.add(result)
-                        await session.commit()
                     failed += 1
 
             if await _stop_or_delete_job(job_id):
