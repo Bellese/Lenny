@@ -12,6 +12,9 @@ from app.services.fhir_errors import FhirOperationError, FhirOperationOutcome
 from app.services.workflows import (
     DeqmSubmitDataWorkflow,
     DirectLoadWorkflow,
+    PreparedSubject,
+    SubjectOutcome,
+    SubmissionWorkflow,
     TransferPhaseError,
     _acquisition_strategy,
     build_submission_workflow,
@@ -869,3 +872,612 @@ class TestBuildSubmissionWorkflow:
                     period_start="2025-01-01",
                     period_end="2025-12-31",
                 )
+
+
+class TestGroupProtocolDefaults:
+    """The base-class defaults are what keep every pre-grouping workflow
+    working under the new protocol. A workflow that implements only
+    transfer_patient — which is every workflow in the codebase before this
+    PR, and _StubWorkflow in the orchestrator tests — must still transfer
+    correctly when the orchestrator drives it through prepare/submit."""
+
+    class _OnlyTransferPatient(SubmissionWorkflow):
+        name = "only-transfer"
+
+        def __init__(self, outcome):
+            self.outcome = outcome
+            self.calls: list[tuple[str, str, dict]] = []
+
+        async def transfer_patient(self, cdr_url, patient_id, cdr_auth_headers):
+            self.calls.append((cdr_url, patient_id, cdr_auth_headers))
+            if isinstance(self.outcome, Exception):
+                raise self.outcome
+            return self.outcome
+
+    async def test_default_group_size_is_one(self):
+        wf = self._OnlyTransferPatient(_GATHER)
+        assert wf.submission_group_size == 1
+
+    async def test_default_prepare_does_no_io_and_carries_cdr_coordinates(self):
+        """The default defers the whole transfer, so it must hand
+        submit_prepared the CDR arguments transfer_patient will need."""
+        wf = self._OnlyTransferPatient(_GATHER)
+        subject = await wf.prepare_patient("http://cdr", "p1", {"Authorization": "Bearer t"})
+        assert wf.calls == [], "the default prepare_patient must not touch the CDR"
+        assert isinstance(subject, PreparedSubject)
+        assert subject.patient_id == "p1"
+        assert subject.cdr_url == "http://cdr"
+        assert subject.cdr_auth_headers == {"Authorization": "Bearer t"}
+
+    async def test_default_submit_delegates_to_transfer_patient(self):
+        wf = self._OnlyTransferPatient(_GATHER)
+        subject = await wf.prepare_patient("http://cdr", "p1", {})
+        outcomes = await wf.submit_prepared([subject])
+        assert wf.calls == [("http://cdr", "p1", {})]
+        assert len(outcomes) == 1
+        assert isinstance(outcomes[0], SubjectOutcome)
+        assert outcomes[0].patient_id == "p1"
+        assert outcomes[0].gather is _GATHER
+        assert outcomes[0].error is None
+
+    async def test_default_submit_returns_the_failure_instead_of_raising(self):
+        """submit_prepared's contract is one outcome per subject. Raising
+        would abort the whole group for one subject's failure — the exact
+        thing the outcome list exists to prevent."""
+        boom = TransferPhaseError("gather", RuntimeError("cdr down"))
+        wf = self._OnlyTransferPatient(boom)
+        subject = await wf.prepare_patient("http://cdr", "p1", {})
+        outcomes = await wf.submit_prepared([subject])
+        assert outcomes[0].error is boom
+        assert outcomes[0].error.phase == "gather"
+        assert outcomes[0].gather is None
+
+    async def test_default_submit_wraps_a_bare_exception_as_a_gather_failure(self):
+        """A workflow that raises something other than TransferPhaseError must
+        still produce an outcome the orchestrator can persist. 'gather' is the
+        historical label for an unclassified transfer failure."""
+        wf = self._OnlyTransferPatient(ValueError("nope"))
+        subject = await wf.prepare_patient("http://cdr", "p1", {})
+        outcomes = await wf.submit_prepared([subject])
+        assert isinstance(outcomes[0].error, TransferPhaseError)
+        assert outcomes[0].error.phase == "gather"
+        assert isinstance(outcomes[0].error.cause, ValueError)
+
+    async def test_default_submit_isolates_failures_across_subjects(self):
+        """One subject failing must not deny the others their outcome."""
+
+        class _Selective(SubmissionWorkflow):
+            name = "selective"
+
+            async def transfer_patient(self, cdr_url, patient_id, cdr_auth_headers):
+                if patient_id == "p2":
+                    raise TransferPhaseError("submit", RuntimeError("bad"))
+                return _GATHER
+
+        wf = _Selective()
+        subjects = [await wf.prepare_patient("http://cdr", pid, {}) for pid in ("p1", "p2", "p3")]
+        outcomes = await wf.submit_prepared(subjects)
+        assert [o.patient_id for o in outcomes] == ["p1", "p2", "p3"]
+        assert [o.error is None for o in outcomes] == [True, False, True]
+
+    async def test_direct_load_works_through_the_group_protocol(self):
+        """DirectLoadWorkflow gains no lines in this PR; it must transfer
+        correctly purely via the inherited defaults."""
+        wf = DirectLoadWorkflow("M1", "http://mcs", {"Authorization": "Bearer t"})
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.push_resources", new=AsyncMock()) as push,
+        ):
+            subject = await wf.prepare_patient("http://cdr", "p1", {})
+            outcomes = await wf.submit_prepared([subject])
+        assert wf.submission_group_size == 1
+        push.assert_awaited_once()
+        assert outcomes[0].error is None
+        assert outcomes[0].gather is _GATHER
+
+
+class TestDeqmPrepareAndSubmit:
+    async def test_prepare_does_the_cdr_work_and_no_mcs_io(self):
+        wf = _deqm_workflow(mode="stu5")
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=AsyncMock()) as submit,
+        ):
+            subject = await wf.prepare_patient("http://cdr", "p1", {})
+        submit.assert_not_awaited()
+        assert subject.patient_id == "p1"
+        assert subject.gather is _GATHER
+        assert subject.measure_report["id"] == "deqm-7-p1"
+        assert [r["id"] for r in subject.resources] == ["p1", "c1"]
+
+    async def test_prepare_wraps_a_gather_failure_as_a_raise(self):
+        """prepare_patient raises rather than returning an outcome: a gather
+        failure must not be collected into the group it was destined for."""
+        wf = _deqm_workflow()
+        with patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(side_effect=RuntimeError("cdr down"))):
+            with pytest.raises(TransferPhaseError) as caught:
+                await wf.prepare_patient("http://cdr", "p1", {})
+        assert caught.value.phase == "gather"
+
+    async def test_default_group_size_is_one(self):
+        assert _deqm_workflow(mode="stu5").submission_group_size == 1
+
+    async def test_group_size_collapses_to_one_outside_stu5(self):
+        """base-fallback has no multi-bundle form, so the size must read 1 no
+        matter what was configured."""
+        wf = _deqm_workflow(mode="base-fallback")
+        wf._group_size = 5
+        assert wf.submission_group_size == 1
+
+    async def test_transfer_patient_still_raises_on_a_submit_failure(self):
+        """The one-subject entry point keeps its raising contract; only
+        submit_prepared returns outcomes."""
+        wf = _deqm_workflow()
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch(
+                "app.services.workflows.submit_data",
+                new=AsyncMock(side_effect=_fhir_op_error(500)),
+            ),
+        ):
+            with pytest.raises(TransferPhaseError) as caught:
+                await wf.transfer_patient("http://cdr", "p1", {})
+        assert caught.value.phase == "submit"
+
+    async def test_a_single_subject_group_does_not_isolate(self):
+        """Isolation resubmits subjects one at a time. With one subject there
+        is nothing to isolate, and retrying would POST twice where PR 1 posts
+        once — which is what 'byte-identical at size 1' means."""
+        wf = _deqm_workflow(mode="stu5")
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch(
+                "app.services.workflows.submit_data",
+                new=AsyncMock(side_effect=_fhir_op_error(400)),
+            ) as submit,
+        ):
+            subject = await wf.prepare_patient("http://cdr", "p1", {})
+            outcomes = await wf.submit_prepared([subject])
+        assert submit.await_count == 1
+        assert outcomes[0].error is not None
+        assert outcomes[0].error.phase == "submit"
+
+
+class TestDeqmGrouping:
+    """These exercise the SETTLED submit path. The pioneer — the first group
+    to submit while the mode is still undecided — belongs to the #414 barrier
+    and is covered separately; settling the event here keeps each test aimed at
+    one mechanism."""
+
+    async def _prepare(self, wf, patient_ids):
+        subjects = []
+        for pid in patient_ids:
+            with patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": pid}])),
+            ):
+                subjects.append(await wf.prepare_patient("http://cdr", pid, {}))
+        return subjects
+
+    async def test_a_group_of_n_is_one_post_with_n_bundles(self):
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = 3
+        wf._mode_settled.set()  # past the pioneer
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        submit.assert_awaited_once()
+        params = submit.call_args.kwargs["parameters"]
+        assert submit.call_args.kwargs["mode"] == "stu5"
+        assert [p["name"] for p in params["parameter"]] == ["bundle", "bundle", "bundle"]
+        assert [o.patient_id for o in outcomes] == ["p1", "p2", "p3"]
+        assert all(o.error is None for o in outcomes)
+
+    async def test_each_bundle_holds_exactly_one_subject(self):
+        """Several subjects never share a Bundle: the receiver processes each
+        as a transaction, so merging them would make one subject's bad resource
+        fail the others."""
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = 2
+        wf._mode_settled.set()  # past the pioneer
+        subjects = await self._prepare(wf, ["p1", "p2"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            await wf.submit_prepared(subjects)
+        bundles = [p["resource"] for p in submit.call_args.kwargs["parameters"]["parameter"]]
+        for bundle, pid in zip(bundles, ["p1", "p2"]):
+            assert bundle["type"] == "collection"
+            mr = bundle["entry"][0]["resource"]
+            assert mr["resourceType"] == "MeasureReport"
+            assert mr["subject"] == {"reference": f"Patient/{pid}"}
+            subjects_in_bundle = {
+                e["resource"]["id"] for e in bundle["entry"][1:] if e["resource"]["resourceType"] == "Patient"
+            }
+            assert subjects_in_bundle == {pid}
+
+    async def test_a_group_of_one_is_byte_identical_to_the_ungrouped_payload(self):
+        """The regression that would make this PR non-neutral: a size-1 group
+        must produce the same single-bundle envelope PR 1 shipped."""
+        wf = _deqm_workflow(mode="stu5")
+        wf._mode_settled.set()  # past the pioneer
+        subjects = await self._prepare(wf, ["p1"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            await wf.submit_prepared(subjects)
+        submit.assert_awaited_once()
+        params = submit.call_args.kwargs["parameters"]
+        assert [p["name"] for p in params["parameter"]] == ["bundle"]
+
+    async def test_submit_group_itself_handles_a_single_subject(self):
+        """This test calls `_submit_group` directly, rather than going through
+        `submit_prepared`, so the single-subject envelope is covered by a test
+        that does not depend on how `submit_prepared` happens to route.
+        Without this, `_submit_group`'s own size-1 handling could silently
+        break, or the method could be deleted outright, and
+        test_a_group_of_one_is_byte_identical_to_the_ungrouped_payload would
+        not notice, because it goes through `submit_prepared` and never
+        necessarily reaches `_submit_group` at all.
+        """
+        wf = _deqm_workflow(mode="stu5")
+        subjects = await self._prepare(wf, ["p1"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            outcomes = await wf._submit_group(subjects)
+        submit.assert_awaited_once()
+        assert submit.call_args.kwargs["mode"] == "stu5"
+        params = submit.call_args.kwargs["parameters"]
+        assert [p["name"] for p in params["parameter"]] == ["bundle"]
+        bundle = params["parameter"][0]["resource"]
+        mr = bundle["entry"][0]["resource"]
+        assert mr["resourceType"] == "MeasureReport"
+        assert mr["subject"] == {"reference": "Patient/p1"}
+        assert [o.patient_id for o in outcomes] == ["p1"]
+        assert outcomes[0].error is None
+
+    async def test_a_group_submitted_after_a_downgrade_goes_out_individually(self):
+        """A chunk can form a group of N and then have another chunk's pioneer
+        downgrade before it submits. Building a multi-bundle envelope for a
+        server that has already refused the operation would fail every subject."""
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = 3
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        # Simulate the settled-and-downgraded state the pioneer leaves behind.
+        wf._mode = "base-fallback"
+        wf._downgraded = True
+        wf._mode_settled.set()
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 3
+        assert all(c.kwargs["mode"] == "base-fallback" for c in submit.await_args_list)
+        for call in submit.await_args_list:
+            names = [p["name"] for p in call.kwargs["parameters"]["parameter"]]
+            assert names[0] == "measureReport"
+            assert "bundle" not in names
+        assert all(o.error is None for o in outcomes)
+
+    async def test_an_empty_group_submits_nothing(self):
+        wf = _deqm_workflow(mode="stu5")
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            assert await wf.submit_prepared([]) == []
+        submit.assert_not_awaited()
+
+
+class TestGroupFailureIsolation:
+    async def _prepare(self, wf, patient_ids):
+        subjects = []
+        for pid in patient_ids:
+            with patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": pid}])),
+            ):
+                subjects.append(await wf.prepare_patient("http://cdr", pid, {}))
+        return subjects
+
+    def _settled_stu5(self, group_size: int) -> DeqmSubmitDataWorkflow:
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = group_size
+        # Past the pioneer: this group may isolate, but never downgrade.
+        wf._mode_settled.set()
+        return wf
+
+    @pytest.mark.parametrize("status", [400, 409, 422])
+    async def test_a_payload_attributable_failure_isolates(self, status):
+        wf = self._settled_stu5(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        calls = {"n": 0}
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise _fhir_op_error(status)  # the group POST
+            if len(parameters["parameter"]) == 1 and parameters["parameter"][0]["resource"]["entry"][0]["resource"][
+                "subject"
+            ]["reference"].endswith("p2"):
+                raise _fhir_op_error(status)  # p2 owns the bad resource
+            return None
+
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)):
+            outcomes = await wf.submit_prepared(subjects)
+
+        assert calls["n"] == 4, "one group POST plus one per subject"
+        assert [o.error is None for o in outcomes] == [True, False, True]
+        assert outcomes[1].patient_id == "p2"
+        assert outcomes[1].error.phase == "submit"
+
+    @pytest.mark.parametrize("status", [401, 403, 404, 405, 429, 500, 503])
+    async def test_a_server_failure_fails_the_whole_group_in_one_post(self, status):
+        """Resubmitting N times only asks a down or unauthenticated server the
+        same question N more times. On a full chunk that is 101 POSTs for one
+        answer."""
+        wf = self._settled_stu5(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(status))) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 1
+        assert all(o.error is not None for o in outcomes)
+        assert all(o.error.phase == "submit" for o in outcomes)
+        assert [o.patient_id for o in outcomes] == ["p1", "p2", "p3"]
+
+    async def test_a_non_http_failure_fails_the_whole_group_in_one_post(self):
+        """A timeout is not a statement about anyone's payload."""
+        wf = self._settled_stu5(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch(
+            "app.services.workflows.submit_data",
+            new=AsyncMock(side_effect=asyncio.TimeoutError("timed out")),
+        ) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 1
+        assert all(isinstance(o.error.cause, asyncio.TimeoutError) for o in outcomes)
+
+    async def test_isolation_never_downgrades(self):
+        """Only _settle_mode_and_submit may change the mode (#414). A settled
+        group that isolates must leave the job's wire format alone."""
+        wf = self._settled_stu5(2)
+        subjects = await self._prepare(wf, ["p1", "p2"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(400))) as submit:
+            await wf.submit_prepared(subjects)
+        assert wf.mode == "stu5"
+        assert wf.downgraded is False
+        assert all(c.kwargs["mode"] == "stu5" for c in submit.await_args_list)
+
+    async def test_isolation_retries_under_the_settled_mode(self):
+        wf = self._settled_stu5(2)
+        subjects = await self._prepare(wf, ["p1", "p2"])
+        with patch(
+            "app.services.workflows.submit_data",
+            new=AsyncMock(side_effect=[_fhir_op_error(400), None, None]),
+        ) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 3
+        assert all(c.kwargs["mode"] == "stu5" for c in submit.await_args_list)
+        assert all(o.error is None for o in outcomes)
+
+
+class TestPioneerGroup:
+    async def _prepare(self, wf, patient_ids):
+        subjects = []
+        for pid in patient_ids:
+            with patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": pid}])),
+            ):
+                subjects.append(await wf.prepare_patient("http://cdr", pid, {}))
+        return subjects
+
+    def _pioneer(self, group_size: int) -> DeqmSubmitDataWorkflow:
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = group_size
+        return wf  # _mode_settled is unset: this group IS the pioneer
+
+    async def test_the_pioneer_group_sends_n_bundles_in_one_post(self):
+        wf = self._pioneer(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        submit.assert_awaited_once()
+        assert len(submit.call_args.kwargs["parameters"]["parameter"]) == 3
+        assert all(o.error is None for o in outcomes)
+        assert wf._mode_settled.is_set()
+
+    @pytest.mark.parametrize("status", [404, 405, 501])
+    async def test_a_capability_signal_downgrades_and_does_not_isolate(self, status):
+        """Capability first, isolation second, never both. The group's subjects
+        go out individually in base mode — which is what base-fallback does
+        anyway — not as a second STU5 attempt."""
+        wf = self._pioneer(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        sent: list[str] = []
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            sent.append(mode)
+            if mode == "stu5":
+                raise _fhir_op_error(status)
+            return None
+
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)):
+            outcomes = await wf.submit_prepared(subjects)
+
+        assert sent == ["stu5", "base-fallback", "base-fallback", "base-fallback"]
+        assert wf.mode == "base-fallback"
+        assert wf.downgraded is True
+        assert all(o.error is None for o in outcomes)
+
+    async def test_a_400_saying_the_operation_is_missing_downgrades(self):
+        """#414: a 400's meaning lives in its OperationOutcome, not its status."""
+        wf = self._pioneer(2)
+        subjects = await self._prepare(wf, ["p1", "p2"])
+        sent: list[str] = []
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            sent.append(mode)
+            if mode == "stu5":
+                raise _fhir_op_error_with_outcome(400, "does not know how to handle POST operation")
+            return None
+
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)):
+            outcomes = await wf.submit_prepared(subjects)
+
+        assert sent == ["stu5", "base-fallback", "base-fallback"]
+        assert wf.downgraded is True
+        assert all(o.error is None for o in outcomes)
+
+    async def test_a_payload_rejection_isolates_and_does_not_downgrade(self):
+        wf = self._pioneer(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch(
+            "app.services.workflows.submit_data",
+            new=AsyncMock(side_effect=[_fhir_op_error(400), None, _fhir_op_error(400), None]),
+        ) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 4
+        assert all(c.kwargs["mode"] == "stu5" for c in submit.await_args_list)
+        assert wf.mode == "stu5"
+        assert wf.downgraded is False
+        assert [o.error is None for o in outcomes] == [True, False, True]
+
+    async def test_a_server_failure_in_the_pioneer_group_neither_downgrades_nor_isolates(self):
+        wf = self._pioneer(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(503))) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 1
+        assert wf.downgraded is False
+        assert all(o.error is not None for o in outcomes)
+
+    async def test_the_barrier_releases_even_when_the_pioneer_group_fails(self):
+        """A pioneer group whose submission fails must still publish a verdict
+        and release every waiter: `_settle_mode_and_submit` catches the failure
+        and turns it into error outcomes, then sets `_mode_settled` on that
+        normal-return path, so other groups never wait forever on a verdict
+        that never arrives. (The `finally` this method also has covers the
+        raise path, not this one — removing `.set()` itself still fails five
+        other tests, so it stays well covered.)"""
+        wf = self._pioneer(2)
+        subjects = await self._prepare(wf, ["p1", "p2"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(503))):
+            await wf.submit_prepared(subjects)
+        assert wf._mode_settled.is_set()
+
+    async def test_a_second_group_waits_for_the_pioneers_verdict(self):
+        """Two chunks submitting concurrently must not produce a job that is
+        half STU5 and half base (#414)."""
+        wf = self._pioneer(2)
+        first = await self._prepare(wf, ["p1", "p2"])
+        second = await self._prepare(wf, ["p3", "p4"])
+        modes: list[str] = []
+        release = asyncio.Event()
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            modes.append(mode)
+            if mode == "stu5":
+                await release.wait()
+                raise _fhir_op_error(404)
+            return None
+
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)):
+            pioneer = asyncio.create_task(wf.submit_prepared(first))
+            await asyncio.sleep(0)
+            waiter = asyncio.create_task(wf.submit_prepared(second))
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.gather(pioneer, waiter)
+
+        assert modes.count("stu5") == 1, "only the pioneer may attempt STU5"
+        assert wf.mode == "base-fallback"
+        assert all(m == "base-fallback" for m in modes[1:])
+
+
+class TestCrossChunkSafety:
+    async def test_two_concurrent_chunks_never_mix_subjects(self):
+        """DeqmSubmitDataWorkflow must stay stateless across concurrent
+        submit_prepared calls: one workflow instance serves every concurrent
+        chunk of a job, so any per-subject state the reviewer injects onto the
+        instance (rather than keeping it local to each submit_prepared call)
+        interleaves subjects from different chunks and misattributes their
+        failures — this is the test that catches it."""
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = 2
+        wf._mode_settled.set()
+
+        async def _prepare(pid):
+            with patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": pid}])),
+            ):
+                return await wf.prepare_patient("http://cdr", pid, {})
+
+        chunk_a = [await _prepare(p) for p in ("a1", "a2")]
+        chunk_b = [await _prepare(p) for p in ("b1", "b2")]
+        posted: list[list[str]] = []
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            posted.append(
+                [
+                    p["resource"]["entry"][0]["resource"]["subject"]["reference"].split("/")[1]
+                    for p in parameters["parameter"]
+                ]
+            )
+            await asyncio.sleep(0)  # force interleaving
+
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)):
+            await asyncio.gather(wf.submit_prepared(chunk_a), wf.submit_prepared(chunk_b))
+
+        assert sorted(posted) == [["a1", "a2"], ["b1", "b2"]]
+
+
+class TestDedupeAcrossModes:
+    """Carried from PR 1's final review (finding M6, parked for this PR because
+    the downgrade path it covers is rewritten here)."""
+
+    _DUPES = GatherResult(
+        resources=[
+            {"resourceType": "Patient", "id": "p1"},
+            {"resourceType": "Condition", "id": "c1", "code": {"text": "first"}},
+            {"resourceType": "Condition", "id": "c1", "code": {"text": "first"}},
+        ]
+    )
+
+    async def test_dedupe_applies_in_base_fallback_mode(self):
+        """Deduplication runs upstream of mode selection, but nothing asserted
+        it in base mode — where the resources travel as `resource` parameters
+        rather than Bundle entries."""
+        wf = _deqm_workflow(mode="base-fallback")
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=self._DUPES)),
+            patch("app.services.workflows.submit_data", new=AsyncMock()) as submit,
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+        params = submit.call_args.kwargs["parameters"]
+        resources = [p["resource"] for p in params["parameter"] if p["name"] == "resource"]
+        assert [(r["resourceType"], r["id"]) for r in resources] == [("Patient", "p1"), ("Condition", "c1")]
+        mr = params["parameter"][0]["resource"]
+        assert mr["evaluatedResource"] == [
+            {"reference": "Patient/p1"},
+            {"reference": "Condition/c1"},
+        ]
+
+    async def test_the_downgrade_rebuilt_base_payload_preserves_dedupe(self):
+        """The downgrade re-sends the group in base form. That payload is built
+        from the same prepared resources, so the dedupe must survive the
+        rebuild — nothing asserted that before."""
+        wf = _deqm_workflow(mode="stu5")
+        sent: list[dict] = []
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            sent.append({"mode": mode, "parameters": parameters})
+            if mode == "stu5":
+                raise _fhir_op_error(404)
+            return None
+
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=self._DUPES)),
+            patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)),
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+
+        assert wf.downgraded is True
+        base = [s for s in sent if s["mode"] == "base-fallback"][0]["parameters"]
+        resources = [p["resource"] for p in base["parameter"] if p["name"] == "resource"]
+        assert [(r["resourceType"], r["id"]) for r in resources] == [("Patient", "p1"), ("Condition", "c1")]

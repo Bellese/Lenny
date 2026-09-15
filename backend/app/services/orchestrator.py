@@ -31,7 +31,13 @@ from app.services.fhir_client import (
 )
 from app.services.fhir_errors import redact_outcome, sanitize_url
 from app.services.validation import sanitize_error
-from app.services.workflows import SubmissionWorkflow, TransferPhaseError, build_submission_workflow
+from app.services.workflows import (
+    PreparedSubject,
+    SubjectOutcome,
+    SubmissionWorkflow,
+    TransferPhaseError,
+    build_submission_workflow,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -493,6 +499,97 @@ async def _get_mcs_url(job_id: int) -> str:
     return settings.MEASURE_ENGINE_URL
 
 
+async def _record_transfer_failure(
+    *,
+    job_id: int,
+    batch_id: int,
+    patient_id: str,
+    patient_map: dict[str, dict[str, Any]],
+    exc: Exception,
+) -> bool:
+    """Persist one patient's Phase-1 transfer failure as a MeasureResult row.
+
+    Extracted so a gather failure (raised by prepare_patient) and a submit
+    failure (returned as a SubjectOutcome) reach the database by exactly the
+    same path — with grouping, those are two different call sites for what must
+    remain one behavior.
+
+    Returns False when the job was stopped before the row was written; the
+    caller returns without counting the failure, which is what the inline
+    version did.
+    """
+    if isinstance(exc, TransferPhaseError):
+        error_phase = exc.phase
+        push_exc: Exception = exc.cause
+    else:
+        error_phase = "gather"
+        push_exc = exc
+    patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
+    sanitized_msg = sanitize_error(push_exc)
+    error_details: dict[str, Any] = {"operation": error_phase, "error": sanitized_msg}
+    if isinstance(push_exc, FhirOperationError):
+        error_details["url"] = push_exc.url
+        error_details["status_code"] = push_exc.status_code
+        error_details["latency_ms"] = push_exc.latency_ms
+        if push_exc.outcome:
+            error_details["raw_outcome"] = redact_outcome(push_exc.outcome.raw)
+    error_report = _error_measure_report(
+        patient_id,
+        push_exc,
+        push_exc.outcome.raw if isinstance(push_exc, FhirOperationError) and push_exc.outcome else None,
+    )
+    populations = {
+        "initial_population": False,
+        "denominator": False,
+        "numerator": False,
+        "denominator_exclusion": False,
+        "numerator_exclusion": False,
+        "error": True,
+        "error_message": sanitized_msg,
+        "error_phase": error_phase,
+    }
+    logger.warning(
+        "Failed to transfer patient data",
+        extra={
+            "job_id": job_id,
+            "batch_id": batch_id,
+            "patient_id": patient_id,
+            "error": sanitized_msg,
+            "error_phase": error_phase,
+        },
+    )
+    if await _stop_or_delete_job(job_id):
+        return False
+    async with async_session() as session:
+        existing_row = (
+            await session.execute(
+                select(MeasureResult).where(
+                    MeasureResult.job_id == job_id,
+                    MeasureResult.patient_id == patient_id,
+                )
+            )
+        ).scalar_one_or_none()
+        if existing_row:
+            existing_row.measure_report = error_report
+            existing_row.populations = populations
+            existing_row.error_details = error_details
+            existing_row.error_phase = error_phase
+        else:
+            session.add(
+                MeasureResult(
+                    job_id=job_id,
+                    patient_id=patient_id,
+                    patient_name=patient_name,
+                    measure_report=error_report,
+                    populations=populations,
+                    error_details=error_details,
+                    error_phase=error_phase,
+                )
+            )
+        await session.commit()
+    return True
+
+
 async def _process_single_batch(
     job_id: int,
     batch_id: int,
@@ -506,8 +603,9 @@ async def _process_single_batch(
 ) -> None:
     """Process a single batch in two phases.
 
-    Phase 1 — TRANSFER: Delegate to `workflow.transfer_patient()` for each
-    patient. `direct_load` gathers from the CDR and pushes a Bundle of PUTs
+    Phase 1 — TRANSFER: Call `workflow.prepare_patient()` for each patient in
+    the batch, then `workflow.submit_prepared()` once per group of prepared
+    subjects. `direct_load` gathers from the CDR and pushes a Bundle of PUTs
     straight to the measure engine; `deqm_submit_data` gathers via targeted
     `$data-requirements` queries and delivers via `Measure/$submit-data`
     instead. Either way, HAPI FHIR's synchronous indexing strategy
@@ -559,9 +657,11 @@ async def _process_single_batch(
             )
 
             # ----------------------------------------------------------
-            # Phase 1: Gather this batch's patient data and deliver it to
-            # the MCS via workflow.transfer_patient() — direct_load pushes a
-            # Bundle of PUTs; deqm_submit_data POSTs a $submit-data envelope.
+            # Phase 1: Gather this batch's patient data and deliver it to the
+            # MCS via workflow.prepare_patient() per subject, then
+            # workflow.submit_prepared() once per group of prepared subjects —
+            # direct_load pushes a Bundle of PUTs; deqm_submit_data POSTs a
+            # $submit-data envelope.
             # ----------------------------------------------------------
             # Track patients that FULLY failed gather so they are skipped in evaluate.
             # Partial-gather patients proceed to evaluate with available data (AT-2).
@@ -571,19 +671,94 @@ async def _process_single_batch(
             # Partial-gather: some resource types failed but data was pushed.
             # Mapped to error_details dict for annotation after evaluate succeeds.
             partial_gather_patients: dict[str, dict] = {}
-            for patient_id in patient_ids:
+            # Subjects are walked in groups of workflow.submission_group_size.
+            # The buffer is a LOCAL: one workflow instance serves every
+            # concurrent chunk of the job, so buffering on the instance would
+            # interleave subjects from different chunks and misattribute their
+            # failures.
+            index = 0
+            while index < len(patient_ids):
+                # Read fresh, never snapshotted: a runtime downgrade in this or
+                # another chunk returns the job to one subject per POST, and a
+                # size captured before the loop would keep sending groups of N
+                # in a mode that has no multi-bundle form.
+                group_size = max(1, workflow.submission_group_size)
+                group = patient_ids[index : index + group_size]
+                index += len(group)
+
+                prepared: list[PreparedSubject] = []
+                for patient_id in group:
+                    if await _stop_or_delete_job(job_id):
+                        return
+                    try:
+                        prepared.append(await workflow.prepare_patient(cdr_url, patient_id, auth_headers))
+                    except Exception as prepare_exc:
+                        gather_failed_patients.add(patient_id)
+                        if not await _record_transfer_failure(
+                            job_id=job_id,
+                            batch_id=batch_id,
+                            patient_id=patient_id,
+                            patient_map=patient_map,
+                            exc=prepare_exc,
+                        ):
+                            return
+                        failed += 1
+
+                if not prepared:
+                    continue
                 if await _stop_or_delete_job(job_id):
+                    # The buffer is DISCARDED, not flushed. A stop must not land
+                    # data on the MCS after the operator asked the job to stop;
+                    # these subjects simply never happened, exactly as the rest
+                    # of the chunk never happens.
                     return
 
                 try:
-                    gather_result = await workflow.transfer_patient(cdr_url, patient_id, auth_headers)
-                    logger.info(
-                        # The gathered count, not the submitted one: transfer_patient
-                        # filters and deduplicates before building the payload.
-                        f"Gathered {len(gather_result.resources)} resources for {patient_id[:8]}",
-                        extra={"job_id": job_id, "patient_id": patient_id},
-                    )
+                    outcomes: list[SubjectOutcome] = await workflow.submit_prepared(prepared)
+                except Exception as submit_exc:
+                    # submit_prepared's contract is "return one outcome per
+                    # subject, never raise" — but if it ever does, the whole
+                    # group must fail through the same per-patient path as
+                    # everything else. Letting this escape would trip the
+                    # outer batch-retry handler and re-push subjects in this
+                    # group (and this batch) that may already be delivered.
+                    for subject in prepared:
+                        gather_failed_patients.add(subject.patient_id)
+                        if not await _record_transfer_failure(
+                            job_id=job_id,
+                            batch_id=batch_id,
+                            patient_id=subject.patient_id,
+                            patient_map=patient_map,
+                            exc=TransferPhaseError("submit", submit_exc),
+                        ):
+                            return
+                        failed += 1
+                    continue
 
+                outcome_patient_ids = {outcome.patient_id for outcome in outcomes}
+                for outcome in outcomes:
+                    if outcome.error is not None:
+                        gather_failed_patients.add(outcome.patient_id)
+                        if not await _record_transfer_failure(
+                            job_id=job_id,
+                            batch_id=batch_id,
+                            patient_id=outcome.patient_id,
+                            patient_map=patient_map,
+                            exc=outcome.error,
+                        ):
+                            return
+                        failed += 1
+                        continue
+
+                    gather_result = outcome.gather
+                    if gather_result is None:
+                        continue
+                    logger.info(
+                        # The gathered count, not the submitted one: the workflow
+                        # filters and deduplicates before building the payload.
+                        f"Gathered {len(gather_result.resources)} resources for {outcome.patient_id[:8]}",
+                        extra={"job_id": job_id, "patient_id": outcome.patient_id},
+                    )
                     if gather_result.has_partial_failure:
                         # Partial gather — continue to evaluate with available data (AT-2).
                         # Record which types failed so we can annotate the result after evaluate.
@@ -591,7 +766,7 @@ async def _process_single_batch(
                         succeeded_type_names = sorted(
                             {r.get("resourceType") for r in gather_result.resources if r.get("resourceType")}
                         )
-                        partial_gather_patients[patient_id] = {
+                        partial_gather_patients[outcome.patient_id] = {
                             "operation": "gather",
                             "failed_types": failed_type_names,
                             "succeeded_types": succeeded_type_names,
@@ -600,89 +775,37 @@ async def _process_single_batch(
                             "Partial CDR gather — continuing evaluation with available data",
                             extra={
                                 "job_id": job_id,
-                                "patient_id": patient_id,
+                                "patient_id": outcome.patient_id,
                                 "failed_types": failed_type_names,
                             },
                         )
 
-                except Exception as transfer_exc:
-                    if isinstance(transfer_exc, TransferPhaseError):
-                        error_phase = transfer_exc.phase
-                        push_exc: Exception = transfer_exc.cause
-                    else:
-                        error_phase = "gather"
-                        push_exc = transfer_exc
-                    gather_failed_patients.add(patient_id)
-                    patient_name = _extract_patient_name(patient_map.get(patient_id, {}))
-                    sanitized_msg = sanitize_error(push_exc)
-                    error_details: dict[str, Any] = {"operation": error_phase, "error": sanitized_msg}
-                    if isinstance(push_exc, FhirOperationError):
-                        error_details["url"] = push_exc.url
-                        error_details["status_code"] = push_exc.status_code
-                        error_details["latency_ms"] = push_exc.latency_ms
-                        if push_exc.outcome:
-                            error_details["raw_outcome"] = redact_outcome(push_exc.outcome.raw)
-                    error_report = _error_measure_report(
-                        patient_id,
-                        push_exc,
-                        push_exc.outcome.raw if isinstance(push_exc, FhirOperationError) and push_exc.outcome else None,
-                    )
-                    logger.warning(
-                        "Failed to transfer patient data",
-                        extra={
-                            "job_id": job_id,
-                            "batch_id": batch_id,
-                            "patient_id": patient_id,
-                            "error": sanitized_msg,
-                            "error_phase": error_phase,
-                        },
-                    )
-                    if await _stop_or_delete_job(job_id):
+                # Structural reconciliation, not trust-by-convention: every
+                # workflow today returns exactly one outcome per prepared
+                # subject, but nothing in the type system enforces that. A
+                # subject missing from `outcomes` would otherwise get no
+                # error row, never join gather_failed_patients, and silently
+                # fall through to Phase 2 — evaluated as if its data had been
+                # submitted, when it never was. Fail it the same way a
+                # reported error would be failed.
+                for subject in prepared:
+                    if subject.patient_id in outcome_patient_ids:
+                        continue
+                    gather_failed_patients.add(subject.patient_id)
+                    if not await _record_transfer_failure(
+                        job_id=job_id,
+                        batch_id=batch_id,
+                        patient_id=subject.patient_id,
+                        patient_map=patient_map,
+                        exc=TransferPhaseError(
+                            "submit",
+                            RuntimeError(
+                                f"{workflow.name} returned no SubjectOutcome for patient "
+                                f"{subject.patient_id} — treating as a submission failure"
+                            ),
+                        ),
+                    ):
                         return
-                    async with async_session() as session:
-                        existing_row = (
-                            await session.execute(
-                                select(MeasureResult).where(
-                                    MeasureResult.job_id == job_id,
-                                    MeasureResult.patient_id == patient_id,
-                                )
-                            )
-                        ).scalar_one_or_none()
-                        if existing_row:
-                            existing_row.measure_report = error_report
-                            existing_row.populations = {
-                                "initial_population": False,
-                                "denominator": False,
-                                "numerator": False,
-                                "denominator_exclusion": False,
-                                "numerator_exclusion": False,
-                                "error": True,
-                                "error_message": sanitized_msg,
-                                "error_phase": error_phase,
-                            }
-                            existing_row.error_details = error_details
-                            existing_row.error_phase = error_phase
-                        else:
-                            result = MeasureResult(
-                                job_id=job_id,
-                                patient_id=patient_id,
-                                patient_name=patient_name,
-                                measure_report=error_report,
-                                populations={
-                                    "initial_population": False,
-                                    "denominator": False,
-                                    "numerator": False,
-                                    "denominator_exclusion": False,
-                                    "numerator_exclusion": False,
-                                    "error": True,
-                                    "error_message": sanitized_msg,
-                                    "error_phase": error_phase,
-                                },
-                                error_details=error_details,
-                                error_phase=error_phase,
-                            )
-                            session.add(result)
-                        await session.commit()
                     failed += 1
 
             if await _stop_or_delete_job(job_id):

@@ -1,14 +1,18 @@
 """Per-job data submission workflows (spec: 2026-08-21-deqm-submit-data-workflow).
 
-A SubmissionWorkflow owns phase 1 of a job for one patient: gather from the
-CDR, deliver to the MCS. The orchestrator picks the concrete class from
-Job.workflow and calls transfer_patient(); phase 2 ($evaluate-measure) is
-identical for every workflow and stays in the orchestrator.
+A SubmissionWorkflow owns phase 1 of a job: gather each subject from the CDR
+and deliver it to the MCS, one subject at a time or, where the wire format
+supports it, in a group. The orchestrator picks the concrete class from
+Job.workflow and calls prepare_patient() then submit_prepared() for each
+group; transfer_patient() is the per-subject operation both build on. Phase 2
+($evaluate-measure) is identical for every workflow and stays in the
+orchestrator.
 """
 
 import abc
 import asyncio
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.config import settings
@@ -84,6 +88,26 @@ def _outcome_reports_unsupported_operation(exc: FhirOperationError) -> bool:
     return False
 
 
+# Statuses on which a failed GROUP submission is resubmitted subject by subject.
+# Each says something about the PAYLOAD, so one subject's bad resource is the
+# plausible cause and isolation finds the owner.
+#
+# 409 is here because HAPI's ResourceVersionConflictException (HAPI-0550/0823)
+# is a per-resource verdict, and it has already failed this workflow once.
+#
+# Everything else is deliberately absent. A 401, 403, 404, 405, 429, any 5xx, a
+# timeout, or a transport error is a statement about the SERVER or the
+# connection; resubmitting N times only asks a down server the same question N
+# more times. With a chunk of 100 that turns one failed POST into 101. Those
+# fail every subject in the group with the one verdict the server gave.
+_ISOLATE_STATUS_CODES = {400, 409, 422}
+
+
+def _is_payload_attributable(exc: Exception) -> bool:
+    """True when a group's failure plausibly belongs to ONE subject's payload."""
+    return isinstance(exc, FhirOperationError) and exc.status_code in _ISOLATE_STATUS_CODES
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -101,6 +125,41 @@ class TransferPhaseError(Exception):
         self.cause = cause
 
 
+@dataclass(frozen=True)
+class PreparedSubject:
+    """One subject's CDR work, done and ready to submit — no MCS I/O yet.
+
+    Splitting gather-and-build from submit is what lets several subjects share
+    one POST. A workflow with no separable build step leaves the payload fields
+    None; the base-class default then defers the whole transfer to
+    submit_prepared, which is why the CDR coordinates travel here too. Keeping
+    them on the subject rather than on the workflow instance is deliberate: one
+    workflow instance serves every concurrent chunk of a job, so per-subject
+    state on the instance would interleave across chunks.
+    """
+
+    patient_id: str
+    gather: GatherResult | None = None
+    measure_report: dict | None = None
+    resources: list[dict] | None = None
+    cdr_url: str | None = None
+    cdr_auth_headers: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class SubjectOutcome:
+    """What happened to one subject of a submitted group.
+
+    `error` is None on success. The orchestrator reads `gather` for its
+    partial-failure bookkeeping and the "Gathered N resources" log, exactly as
+    it read transfer_patient's return value before grouping.
+    """
+
+    patient_id: str
+    gather: GatherResult | None = None
+    error: TransferPhaseError | None = None
+
+
 def _acquisition_strategy(
     measure_id: str, mcs_url: str, mcs_auth_headers: dict[str, str] | None = None
 ) -> DataAcquisitionStrategy:
@@ -116,7 +175,9 @@ def _acquisition_strategy(
 
 
 class SubmissionWorkflow(abc.ABC):
-    """Gathers one patient's data from the CDR and delivers it to the MCS."""
+    """Gathers each subject's data from the CDR and delivers it to the MCS,
+    one subject at a time or, where the wire format supports it, in a group.
+    """
 
     name: str
 
@@ -134,6 +195,53 @@ class SubmissionWorkflow(abc.ABC):
         Default is a no-op: direct_load needs nothing staged.
         """
         return None
+
+    @property
+    def submission_group_size(self) -> int:
+        """How many subjects may share one submission call.
+
+        1 means one subject per call — today's behavior, and the default for
+        every workflow that has no multi-subject wire format.
+        """
+        return 1
+
+    async def prepare_patient(self, cdr_url: str, patient_id: str, cdr_auth_headers: dict[str, str]) -> PreparedSubject:
+        """Do this subject's CDR work, with no MCS I/O. Raises TransferPhaseError.
+
+        Default: defer everything. direct_load pushes a Bundle of PUTs and has
+        nothing to assemble beforehand, so it returns an identity-only subject
+        and lets submit_prepared run the whole transfer. Raising here (rather
+        than returning a failed outcome) is what keeps a gather failure from
+        poisoning the group the subject was being collected into.
+        """
+        return PreparedSubject(patient_id=patient_id, cdr_url=cdr_url, cdr_auth_headers=cdr_auth_headers)
+
+    async def submit_prepared(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
+        """Submit a group; return one outcome per subject, never raising for one.
+
+        Default: fan back out to transfer_patient, one subject per call. This is
+        what keeps DirectLoadWorkflow — and any workflow implementing only
+        transfer_patient — working unchanged under the group protocol, with no
+        edits of its own.
+        """
+        outcomes: list[SubjectOutcome] = []
+        for subject in subjects:
+            try:
+                gather = await self.transfer_patient(
+                    subject.cdr_url or "",
+                    subject.patient_id,
+                    subject.cdr_auth_headers or {},
+                )
+            except TransferPhaseError as exc:
+                outcomes.append(SubjectOutcome(patient_id=subject.patient_id, error=exc))
+            except Exception as exc:  # noqa: BLE001 - an outcome, not a raise, is this method's contract
+                # "gather" is the historical label for an unclassified transfer
+                # failure (see TransferPhaseError), so an unwrapped exception
+                # lands in the same bucket the orchestrator already handles.
+                outcomes.append(SubjectOutcome(patient_id=subject.patient_id, error=TransferPhaseError("gather", exc)))
+            else:
+                outcomes.append(SubjectOutcome(patient_id=subject.patient_id, gather=gather))
+        return outcomes
 
     @abc.abstractmethod
     async def transfer_patient(self, cdr_url: str, patient_id: str, cdr_auth_headers: dict[str, str]) -> GatherResult:
@@ -182,6 +290,7 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         period_start: str,
         period_end: str,
         mode: str,
+        group_size: int = 1,
     ):
         # Targeted queries are part of the DEQM workflow by design, independent
         # of the env-configured default strategy.
@@ -201,11 +310,11 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # decides to downgrade — so a plain "has anything succeeded yet?" flag
         # leaves a window where a job ends up half STU5 and half base.
         #
-        # Instead the mode is SETTLED ONCE, behind a barrier: the first patient
+        # Instead the mode is SETTLED ONCE, behind a barrier: the first group
         # to reach the submit step under STU5 becomes the pioneer and is the
         # only one allowed to downgrade. Everyone else waits for its verdict
         # and then submits under the settled mode, with no downgrade path of
-        # their own. One patient's submission is therefore serialized; the rest
+        # their own. One group's submission is therefore serialized; the rest
         # run fully concurrent as before.
         #
         # The barrier only engages while the mode is STU5. base-fallback has
@@ -216,6 +325,13 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         self._downgraded = False
         if mode != SUBMIT_DATA_MODE_STU5:
             self._mode_settled.set()
+        # How many subjects may share one STU5 POST. PR 2 never sets this above
+        # 1 in production — build_submission_workflow does not pass it — so the
+        # grouping mechanics land under test before anything can select them.
+        # PR 3 threads the operator's clamped value into this same argument.
+        # max(1, ...) guards against a 0 leaking through: "0 means unlimited"
+        # is resolved to a real number at job creation, never here.
+        self._group_size = max(1, group_size)
 
     @property
     def mode(self) -> str:
@@ -233,6 +349,16 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         (#414).
         """
         return self._downgraded
+
+    @property
+    def submission_group_size(self) -> int:
+        """Subjects per submission, read fresh by the orchestrator each group.
+
+        Collapses to 1 outside STU5: base-fallback has no multi-bundle form, so
+        a runtime downgrade must return the job to one subject per POST for the
+        remainder of the chunk.
+        """
+        return self._group_size if self._mode == SUBMIT_DATA_MODE_STU5 else 1
 
     async def ensure_target_prerequisites(self) -> None:
         """Store the shared reporter Organization once, after the wipe.
@@ -263,7 +389,8 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
                 f"for job {self._job_id}: {exc}"
             ) from exc
 
-    async def transfer_patient(self, cdr_url: str, patient_id: str, cdr_auth_headers: dict[str, str]) -> GatherResult:
+    async def prepare_patient(self, cdr_url: str, patient_id: str, cdr_auth_headers: dict[str, str]) -> PreparedSubject:
+        """Gather, filter, deduplicate, and build the MeasureReport. No MCS I/O."""
         try:
             gather = await self._strategy.gather_patient_data(cdr_url, patient_id, cdr_auth_headers)
         except Exception as exc:
@@ -307,90 +434,145 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
             resources=filtered_resources,
             timestamp=datetime.now(timezone.utc).isoformat(),
         )
-        # The reporter Organization is NOT re-sent here. build_submission_workflow
+        # The reporter Organization is NOT re-sent here. ensure_target_prerequisites
         # PUTs it to the MCS once per job, before any batch starts; every
         # patient's MeasureReport.reporter reference resolves against that
-        # server-side copy. See the comment there for why inlining a copy of
-        # the SAME client-assigned Organization/lenny-reporter into every
-        # patient's payload is unsafe under concurrent batches.
-        submitted = filtered_resources
-        # The mode used for THIS attempt. self._mode is shared, mutable state:
-        # one DeqmSubmitDataWorkflow is built per job (orchestrator.py) and its
-        # transfer_patient() runs concurrently across patients under
-        # asyncio.Semaphore(MAX_WORKERS) + asyncio.gather. The settlement
-        # barrier below is what makes that safe — self._mode is only ever
-        # written by the pioneer, while every other patient is still waiting on
-        # self._mode_settled, so no patient can send one envelope while the job
-        # is deciding on another (#414).
-        attempt_mode = self._mode
-        if attempt_mode == SUBMIT_DATA_MODE_STU5:
-            parameters = build_stu5_parameters([SubjectBundle(measure_report, submitted)])
-        else:
-            parameters = build_base_parameters(measure_report, submitted)
+        # server-side copy. Inlining a copy of the SAME client-assigned
+        # Organization/lenny-reporter into every patient's payload is unsafe
+        # under concurrent batches — see that method.
+        return PreparedSubject(
+            patient_id=patient_id,
+            gather=gather,
+            measure_report=measure_report,
+            resources=filtered_resources,
+        )
 
-        # Non-pioneers wait for the mode verdict, then re-derive their payload
-        # under it — a patient that queued while STU5 was still unsettled must
-        # not send an STU5 envelope to a server that has since been downgraded.
+    async def transfer_patient(self, cdr_url: str, patient_id: str, cdr_auth_headers: dict[str, str]) -> GatherResult:
+        """One subject, end to end. Raises, where submit_prepared returns outcomes.
+
+        Kept as the single-subject entry point: it is the honest convenience
+        for callers with exactly one patient, and the base class's default
+        submit_prepared is defined in terms of it.
+        """
+        subject = await self.prepare_patient(cdr_url, patient_id, cdr_auth_headers)
+        outcome = (await self.submit_prepared([subject]))[0]
+        if outcome.error is not None:
+            raise outcome.error
+        return subject.gather  # type: ignore[return-value]
+
+    async def _post(self, parameters: dict, mode: str) -> None:
+        """The one place this workflow talks to the MCS."""
+        await submit_data(
+            mcs_url=self._mcs_url,
+            parameters=parameters,
+            mode=mode,
+            measure_id=self._measure_id,
+            auth_headers=self._mcs_auth_headers,
+        )
+
+    def _parameters_for(self, subject: PreparedSubject, mode: str) -> dict:
+        if mode == SUBMIT_DATA_MODE_STU5:
+            return build_stu5_parameters([SubjectBundle(subject.measure_report, subject.resources)])
+        return build_base_parameters(subject.measure_report, subject.resources)
+
+    async def _submit_individually(self, subjects: list[PreparedSubject], mode: str) -> list[SubjectOutcome]:
+        """One POST per subject under `mode`, each failing on its own."""
+        outcomes: list[SubjectOutcome] = []
+        for subject in subjects:
+            try:
+                await self._post(self._parameters_for(subject, mode), mode)
+            except Exception as exc:  # noqa: BLE001 - an outcome, not a raise, is the contract
+                outcomes.append(
+                    SubjectOutcome(
+                        patient_id=subject.patient_id,
+                        gather=subject.gather,
+                        error=TransferPhaseError("submit", exc),
+                    )
+                )
+            else:
+                outcomes.append(SubjectOutcome(patient_id=subject.patient_id, gather=subject.gather))
+        return outcomes
+
+    async def submit_prepared(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
+        """Submit a prepared group, returning one outcome per subject.
+
+        The mode is SETTLED ONCE behind a barrier (#414): the first group to
+        reach the submit step under STU5 becomes the pioneer and is the only one
+        allowed to downgrade. Everyone else waits for its verdict and then
+        submits under the settled mode, with no downgrade path of their own.
+        """
+        if not subjects:
+            return []
         if not self._mode_settled.is_set():
             async with self._mode_lock:
                 if not self._mode_settled.is_set():
                     try:
-                        await self._settle_mode_and_submit(measure_report, submitted, patient_id)
+                        return await self._settle_mode_and_submit(subjects)
                     finally:
+                        # In a finally: a pioneer group that fails outright must
+                        # still release every group waiting on its verdict.
                         self._mode_settled.set()
-                    return gather
             # Settled by the pioneer while we queued on the lock; fall through
             # and submit under whatever it decided.
-            attempt_mode = self._mode
-            parameters = (
-                build_stu5_parameters([SubjectBundle(measure_report, submitted)])
-                if attempt_mode == SUBMIT_DATA_MODE_STU5
-                else build_base_parameters(measure_report, submitted)
-            )
+        # Re-read the settled mode rather than trusting the size this group was
+        # formed at: another chunk's pioneer may have downgraded in between, and
+        # base-fallback has no multi-bundle envelope.
+        if self._mode != SUBMIT_DATA_MODE_STU5:
+            return await self._submit_individually(subjects, SUBMIT_DATA_MODE_BASE)
+        return await self._submit_group(subjects)
 
-        # Settled path: no downgrade is available here, by design. Allowing one
-        # would be exactly the mixed-mode job this barrier prohibits.
+    async def _submit_group(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
+        """One POST carrying every subject's bundle; isolate only on a payload
+        rejection.
+
+        Each `bundle` parameter is a collection Bundle for exactly ONE subject:
+        the receiver processes each Bundle as a transaction, so merging subjects
+        would make one subject's bad resource fail the others.
+        """
+        parameters = build_stu5_parameters([SubjectBundle(s.measure_report, s.resources) for s in subjects])
         try:
-            await submit_data(
-                mcs_url=self._mcs_url,
-                parameters=parameters,
-                mode=attempt_mode,
-                measure_id=self._measure_id,
-                auth_headers=self._mcs_auth_headers,
-            )
-        except Exception as exc:
-            raise TransferPhaseError("submit", exc) from exc
-        return gather
+            await self._post(parameters, SUBMIT_DATA_MODE_STU5)
+        except Exception as exc:  # noqa: BLE001 - an outcome, not a raise, is the contract
+            # A single-subject group never isolates: retrying the one subject it
+            # holds would POST twice where the ungrouped path posts once, and
+            # size 1 would stop being byte-identical to PR 1.
+            if len(subjects) > 1 and _is_payload_attributable(exc):
+                return await self._submit_individually(subjects, SUBMIT_DATA_MODE_STU5)
+            return [
+                SubjectOutcome(
+                    patient_id=s.patient_id,
+                    gather=s.gather,
+                    error=TransferPhaseError("submit", exc),
+                )
+                for s in subjects
+            ]
+        return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
 
-    async def _settle_mode_and_submit(self, measure_report, submitted, patient_id: str) -> None:
-        """The pioneer's submission: the only one that may downgrade (#414).
+    async def _settle_mode_and_submit(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
+        """The pioneer group's submission: the only one that may downgrade (#414).
 
         Runs under self._mode_lock with self._mode_settled unset, so it is the
-        single point where the job's wire format is decided.
+        single point where the job's wire format is decided. The caller sets the
+        event in a finally, so a group that fails outright still releases every
+        group waiting on its verdict.
         """
-        attempt_mode = self._mode
-        parameters = build_stu5_parameters([SubjectBundle(measure_report, submitted)])
+        parameters = build_stu5_parameters([SubjectBundle(s.measure_report, s.resources) for s in subjects])
         try:
-            await submit_data(
-                mcs_url=self._mcs_url,
-                parameters=parameters,
-                mode=attempt_mode,
-                measure_id=self._measure_id,
-                auth_headers=self._mcs_auth_headers,
-            )
+            await self._post(parameters, SUBMIT_DATA_MODE_STU5)
         except FhirOperationError as exc:
             # A mis-probed capability stamps Job.submit_data_mode="stu5" for a
             # server that doesn't actually implement the type-level $submit-data
             # bundle contract. Rather than fail every patient in the job,
-            # downgrade to base mode and retry once. Because this runs before
-            # the mode is settled, no patient has been submitted under STU5
-            # yet, so the downgrade cannot strand anyone in the other format.
+            # downgrade to base mode and re-send this group individually.
+            # Because this runs before the mode is settled, nobody has been
+            # submitted under STU5 yet, so the downgrade cannot strand anyone in
+            # the other format.
             #
             # A bare status is only trusted when it is a statement about the
             # server (_DOWNGRADE_STATUS_CODES). A 400 is ambiguous, so it
             # downgrades only when its OperationOutcome says the operation is
-            # missing — otherwise it is a payload rejection and belongs to this
-            # patient alone, with the server's explanation preserved (#414).
+            # missing — otherwise it is a payload rejection and belongs to the
+            # subjects, with the server's explanation preserved (#414).
             capability_signal = exc.status_code in _DOWNGRADE_STATUS_CODES or (
                 exc.status_code == 400 and _outcome_reports_unsupported_operation(exc)
             )
@@ -399,28 +581,41 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
                     "STU5 $submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
                     exc.status_code,
                     self._job_id,
-                    extra={"job_id": self._job_id, "patient_id": patient_id, "status_code": exc.status_code},
+                    extra={
+                        "job_id": self._job_id,
+                        "patient_id": subjects[0].patient_id,
+                        "subject_count": len(subjects),
+                        "status_code": exc.status_code,
+                    },
                 )
                 self._mode = SUBMIT_DATA_MODE_BASE
                 # Read by the orchestrator to persist Job.submit_data_mode, so
                 # the Jobs badge reports the mode actually used rather than the
                 # probe's verdict.
                 self._downgraded = True
-                retry_parameters = build_base_parameters(measure_report, submitted)
-                try:
-                    await submit_data(
-                        mcs_url=self._mcs_url,
-                        parameters=retry_parameters,
-                        mode=SUBMIT_DATA_MODE_BASE,
-                        measure_id=self._measure_id,
-                        auth_headers=self._mcs_auth_headers,
-                    )
-                except Exception as retry_exc:
-                    raise TransferPhaseError("submit", retry_exc) from retry_exc
-            else:
-                raise TransferPhaseError("submit", exc) from exc
-        except Exception as exc:
-            raise TransferPhaseError("submit", exc) from exc
+                # Capability first, isolation second, never both: base-fallback
+                # has no multi-bundle form, so this is a re-send, not a retry.
+                return await self._submit_individually(subjects, SUBMIT_DATA_MODE_BASE)
+            if len(subjects) > 1 and _is_payload_attributable(exc):
+                return await self._submit_individually(subjects, SUBMIT_DATA_MODE_STU5)
+            return [
+                SubjectOutcome(
+                    patient_id=s.patient_id,
+                    gather=s.gather,
+                    error=TransferPhaseError("submit", exc),
+                )
+                for s in subjects
+            ]
+        except Exception as exc:  # noqa: BLE001 - an outcome, not a raise, is the contract
+            return [
+                SubjectOutcome(
+                    patient_id=s.patient_id,
+                    gather=s.gather,
+                    error=TransferPhaseError("submit", exc),
+                )
+                for s in subjects
+            ]
+        return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
 
 
 async def build_submission_workflow(

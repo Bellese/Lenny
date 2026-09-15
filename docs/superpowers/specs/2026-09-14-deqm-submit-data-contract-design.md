@@ -266,46 +266,138 @@ serves the whole job and is shared by all four concurrent chunks, so a buffer on
 the instance would interleave subjects from different chunks and misattribute
 their failures. **The buffer is per-chunk**, owned by the caller.
 
-`SubmissionWorkflow` therefore gains an optional group protocol alongside the
-existing per-patient one:
+`SubmissionWorkflow` therefore gains a group protocol, and the orchestrator uses
+it for **every** workflow — a group of one is the degenerate case, not a separate
+code path:
 
 ```python
-submission_group_size: int          # 1 for direct_load and base-fallback
-async def prepare_patient(...) -> PreparedSubject     # gather + build, no MCS I/O
-async def submit_prepared(list[PreparedSubject]) -> list[PatientOutcome]
+@dataclass(frozen=True)
+class PreparedSubject:
+    patient_id: str
+    gather: GatherResult | None
+    measure_report: dict | None
+    resources: list[dict] | None        # filtered + deduped
+
+@dataclass(frozen=True)
+class SubjectOutcome:
+    patient_id: str
+    gather: GatherResult | None
+    error: TransferPhaseError | None
+
+class SubmissionWorkflow:
+    @property
+    def submission_group_size(self) -> int: ...   # 1 for direct_load and base-fallback
+    async def prepare_patient(...) -> PreparedSubject   # raises TransferPhaseError
+    async def submit_prepared(list[PreparedSubject]) -> list[SubjectOutcome]
 ```
 
-`_process_single_batch` walks its chunk in groups of `submission_group_size`,
-gathering each subject in turn and then issuing one POST per group.
-`submit_prepared` returns a per-patient outcome, so the orchestrator's existing
-per-patient bookkeeping — `processed`/`failed` counters, `gather_failed_patients`,
-`partial_gather_patients`, per-patient `MeasureResult` rows — works unchanged.
+The two halves fail differently on purpose. `prepare_patient` **raises**
+`TransferPhaseError`, which attributes a gather failure to one subject without
+poisoning the group it was being collected into. `submit_prepared` **never raises
+for a subject**; it returns one outcome per subject, because a single POST's
+failure has to be apportioned across N of them. The orchestrator routes both into
+one `_record_transfer_failure` helper, so a failure reaches the database by the
+same path whichever half produced it.
 
-`direct_load` and base-fallback report `submission_group_size == 1` and keep
-using `transfer_patient` exactly as today. **At size 1 the STU5 path is also
-byte-identical to today**: gather one subject, submit one bundle. Every existing
-path is therefore untouched, and the new mechanics are confined to the case that
-asked for them.
+The base class's defaults defer everything: `prepare_patient` returns an
+identity-only `PreparedSubject`, and `submit_prepared` loops calling
+`transfer_patient`, wrapping each result or exception into an outcome.
+`DirectLoadWorkflow` therefore gains **no lines at all** and behaves identically —
+at size 1 its group is one patient, and the `_stop_or_delete_job` check still runs
+per patient exactly where it does today. Only `DeqmSubmitDataWorkflow` overrides
+the pair, and only its STU5 path ever uses N > 1.
+
+`_process_single_batch` walks its chunk in groups of `submission_group_size`,
+gathering each subject in turn and then issuing one POST per group. Outcomes carry
+the `GatherResult`, so the existing per-patient bookkeeping — the `failed`
+counter, `gather_failed_patients`, `partial_gather_patients`, per-patient
+`MeasureResult` rows, the "Gathered N resources" log — works unchanged and reads
+from one place for both paths.
+
+`direct_load` and base-fallback report `submission_group_size == 1`, which routes
+them through the default `transfer_patient` delegation: today's behavior, reached
+by a different call shape. **At size 1 the STU5 path is also byte-identical to
+today**: gather one subject, submit one bundle, and on failure post exactly once
+(see the single-subject guard under Failure isolation). Every existing path is
+therefore untouched on the wire, and the new mechanics are confined to the case
+that asked for them.
+
+**Group size is read fresh, never snapshotted.**
+
+```python
+@property
+def submission_group_size(self) -> int:
+    return self._group_size if self._mode == SUBMIT_DATA_MODE_STU5 else 1
+```
+
+The orchestrator reads it at the top of each group, so a downgrade returns the job
+to one subject per POST for the remainder. That leaves one race worth naming: a
+chunk can form a group of N and *then* have another chunk's pioneer downgrade
+before it submits. `submit_prepared` closes it by re-reading the settled mode at
+submit time — handed N subjects under a settled `base` mode, it submits them
+individually in base form rather than building a multi-bundle envelope the server
+has already refused.
+
+**In PR 2 the group size is a constructor argument defaulting to 1** —
+`DeqmSubmitDataWorkflow(..., group_size: int = 1)`, which
+`build_submission_workflow` does not pass. Production is therefore size 1 by
+construction and the PR is behavior-neutral; tests construct the workflow with N
+directly. PR 3 threads the operator's value into that same argument, so nothing
+about the interface changes between the two.
+
+**A stop mid-group discards the buffer.** When `_stop_or_delete_job` reports a stop
+after some subjects are gathered but before the group's POST, the chunk returns and
+nothing is submitted. This matches what a stop already does to the remainder of a
+chunk — those subjects simply never happened. Flushing the buffer first would land
+data on the MCS after the operator told the job to stop.
 
 Phase 2 (`$evaluate-measure`) remains per-patient and is unaffected.
 
 ### Failure isolation
 
-`submit_prepared` issues one POST for the group. On failure it resubmits each
-subject alone, one bundle per call, and reports each outcome separately. One
-malformed resource therefore fails exactly the subject that owns it, as it does
-today — at the cost of one wasted round trip for the group that contained it.
+`submit_prepared` issues one POST for the group. When that POST fails, the failure
+is either about the *payload* — one subject's bad resource — or about the *server
+and the connection*, and the two deserve opposite treatment.
+
+**Payload-attributable failures isolate.**
+
+```python
+_ISOLATE_STATUS_CODES = {400, 409, 422}
+```
+
+Each subject is resubmitted alone, one bundle per call, and reported separately,
+so one malformed resource fails exactly the subject that owns it — as it does
+today, at the cost of one wasted round trip for the group that contained it. 409
+is in the set because HAPI's `ResourceVersionConflictException` (HAPI-0550/0823)
+is a per-resource verdict and has already broken this workflow once.
+
+**Everything else does not isolate.** A 401, 403, 404, 405, 429, any 5xx, a
+timeout, or a non-HTTP exception is a statement about the server or the
+connection; resubmitting N times only asks a down or unauthenticated server the
+same question N more times. With a chunk of 100 that turns one failed POST into
+101. These fail every subject in the group with that one verdict and issue exactly
+one POST. The taxonomy deliberately mirrors the reasoning already in
+`_DOWNGRADE_STATUS_CODES`: a status that describes the server is never read as a
+statement about a payload.
+
+**A single-subject group never isolates.** Resubmitting the one subject it holds
+would POST twice where PR 1 posts once, which would make size 1 not byte-identical
+after all. This guard is what keeps `direct_load`, base-fallback, and unconfigured
+STU5 on exactly today's wire behavior.
 
 Isolation retries under the **settled** mode; it never downgrades. That rule
 belongs to `_settle_mode_and_submit` alone (#414).
 
-The two mechanisms compose in a defined order. The pioneer group's failure is
-first tested for a capability signal by the existing logic — `_DOWNGRADE_STATUS_CODES`,
-or a 400 whose OperationOutcome reports an unsupported operation. If it is one,
-the job downgrades to `base-fallback` and that group's subjects are submitted
-individually in base mode, which is what base-fallback does anyway. If it is not,
-the failure is a payload rejection and isolation handles it. Capability first,
-isolation second; never both.
+The two mechanisms compose in a defined order. The pioneer is now a *group*:
+`_settle_mode_and_submit` takes the list, issues one POST carrying N bundles, and
+returns N outcomes. Its failure is first tested for a capability signal by the
+existing logic — `_DOWNGRADE_STATUS_CODES`, or a 400 whose OperationOutcome
+reports an unsupported operation. If it is one, the job downgrades to
+`base-fallback` and that group's subjects are submitted individually in base mode,
+which is what base-fallback does anyway. If it is not, the failure is a payload
+rejection and the isolation rules above apply. Capability first, isolation second;
+never both. `_mode_settled.set()` stays in a `finally`, so a pioneer group that
+fails outright still releases everyone waiting on its verdict.
 
 Once a job has downgraded, `submission_group_size` becomes 1 for the remainder —
 base-fallback has no multi-bundle form.
@@ -394,13 +486,30 @@ Organization stays resolvable.
 
 **Grouping and isolation.** Group size 1 issues one POST per subject and is
 indistinguishable from today. Group size N issues one POST per N subjects. A
-group whose POST fails resubmits each subject individually, and only the subject
-owning the bad resource is marked failed — the others are processed. A pioneer
-group failing with a capability signal downgrades and does not also isolate; a
-pioneer group failing with a payload rejection isolates and does not downgrade.
-Two chunks running concurrently do not mix subjects into each other's
-submissions — the test that would catch a buffer wrongly placed on the shared
-workflow instance.
+group whose POST fails with a payload-attributable status resubmits each subject
+individually, and only the subject owning the bad resource is marked failed — the
+others are processed. A pioneer group failing with a capability signal downgrades
+and does not also isolate; a pioneer group failing with a payload rejection
+isolates and does not downgrade. Two chunks running concurrently do not mix
+subjects into each other's submissions — the test that would catch a buffer
+wrongly placed on the shared workflow instance.
+
+Five more follow from the decisions above, each counting POSTs rather than
+inspecting state, because the cost of getting these wrong is measured in round
+trips:
+
+| Case | Expected |
+|---|---|
+| Size-1 group fails | Exactly one POST — no isolation retry |
+| Group of N fails 503 (or 401, or times out) | Exactly one POST; all N marked failed with that verdict |
+| Group of N fails 400 (or 409/412) | 1 + N POSTs for a plain 400; up to 2 + 2N when the failing status is 409 or 412, since `submit_data` retries those once internally (`fhir_client.py:1342`) before the isolation error ever reaches `_submit_group` — the initial group POST and each of the N isolation POSTs can each consume its own retry. Only the owning subject(s) failed either way. |
+| Group formed at N, job downgraded before its submit | N individual base-mode POSTs, no multi-bundle envelope |
+| Stop requested mid-group | Zero POSTs; buffer discarded |
+
+**Carried from PR 1's final review** (parked there because the code they cover is
+rewritten here): deduplication has no coverage in base-fallback mode, and nothing
+asserts that the downgrade-*rebuilt* base payload preserves it. Both land in this
+PR, which rewrites the downgrade path anyway.
 
 **Clamping.** A request above the chunk size clamps to it; a request against a
 `max: "1"` server clamps to 1 and warns; `0` resolves to the chunk size.
@@ -477,9 +586,11 @@ satisfies #413's originally published acceptance criteria.
 ### PR 2 — Grouping
 
 The group protocol, per-chunk buffer, failure isolation, and the downgrade
-interaction. No user-facing control yet: group size is 1 everywhere, so this PR
-is behavior-neutral by construction and its value is that the mechanics land
-under test before anything can select them.
+interaction. No user-facing control yet: group size is a constructor argument
+defaulting to 1 that `build_submission_workflow` does not pass, so this PR is
+behavior-neutral by construction and its value is that the mechanics land under
+test before anything can select them. No DB column, no API field, no frontend —
+those are all PR 3.
 
 - [ ] At group size 1 the STU5 path is byte-identical to PR 1 — one POST per
       subject, one `bundle` parameter.
@@ -500,6 +611,19 @@ under test before anything can select them.
 - [ ] `direct_load` and `base-fallback` report group size 1 and keep using
       `transfer_patient` unchanged.
 - [ ] Phase 2 `$evaluate-measure` remains per-patient.
+- [ ] A group failure that is not payload-attributable — 401, 403, 404, 405, 429,
+      any 5xx, a timeout — fails every subject in the group with that one verdict
+      and issues exactly one POST.
+- [ ] A single-subject group never isolates: its failure posts once, not twice.
+- [ ] `submission_group_size` is read per group, not snapshotted, so a downgrade
+      returns the job to one subject per POST for the remainder.
+- [ ] A group formed at size N but submitted after the job downgraded is submitted
+      individually in base mode.
+- [ ] A stop requested mid-group discards the buffer and submits nothing.
+- [ ] The orchestrator's per-patient failure persistence is one helper, reached
+      identically from a `prepare_patient` raise and a failed `SubjectOutcome`.
+- [ ] Deduplication is covered in base-fallback mode and survives the
+      downgrade-rebuilt base payload (carried from PR 1's review).
 
 ### PR 3 — The user-facing control
 
