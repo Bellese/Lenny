@@ -1,9 +1,12 @@
 """Per-job data submission workflows (spec: 2026-08-21-deqm-submit-data-workflow).
 
-A SubmissionWorkflow owns phase 1 of a job for one patient: gather from the
-CDR, deliver to the MCS. The orchestrator picks the concrete class from
-Job.workflow and calls transfer_patient(); phase 2 ($evaluate-measure) is
-identical for every workflow and stays in the orchestrator.
+A SubmissionWorkflow owns phase 1 of a job: gather each subject from the CDR
+and deliver it to the MCS, one subject at a time or, where the wire format
+supports it, in a group. The orchestrator picks the concrete class from
+Job.workflow and calls prepare_patient() then submit_prepared() for each
+group; transfer_patient() is the per-subject operation both build on. Phase 2
+($evaluate-measure) is identical for every workflow and stays in the
+orchestrator.
 """
 
 import abc
@@ -172,7 +175,9 @@ def _acquisition_strategy(
 
 
 class SubmissionWorkflow(abc.ABC):
-    """Gathers one patient's data from the CDR and delivers it to the MCS."""
+    """Gathers each subject's data from the CDR and delivers it to the MCS,
+    one subject at a time or, where the wire format supports it, in a group.
+    """
 
     name: str
 
@@ -305,11 +310,11 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # decides to downgrade — so a plain "has anything succeeded yet?" flag
         # leaves a window where a job ends up half STU5 and half base.
         #
-        # Instead the mode is SETTLED ONCE, behind a barrier: the first patient
+        # Instead the mode is SETTLED ONCE, behind a barrier: the first group
         # to reach the submit step under STU5 becomes the pioneer and is the
         # only one allowed to downgrade. Everyone else waits for its verdict
         # and then submits under the settled mode, with no downgrade path of
-        # their own. One patient's submission is therefore serialized; the rest
+        # their own. One group's submission is therefore serialized; the rest
         # run fully concurrent as before.
         #
         # The barrier only engages while the mode is STU5. base-fallback has

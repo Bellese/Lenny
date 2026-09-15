@@ -123,6 +123,20 @@ backend/app/
                          400s/404s on the real POST downgrades to base mode at runtime and retries
                          once (workflows.py); the stored `Job.submit_data_mode` still reflects the
                          original probe verdict.
+
+                         A DEQM job submits in **groups**. The orchestrator walks each processing
+                         chunk in groups of `submission_group_size`, gathering each subject in turn
+                         and then issuing one `$submit-data` POST carrying one `bundle` parameter
+                         per subject. Group size is 1 today; #413 PR 3 adds the operator control
+                         that raises it. The size is read fresh before every group, so a runtime
+                         downgrade to `base-fallback` — which has no multi-bundle form — returns the
+                         job to one subject per POST for the remainder.
+
+                         A group POST that fails with 400, 409 or 422 is resubmitted subject by
+                         subject, so one malformed resource fails only the subject that owns it. Any
+                         other failure (401, 403, 404, 405, 429, 5xx, a timeout) is a statement about
+                         the server rather than a payload, and fails every subject in the group with
+                         that one verdict instead of repeating the question N more times.
                          `_same_origin()` guards every paginated `next` link against SSRF (a
                          malicious or misconfigured server pointing pagination at a different
                          host) and normalises default ports per scheme first — `https://h` and

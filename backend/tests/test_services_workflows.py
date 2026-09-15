@@ -1108,17 +1108,14 @@ class TestDeqmGrouping:
         assert [p["name"] for p in params["parameter"]] == ["bundle"]
 
     async def test_submit_group_itself_handles_a_single_subject(self):
-        """`submit_prepared`'s len(subjects) == 1 guard routes every real
-        settled single-subject call to _submit_individually, so _submit_group
-        is currently unreachable through the normal path at group size 1 (no
-        production config sets group_size > 1 today). That guard is
-        transitional — a later task removes it — so this test calls
-        _submit_group directly, bypassing submit_prepared's routing entirely,
-        to keep guarding its single-subject envelope while it would otherwise
-        go untested: without this, _submit_group's own size-1 handling could
-        silently break, or the method could be deleted outright, and
+        """This test calls `_submit_group` directly, rather than going through
+        `submit_prepared`, so the single-subject envelope is covered by a test
+        that does not depend on how `submit_prepared` happens to route.
+        Without this, `_submit_group`'s own size-1 handling could silently
+        break, or the method could be deleted outright, and
         test_a_group_of_one_is_byte_identical_to_the_ungrouped_payload would
-        not notice, because it never reaches _submit_group at all.
+        not notice, because it goes through `submit_prepared` and never
+        necessarily reaches `_submit_group` at all.
         """
         wf = _deqm_workflow(mode="stu5")
         subjects = await self._prepare(wf, ["p1"])
@@ -1384,3 +1381,96 @@ class TestPioneerGroup:
         assert modes.count("stu5") == 1, "only the pioneer may attempt STU5"
         assert wf.mode == "base-fallback"
         assert all(m == "base-fallback" for m in modes[1:])
+
+
+class TestCrossChunkSafety:
+    async def test_two_concurrent_chunks_never_mix_subjects(self):
+        """The buffer is a LOCAL in the orchestrator, not state on the shared
+        workflow instance. If it ever moves onto the instance, subjects from
+        different chunks interleave into each other's submissions and their
+        failures are misattributed — this is the test that catches it."""
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = 2
+        wf._mode_settled.set()
+
+        async def _prepare(pid):
+            with patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": pid}])),
+            ):
+                return await wf.prepare_patient("http://cdr", pid, {})
+
+        chunk_a = [await _prepare(p) for p in ("a1", "a2")]
+        chunk_b = [await _prepare(p) for p in ("b1", "b2")]
+        posted: list[list[str]] = []
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            posted.append(
+                [
+                    p["resource"]["entry"][0]["resource"]["subject"]["reference"].split("/")[1]
+                    for p in parameters["parameter"]
+                ]
+            )
+            await asyncio.sleep(0)  # force interleaving
+
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)):
+            await asyncio.gather(wf.submit_prepared(chunk_a), wf.submit_prepared(chunk_b))
+
+        assert sorted(posted) == [["a1", "a2"], ["b1", "b2"]]
+
+
+class TestDedupeAcrossModes:
+    """Carried from PR 1's final review (finding M6, parked for this PR because
+    the downgrade path it covers is rewritten here)."""
+
+    _DUPES = GatherResult(
+        resources=[
+            {"resourceType": "Patient", "id": "p1"},
+            {"resourceType": "Condition", "id": "c1", "code": {"text": "first"}},
+            {"resourceType": "Condition", "id": "c1", "code": {"text": "first"}},
+        ]
+    )
+
+    async def test_dedupe_applies_in_base_fallback_mode(self):
+        """Deduplication runs upstream of mode selection, but nothing asserted
+        it in base mode — where the resources travel as `resource` parameters
+        rather than Bundle entries."""
+        wf = _deqm_workflow(mode="base-fallback")
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=self._DUPES)),
+            patch("app.services.workflows.submit_data", new=AsyncMock()) as submit,
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+        params = submit.call_args.kwargs["parameters"]
+        resources = [p["resource"] for p in params["parameter"] if p["name"] == "resource"]
+        assert [(r["resourceType"], r["id"]) for r in resources] == [("Patient", "p1"), ("Condition", "c1")]
+        mr = params["parameter"][0]["resource"]
+        assert mr["evaluatedResource"] == [
+            {"reference": "Patient/p1"},
+            {"reference": "Condition/c1"},
+        ]
+
+    async def test_the_downgrade_rebuilt_base_payload_preserves_dedupe(self):
+        """The downgrade re-sends the group in base form. That payload is built
+        from the same prepared resources, so the dedupe must survive the
+        rebuild — nothing asserted that before."""
+        wf = _deqm_workflow(mode="stu5")
+        sent: list[dict] = []
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            sent.append({"mode": mode, "parameters": parameters})
+            if mode == "stu5":
+                raise _fhir_op_error(404)
+            return None
+
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=self._DUPES)),
+            patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)),
+        ):
+            await wf.transfer_patient("http://cdr", "p1", {})
+
+        assert wf.downgraded is True
+        base = [s for s in sent if s["mode"] == "base-fallback"][0]["parameters"]
+        resources = [p["resource"] for p in base["parameter"] if p["name"] == "resource"]
+        assert [(r["resourceType"], r["id"]) for r in resources] == [("Patient", "p1"), ("Condition", "c1")]
