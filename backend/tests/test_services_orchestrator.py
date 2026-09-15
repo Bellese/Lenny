@@ -1124,7 +1124,17 @@ async def test_a_runtime_downgrade_rewrites_the_stored_group_size_to_one(test_se
 
 async def test_a_job_that_does_not_downgrade_keeps_its_group_size(test_session, session_factory):
     """A job that settles on stu5 without ever downgrading keeps the group
-    size it was created with — only a runtime downgrade should touch it."""
+    size it was created with — only a runtime downgrade should touch it.
+
+    The job is created with submit_data_mode=None (not "stu5") so that the
+    outer `if settled_mode and job.submit_data_mode != settled_mode:` guard
+    is actually entered once the workflow settles at "stu5" — otherwise this
+    test cannot distinguish "the inner STU5 check protects
+    bundles_per_submission" from "the whole persistence branch never ran at
+    all". With the outer guard entered and settled_mode == SUBMIT_DATA_MODE_STU5,
+    the inner check is the only thing standing between this job and having its
+    bundles_per_submission clobbered to 1 — which is exactly the mutation this
+    test must catch."""
     from app.models.job import Batch, BatchStatus
     from app.services.orchestrator import _process_single_batch
     from app.services.workflows import DeqmSubmitDataWorkflow
@@ -1136,7 +1146,7 @@ async def test_a_job_that_does_not_downgrade_keeps_its_group_size(test_session, 
         cdr_url="http://cdr/fhir",
         status=JobStatus.running,
         workflow="deqm_submit_data",
-        submit_data_mode="stu5",
+        submit_data_mode=None,  # not yet settled — forces the outer guard to run
         bundles_per_submission=20,
         bundles_per_submission_requested=20,
     )
@@ -1194,6 +1204,9 @@ async def test_a_job_that_does_not_downgrade_keeps_its_group_size(test_session, 
     assert workflow.downgraded is False
     refreshed = await test_session.get(Job, job.id)
     await test_session.refresh(refreshed)
+    # The outer guard DID run (submit_data_mode went from None to "stu5"),
+    # so this assertion is only true because the inner STU5 check blocked
+    # the rewrite — not because the persistence branch was skipped entirely.
     assert refreshed.submit_data_mode == "stu5"
     assert refreshed.bundles_per_submission == 20
 
