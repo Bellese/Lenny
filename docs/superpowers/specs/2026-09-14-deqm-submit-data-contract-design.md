@@ -418,17 +418,35 @@ becomes `None`, a digit string becomes an `int`, and anything else becomes
 limit — the mode verdict is unaffected either way, so a malformed bound can
 never cost a job its STU5 path.
 
-**Effective value.** Resolved at job creation and clamped:
+**Effective value.** Resolved at job creation as a three-way branch, not the
+`or`-shorthand formula an earlier draft of this section described:
 
 ```
-effective = min(requested or CHUNK, server_bundle_max or INF, CHUNK)
+candidate = 1                    if requested is None   (unspecified: conservative default)
+          = CHUNK                if requested == 0      (explicit "as many as fit")
+          = requested            otherwise
+effective = min(candidate, server_bundle_max or INF, CHUNK)
+effective = 1                    if the probed mode is not `stu5`
 ```
 
-where `CHUNK` is `settings.BATCH_SIZE` and `requested == 0` means "no limit
-beyond the chunk". A server advertising `bundle` `max: "1"` clamps any request to
-1 with a warning — sending what the server declared it will not accept is not a
-useful experiment. The clamp is recorded in the log line, so a silently reduced
-group size is explainable.
+where `CHUNK` is `settings.BATCH_SIZE`. The `or`-shorthand `requested or CHUNK`
+is deliberately avoided: `0` is falsy, so it would merge the "unspecified"
+and "explicit unlimited" cases and silently turn every unspecified request into
+a `CHUNK`-sized POST. A server advertising `bundle` `max: "1"` clamps any
+request to 1 with a warning — sending what the server declared it will not
+accept is not a useful experiment. The clamp is recorded in the log line, so a
+silently reduced group size is explainable.
+
+**The mode rule is not optional.** `base-fallback` (and any mode other than
+`stu5`) has no multi-bundle envelope — `DeqmSubmitDataWorkflow.submission_group_size`
+collapses to 1 outside STU5 from the moment the workflow is built, regardless of
+what `bundle_max` the probe returned (`base-fallback` never carries one). A
+clamp computed only from `bundle_max` and `CHUNK` is mode-blind: against the
+bundled HAPI image, which always probes `base-fallback`, it would store
+whatever the operator requested (up to `CHUNK`) while the job actually runs at
+group size 1. The effective value must be forced to 1 whenever the mode is not
+`stu5`, applied at job creation alongside the other ceilings; the raw request
+still lands in `bundles_per_submission_requested` unchanged.
 
 **Job record, and why there is no settings row.** Two nullable integer columns on
 `jobs`, both NULL for `direct_load`:
@@ -715,9 +733,13 @@ API field, clamping, the M6 lock narrowing, and the UI.
       a negative or non-integer value is rejected with 422.
 - [ ] `0` is accepted and resolves to the processing-chunk size
       (`settings.BATCH_SIZE`).
-- [ ] The effective value is
-      `min(requested or CHUNK, server bundle max, CHUNK)`, and any clamp that
-      reduces the request is logged with its reason.
+- [ ] The effective value resolves the three-way candidate (1 if unspecified,
+      CHUNK if an explicit 0, else the raw request) against `min(candidate,
+      server bundle max, CHUNK)`, then forces the result to 1 whenever the
+      probed mode is not `stu5` — base-fallback has no multi-bundle envelope,
+      so a job in that mode always runs at group size 1 regardless of what was
+      requested or what `bundle_max` allowed. Any clamp that reduces the
+      request is logged with its reason.
 - [ ] `detect_submit_data_capability` returns the declared `bundle` max alongside
       the mode: `"*"` and any unparseable value resolve to unbounded, a digit
       string to that integer.
