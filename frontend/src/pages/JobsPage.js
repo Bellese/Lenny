@@ -55,7 +55,7 @@ export default function JobsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showModal, setShowModal] = useState(false);
-  const [formData, setFormData] = useState({ measure_id: '', group_id: '', period_start: '', period_end: '', workflow: 'direct_load', bundles_per_submission: '1' });
+  const [formData, setFormData] = useState({ measure_id: '', group_id: '', period_start: '', period_end: '', workflow: 'direct_load', bundles_per_submission: null });
   const [creating, setCreating] = useState(false);
   const [confirmJob, setConfirmJob] = useState(null);
   const [deletingJobIds, setDeletingJobIds] = useState([]);
@@ -69,6 +69,16 @@ export default function JobsPage() {
   // endpoint and no second fetch. It reads the REQUESTED column, never the
   // clamped one: a job whose 50 was reduced to 1 by a max:1 server must still
   // offer 50, or one run would ratchet the preference down permanently.
+  //
+  // formData.bundles_per_submission stays `null` ("the operator hasn't
+  // touched this") until they edit the field; every read of it — the input's
+  // `value` below and handleCreateJob's payload — falls back to this memo
+  // instead of seeding it imperatively on modal-open. That way the default
+  // tracks `jobs` the instant it resolves, however long that fetch takes
+  // relative to `measures`, rather than freezing whatever `jobs` happened to
+  // contain at the moment a modal-opening effect fired (#413 fix round 1: the
+  // ?newCalc= deep link raced getJobs vs getMeasures and could seed a stale
+  // default permanently).
   const rememberedBundles = useMemo(() => {
     const lastDeqm = jobs.find(
       j => j.workflow === 'deqm_submit_data' && j.bundles_per_submission_requested !== null
@@ -184,7 +194,7 @@ export default function JobsPage() {
         period_end: formData.period_end || undefined,
         workflow: formData.workflow,
         ...(formData.workflow === 'deqm_submit_data'
-          ? { bundles_per_submission: Number(formData.bundles_per_submission) }
+          ? { bundles_per_submission: Number(formData.bundles_per_submission ?? rememberedBundles) }
           : {}),
       });
       toast.success('Calculation started');
@@ -251,11 +261,10 @@ export default function JobsPage() {
     setFormData(prev => ({
       ...prev,
       measure_id: exists ? newCalcId : (prev.measure_id || measures[0]?.id || ''),
-      bundles_per_submission: rememberedBundles,
     }));
     setShowModal(true);
     navigate(location.pathname, { replace: true });
-  }, [location.search, measures, navigate, location.pathname, rememberedBundles]);
+  }, [location.search, measures, navigate, location.pathname]);
 
   const getProgress = (job) => {
     if (job.progress !== undefined && job.progress !== null) return job.progress;
@@ -305,15 +314,7 @@ export default function JobsPage() {
             {jobs.filter(j => (j.status || '').toLowerCase() === 'failed').length} failed
           </div>
         </div>
-        <button
-          className={styles.btnPrimary}
-          onClick={() => {
-            // Seed on open, not on render: the operator may edit the field, and
-            // re-deriving it underneath them would discard what they typed.
-            setFormData(p => ({ ...p, bundles_per_submission: rememberedBundles }));
-            setShowModal(true);
-          }}
-        >
+        <button className={styles.btnPrimary} onClick={() => setShowModal(true)}>
           <PlusIcon /> New calculation
         </button>
       </div>
@@ -556,7 +557,7 @@ export default function JobsPage() {
                     min="0"
                     step="1"
                     className={styles.input}
-                    value={formData.bundles_per_submission}
+                    value={formData.bundles_per_submission ?? rememberedBundles}
                     onChange={e => setFormData(p => ({ ...p, bundles_per_submission: e.target.value }))}
                   />
                   <span className={styles.fieldHelp}>

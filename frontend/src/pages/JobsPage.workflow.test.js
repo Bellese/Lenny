@@ -13,7 +13,7 @@ import * as api from '../api/client';
 // doesn't support the type-level operation with bundles.
 jest.mock('../api/client');
 
-function Harness() {
+function Harness({ initialEntries } = {}) {
   return (
     <ToastProvider>
       <ConnectionContext.Provider
@@ -23,7 +23,7 @@ function Harness() {
           refresh: jest.fn(),
         }}
       >
-        <MemoryRouter>
+        <MemoryRouter initialEntries={initialEntries || ['/']}>
           <JobsPage />
         </MemoryRouter>
       </ConnectionContext.Provider>
@@ -249,5 +249,42 @@ describe('JobsPage — data submission workflow', () => {
     await waitFor(() => expect(measureSelect.value).toBe('CMS999'));
     await userEvent.click(screen.getByRole('button', { name: /Start calculation/i }));
     expect(await screen.findByText(/reduced .* to 1/i)).toBeInTheDocument();
+  });
+
+  // Fix round 1 (#413): the ?newCalc= deep link opens the modal as soon as
+  // `measures` resolves, racing `jobs` (fetched in parallel from a separate
+  // effect). The old imperative seed captured whatever `jobs` contained at
+  // that instant and then could never re-seed, because the same effect also
+  // strips the `newCalc` param via navigate(..., { replace: true }) — once
+  // gone, its early-return guard (`if (!newCalcId ...)`) permanently skips
+  // the seeding branch. This reproduces that ordering by resolving getJobs
+  // strictly after getMeasures and after the deep-link effect has already
+  // run, then asserts the field converges on the real remembered value
+  // instead of freezing on the stale one.
+  test('the ?newCalc= deep link converges on the remembered value even when jobs resolves after measures', async () => {
+    api.getMeasures = jest.fn().mockResolvedValue({ measures: [{ id: 'CMS999' }] });
+    api.getJobs = jest.fn(
+      () =>
+        new Promise(resolve => {
+          setTimeout(
+            () =>
+              resolve({
+                jobs: [
+                  {
+                    ...BASE_JOB,
+                    workflow: 'deqm_submit_data',
+                    bundles_per_submission: 50,
+                    bundles_per_submission_requested: 50,
+                  },
+                ],
+              }),
+            50
+          );
+        })
+    );
+    render(<Harness initialEntries={['/?newCalc=CMS999']} />);
+    await userEvent.selectOptions(await screen.findByLabelText(/Data submission workflow/i), 'deqm_submit_data');
+    const input = await screen.findByLabelText(/Bundles per submission/i);
+    await waitFor(() => expect(input.value).toBe('50'), { timeout: 3000 });
   });
 });
