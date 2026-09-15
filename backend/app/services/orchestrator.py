@@ -20,6 +20,7 @@ from app.dependencies import resolve_job_mcs_auth_headers
 from app.models.config import CDRConfig
 from app.models.job import Batch, BatchStatus, Job, JobStatus, MeasureResult
 from app.services.fhir_client import (
+    SUBMIT_DATA_MODE_STU5,
     BatchQueryStrategy,
     FhirOperationError,
     _build_auth_headers,
@@ -1009,6 +1010,14 @@ async def _process_single_batch(
                             },
                         )
                         job.submit_data_mode = settled_mode
+                        # base-fallback has no multi-bundle form, so a
+                        # downgraded job submitted one subject per call no
+                        # matter what was chosen. The requested column is
+                        # deliberately NOT touched: it records what the operator
+                        # asked for, and the creation form reads it back as the
+                        # remembered preference.
+                        if settled_mode != SUBMIT_DATA_MODE_STU5 and job.bundles_per_submission not in (None, 1):
+                            job.bundles_per_submission = 1
                     await session.commit()
 
             return  # Success — exit retry loop
