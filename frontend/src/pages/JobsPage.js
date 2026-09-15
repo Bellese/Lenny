@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import styles from './JobsPage.module.css';
 import { getJobs, getMeasures, getGroups, createJob, cancelJob, deleteJob } from '../api/client';
@@ -55,7 +55,7 @@ export default function JobsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showModal, setShowModal] = useState(false);
-  const [formData, setFormData] = useState({ measure_id: '', group_id: '', period_start: '', period_end: '', workflow: 'direct_load' });
+  const [formData, setFormData] = useState({ measure_id: '', group_id: '', period_start: '', period_end: '', workflow: 'direct_load', bundles_per_submission: '1' });
   const [creating, setCreating] = useState(false);
   const [confirmJob, setConfirmJob] = useState(null);
   const [deletingJobIds, setDeletingJobIds] = useState([]);
@@ -63,6 +63,19 @@ export default function JobsPage() {
   const toast = useToast();
   const { query } = useSearch();
   const { mcs, cdr } = useConnection();
+
+  // The remembered preference. GET /api/jobs already returns every job newest
+  // first, and this page already holds that list — so the default costs no
+  // endpoint and no second fetch. It reads the REQUESTED column, never the
+  // clamped one: a job whose 50 was reduced to 1 by a max:1 server must still
+  // offer 50, or one run would ratchet the preference down permanently.
+  const rememberedBundles = useMemo(() => {
+    const lastDeqm = jobs.find(
+      j => j.workflow === 'deqm_submit_data' && j.bundles_per_submission_requested !== null
+        && j.bundles_per_submission_requested !== undefined
+    );
+    return lastDeqm ? String(lastDeqm.bundles_per_submission_requested) : '1';
+  }, [jobs]);
 
   const loadJobs = useCallback(async () => {
     try {
@@ -170,10 +183,18 @@ export default function JobsPage() {
         period_start: formData.period_start || undefined,
         period_end: formData.period_end || undefined,
         workflow: formData.workflow,
+        ...(formData.workflow === 'deqm_submit_data'
+          ? { bundles_per_submission: Number(formData.bundles_per_submission) }
+          : {}),
       });
       toast.success('Calculation started');
       if (created?.submit_data_mode === 'base-fallback') {
         toast.warning('MCS does not support type-level $submit-data with bundles — falling back to instance-level $submit-data.');
+      }
+      const requested = created?.bundles_per_submission_requested;
+      const effective = created?.bundles_per_submission;
+      if (requested > 0 && effective > 0 && effective < requested) {
+        toast.warning(`Bundles per submission reduced from ${requested} to ${effective} — the server or the batch size is lower.`);
       }
       setShowModal(false);
       setFormData(prev => ({ ...prev, period_start: '', period_end: '' }));
@@ -227,10 +248,14 @@ export default function JobsPage() {
     const newCalcId = params.get('newCalc');
     if (!newCalcId || !measures.length) return;
     const exists = measures.some(m => m.id === newCalcId);
-    setFormData(prev => ({ ...prev, measure_id: exists ? newCalcId : (prev.measure_id || measures[0]?.id || '') }));
+    setFormData(prev => ({
+      ...prev,
+      measure_id: exists ? newCalcId : (prev.measure_id || measures[0]?.id || ''),
+      bundles_per_submission: rememberedBundles,
+    }));
     setShowModal(true);
     navigate(location.pathname, { replace: true });
-  }, [location.search, measures, navigate, location.pathname]);
+  }, [location.search, measures, navigate, location.pathname, rememberedBundles]);
 
   const getProgress = (job) => {
     if (job.progress !== undefined && job.progress !== null) return job.progress;
@@ -280,7 +305,15 @@ export default function JobsPage() {
             {jobs.filter(j => (j.status || '').toLowerCase() === 'failed').length} failed
           </div>
         </div>
-        <button className={styles.btnPrimary} onClick={() => setShowModal(true)}>
+        <button
+          className={styles.btnPrimary}
+          onClick={() => {
+            // Seed on open, not on render: the operator may edit the field, and
+            // re-deriving it underneath them would discard what they typed.
+            setFormData(p => ({ ...p, bundles_per_submission: rememberedBundles }));
+            setShowModal(true);
+          }}
+        >
           <PlusIcon /> New calculation
         </button>
       </div>
@@ -514,6 +547,24 @@ export default function JobsPage() {
                   <option value="deqm_submit_data">DEQM Data Exchange — $submit-data (bundle)</option>
                 </select>
               </div>
+              {formData.workflow === 'deqm_submit_data' && (
+                <div className={styles.field}>
+                  <label className={styles.label} htmlFor="bundles-input">Bundles per submission</label>
+                  <input
+                    id="bundles-input"
+                    type="number"
+                    min="0"
+                    step="1"
+                    className={styles.input}
+                    value={formData.bundles_per_submission}
+                    onChange={e => setFormData(p => ({ ...p, bundles_per_submission: e.target.value }))}
+                  />
+                  <span className={styles.fieldHelp}>
+                    How many subjects&rsquo; bundles ride in one $submit-data call.
+                    0 submits every subject in a processing batch; larger values are reduced to the batch size.
+                  </span>
+                </div>
+              )}
               <PeriodPicker
                 periodStart={formData.period_start}
                 periodEnd={formData.period_end}

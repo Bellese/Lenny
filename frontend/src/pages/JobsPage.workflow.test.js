@@ -149,4 +149,105 @@ describe('JobsPage — data submission workflow', () => {
     await screen.findByText(/Test Measure/);
     expect(screen.queryByText(/DEQM/)).not.toBeInTheDocument();
   });
+
+  test('the bundles input appears only on the DEQM branch', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
+    render(<Harness />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    expect(screen.queryByLabelText(/Bundles per submission/i)).not.toBeInTheDocument();
+    await userEvent.selectOptions(await screen.findByLabelText(/Data submission workflow/i), 'deqm_submit_data');
+    expect(await screen.findByLabelText(/Bundles per submission/i)).toBeInTheDocument();
+  });
+
+  test('it defaults to 1 when no DEQM job exists', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
+    render(<Harness />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    await userEvent.selectOptions(await screen.findByLabelText(/Data submission workflow/i), 'deqm_submit_data');
+    expect((await screen.findByLabelText(/Bundles per submission/i)).value).toBe('1');
+  });
+
+  test('it defaults to the most recent DEQM job\'s REQUESTED value, not its clamped one', async () => {
+    // The whole point of storing two columns: a job clamped from 50 to 1 must
+    // still offer 50, or one run against a max:1 server would ratchet the
+    // operator's preference down permanently.
+    api.getJobs = jest.fn().mockResolvedValue({
+      jobs: [
+        { ...BASE_JOB, id: 2, workflow: 'deqm_submit_data', bundles_per_submission: 1, bundles_per_submission_requested: 50 },
+        { ...BASE_JOB, id: 1, workflow: 'deqm_submit_data', bundles_per_submission: 5, bundles_per_submission_requested: 5 },
+      ],
+    });
+    render(<Harness />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    await userEvent.selectOptions(await screen.findByLabelText(/Data submission workflow/i), 'deqm_submit_data');
+    expect((await screen.findByLabelText(/Bundles per submission/i)).value).toBe('50');
+  });
+
+  test('direct_load jobs never contribute a default', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({
+      jobs: [
+        { ...BASE_JOB, id: 2, workflow: 'direct_load', bundles_per_submission: null, bundles_per_submission_requested: null },
+        { ...BASE_JOB, id: 1, workflow: 'deqm_submit_data', bundles_per_submission: 8, bundles_per_submission_requested: 8 },
+      ],
+    });
+    render(<Harness />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    await userEvent.selectOptions(await screen.findByLabelText(/Data submission workflow/i), 'deqm_submit_data');
+    expect((await screen.findByLabelText(/Bundles per submission/i)).value).toBe('8');
+  });
+
+  test('0 is accepted and sent', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
+    render(<Harness />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    await userEvent.selectOptions(await screen.findByLabelText(/Data submission workflow/i), 'deqm_submit_data');
+    const input = await screen.findByLabelText(/Bundles per submission/i);
+    await userEvent.clear(input);
+    await userEvent.type(input, '0');
+    const measureSelect = await screen.findByLabelText('Measure');
+    await waitFor(() => expect(measureSelect.value).toBe('CMS999'));
+    await userEvent.click(screen.getByRole('button', { name: /Start calculation/i }));
+    await waitFor(() =>
+      expect(api.createJob).toHaveBeenCalledWith(expect.objectContaining({ bundles_per_submission: 0 }))
+    );
+  });
+
+  test('direct_load sends no bundles value at all', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
+    render(<Harness />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    const measureSelect = await screen.findByLabelText('Measure');
+    await waitFor(() => expect(measureSelect.value).toBe('CMS999'));
+    await userEvent.click(screen.getByRole('button', { name: /Start calculation/i }));
+    const sent = api.createJob.mock.calls[0][0];
+    expect(sent.bundles_per_submission).toBeUndefined();
+  });
+
+  test('the helper text states the rule without hardcoding the batch size', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
+    render(<Harness />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    await userEvent.selectOptions(await screen.findByLabelText(/Data submission workflow/i), 'deqm_submit_data');
+    const help = await screen.findByText(/0 submits every subject in a processing batch/i);
+    expect(help).toBeInTheDocument();
+    expect(help.textContent).not.toMatch(/\b100\b/);
+  });
+
+  test('a clamped creation reports the value the server actually accepted', async () => {
+    api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
+    api.createJob = jest.fn().mockResolvedValue({
+      ...BASE_JOB, workflow: 'deqm_submit_data', submit_data_mode: 'stu5',
+      bundles_per_submission: 1, bundles_per_submission_requested: 50,
+    });
+    render(<Harness />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    await userEvent.selectOptions(await screen.findByLabelText(/Data submission workflow/i), 'deqm_submit_data');
+    const input = await screen.findByLabelText(/Bundles per submission/i);
+    await userEvent.clear(input);
+    await userEvent.type(input, '50');
+    const measureSelect = await screen.findByLabelText('Measure');
+    await waitFor(() => expect(measureSelect.value).toBe('CMS999'));
+    await userEvent.click(screen.getByRole('button', { name: /Start calculation/i }));
+    expect(await screen.findByText(/reduced .* to 1/i)).toBeInTheDocument();
+  });
 });

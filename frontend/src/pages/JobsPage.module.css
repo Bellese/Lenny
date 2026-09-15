@@ -434,6 +434,12 @@
   color: var(--text-dim);
 }
 
+.fieldHelp {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+
 .select,
 .input {
   width: 100%;
