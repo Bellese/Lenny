@@ -195,6 +195,7 @@ async def run_job(job_id: int) -> None:
             job_measure_id = job_row.measure_id
             job_period_start = job_row.period_start
             job_period_end = job_row.period_end
+            job_bundles_per_submission = job_row.bundles_per_submission
 
         if group_id:
             logger.info("Gathering patients from Group", extra={"job_id": job_id, "group_id": group_id})
@@ -237,6 +238,7 @@ async def run_job(job_id: int) -> None:
             submit_data_mode=job_submit_data_mode,
             period_start=job_period_start,
             period_end=job_period_end,
+            bundles_per_submission=job_bundles_per_submission,
         )
 
         # Step 4a: Clear the prior run's data off the MCS (issue #392).

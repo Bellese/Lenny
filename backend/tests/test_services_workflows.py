@@ -7,7 +7,7 @@ import pytest
 
 from app.config import settings
 from app.services.deqm import LENNY_REPORTER_ORG
-from app.services.fhir_client import BatchQueryStrategy, DataRequirementsStrategy, GatherResult
+from app.services.fhir_client import SUBMIT_DATA_MODE_STU5, BatchQueryStrategy, DataRequirementsStrategy, GatherResult
 from app.services.fhir_errors import FhirOperationError, FhirOperationOutcome
 from app.services.workflows import (
     DeqmSubmitDataWorkflow,
@@ -1481,3 +1481,57 @@ class TestDedupeAcrossModes:
         base = [s for s in sent if s["mode"] == "base-fallback"][0]["parameters"]
         resources = [p["resource"] for p in base["parameter"] if p["name"] == "resource"]
         assert [(r["resourceType"], r["id"]) for r in resources] == [("Patient", "p1"), ("Condition", "c1")]
+
+
+class TestGroupSizeThreading:
+    async def test_factory_passes_the_stored_value_to_the_workflow(self):
+        with patch(
+            "app.services.workflows.get_measure_canonical",
+            AsyncMock(return_value="http://example.org/Measure/CMS999"),
+        ):
+            wf = await build_submission_workflow(
+                workflow="deqm_submit_data",
+                job_id=1,
+                measure_id="CMS999",
+                mcs_url="http://mcs",
+                mcs_auth_headers=None,
+                submit_data_mode=SUBMIT_DATA_MODE_STU5,
+                period_start="2025-01-01",
+                period_end="2025-12-31",
+                bundles_per_submission=20,
+            )
+        assert wf.submission_group_size == 20
+
+    async def test_a_legacy_null_resolves_to_one(self):
+        """Rows created before the column existed read as None. One subject per
+        POST is what those jobs actually did, so that is what None must mean."""
+        with patch(
+            "app.services.workflows.get_measure_canonical",
+            AsyncMock(return_value="http://example.org/Measure/CMS999"),
+        ):
+            wf = await build_submission_workflow(
+                workflow="deqm_submit_data",
+                job_id=1,
+                measure_id="CMS999",
+                mcs_url="http://mcs",
+                mcs_auth_headers=None,
+                submit_data_mode=SUBMIT_DATA_MODE_STU5,
+                period_start="2025-01-01",
+                period_end="2025-12-31",
+                bundles_per_submission=None,
+            )
+        assert wf.submission_group_size == 1
+
+    async def test_direct_load_ignores_the_value_entirely(self):
+        wf = await build_submission_workflow(
+            workflow="direct_load",
+            job_id=1,
+            measure_id="CMS999",
+            mcs_url="http://mcs",
+            mcs_auth_headers=None,
+            submit_data_mode=None,
+            period_start="2025-01-01",
+            period_end="2025-12-31",
+            bundles_per_submission=50,
+        )
+        assert wf.submission_group_size == 1

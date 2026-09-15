@@ -628,6 +628,7 @@ async def build_submission_workflow(
     submit_data_mode: str | None,
     period_start: str,
     period_end: str,
+    bundles_per_submission: int | None = None,
 ) -> SubmissionWorkflow:
     """Build the job's workflow. For DEQM, fetches the measure canonical from
     the MCS — raising (job fails fast) when the Measure can't be read, or when
@@ -680,5 +681,8 @@ async def build_submission_workflow(
             period_start=period_start,
             period_end=period_end,
             mode=resolved_mode,
+            # None is a row created before #413 PR 3 added the column; those
+            # jobs submitted one subject per POST, so that is what None means.
+            group_size=bundles_per_submission or 1,
         )
     return DirectLoadWorkflow(measure_id, mcs_url, mcs_auth_headers)

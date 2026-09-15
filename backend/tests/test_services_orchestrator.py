@@ -1808,7 +1808,42 @@ async def test_run_job_passes_job_fields_to_build_submission_workflow(test_sessi
         submit_data_mode="stu5",
         period_start="2024-01-01",
         period_end="2024-12-31",
+        bundles_per_submission=None,
     )
+
+
+async def test_the_jobs_stored_group_size_reaches_the_factory(test_session, session_factory):
+    """The column is inert unless the orchestrator actually forwards it."""
+    job_id = await _setup_job(test_session)
+    async with session_factory() as session:
+        job = await session.get(Job, job_id)
+        job.workflow = "deqm_submit_data"
+        job.bundles_per_submission = 7
+        await session.commit()
+
+    patients = [{"resourceType": "Patient", "id": "p1", "name": [{"family": "Test"}]}]
+    stub = _StubWorkflow(GatherResult(resources=[{"resourceType": "Patient", "id": "p1"}]))
+
+    with contextlib.ExitStack() as stack:
+        for p in _run_job_patches(session_factory, patients, stub):
+            stack.enter_context(p)
+        build_mock = stack.enter_context(
+            patch(
+                "app.services.orchestrator.build_submission_workflow",
+                new_callable=AsyncMock,
+                return_value=stub,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "app.services.orchestrator.evaluate_measure",
+                new_callable=AsyncMock,
+                return_value={"resourceType": "MeasureReport", "group": []},
+            )
+        )
+        await run_job(job_id)
+
+    assert build_mock.await_args.kwargs["bundles_per_submission"] == 7
 
 
 async def test_run_job_build_submission_workflow_failure_skips_wipe_and_fails_job(test_session, session_factory):
