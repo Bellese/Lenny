@@ -64,6 +64,16 @@ class JobCreate(BaseModel):
     cdr_url: Optional[str] = None  # if omitted, use active CDR config or default
     group_id: Optional[str] = None  # if set, only evaluate patients in this FHIR Group
     workflow: str = "direct_load"
+    # Issue #413 PR 3. >= 0; 0 means "every subject in a processing batch".
+    # None means the caller said nothing and takes the conservative default.
+    bundles_per_submission: Optional[int] = None
+
+    @field_validator("bundles_per_submission")
+    @classmethod
+    def validate_bundles_per_submission(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and v < 0:
+            raise ValueError("bundles_per_submission must be zero or greater")
+        return v
 
     @field_validator("group_id")
     @classmethod
@@ -168,6 +178,29 @@ def _job_to_response(job: Job) -> dict:
         "bundles_per_submission": job.bundles_per_submission,
         "bundles_per_submission_requested": job.bundles_per_submission_requested,
     }
+
+
+def _effective_bundles_per_submission(requested: int | None, bundle_max: int | None, chunk: int) -> int:
+    """Resolve the operator's request against every ceiling that applies.
+
+    Spec: `min(requested or CHUNK, server_bundle_max or INF, CHUNK)`.
+
+    `requested is None` (the caller said nothing) and `requested == 0` (an
+    explicit "every subject in the chunk") are DIFFERENT inputs: None keeps the
+    conservative default of 1, 0 opens up to the chunk. A plain `or` would
+    merge them, because 0 is falsy — which would silently turn every unspecified
+    request into a 100-subject POST.
+    """
+    if requested is None:
+        candidate = 1
+    elif requested == 0:
+        candidate = chunk
+    else:
+        candidate = requested
+    ceilings = [candidate, chunk]
+    if bundle_max is not None:
+        ceilings.append(bundle_max)
+    return max(1, min(ceilings))
 
 
 def _batch_to_response(batch) -> dict:
@@ -325,6 +358,28 @@ async def create_job(
         )
         submit_data_mode = submit_data_capability.mode
 
+    bundles_requested: int | None = None
+    bundles_effective: int | None = None
+    if body.workflow == "deqm_submit_data":
+        bundles_requested = body.bundles_per_submission
+        bundles_effective = _effective_bundles_per_submission(
+            bundles_requested,
+            submit_data_capability.bundle_max if submit_data_capability else None,
+            settings.BATCH_SIZE,
+        )
+        if bundles_requested is not None and bundles_requested != 0 and bundles_effective < bundles_requested:
+            logger.warning(
+                "Clamped bundles per submission from %s to %s",
+                bundles_requested,
+                bundles_effective,
+                extra={
+                    "requested": bundles_requested,
+                    "effective": bundles_effective,
+                    "server_bundle_max": submit_data_capability.bundle_max if submit_data_capability else None,
+                    "batch_size": settings.BATCH_SIZE,
+                },
+            )
+
     job = Job(
         measure_id=body.measure_id,
         measure_name=body.measure_name,
@@ -344,6 +399,8 @@ async def create_job(
         mcs_wipe_before_job=mcs.wipe_before_job,
         workflow=body.workflow,
         submit_data_mode=submit_data_mode,
+        bundles_per_submission=bundles_effective,
+        bundles_per_submission_requested=bundles_requested,
     )
     session.add(job)
     await session.commit()
