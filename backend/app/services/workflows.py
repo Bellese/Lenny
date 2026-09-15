@@ -494,7 +494,27 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # base-fallback has no multi-bundle envelope.
         if self._mode != SUBMIT_DATA_MODE_STU5:
             return await self._submit_individually(subjects, SUBMIT_DATA_MODE_BASE)
-        return await self._submit_individually(subjects, SUBMIT_DATA_MODE_STU5)
+        if len(subjects) == 1:
+            # A lone settled-path subject keeps the per-subject try/except of
+            # _submit_individually — byte-identical wire payload to _submit_group
+            # for one subject, but it still catches a failure into a
+            # SubjectOutcome instead of raising, which transfer_patient's
+            # single-subject contract (and #414's mixed-mode-guard tests) rely
+            # on. _submit_group's unwrapped raise (Task 6 wraps it) is reserved
+            # for genuine multi-subject groups.
+            return await self._submit_individually(subjects, SUBMIT_DATA_MODE_STU5)
+        return await self._submit_group(subjects)
+
+    async def _submit_group(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
+        """One POST carrying every subject's bundle.
+
+        Each `bundle` parameter is a collection Bundle for exactly ONE subject:
+        the receiver processes each Bundle as a transaction, so merging subjects
+        would make one subject's bad resource fail the others.
+        """
+        parameters = build_stu5_parameters([SubjectBundle(s.measure_report, s.resources) for s in subjects])
+        await self._post(parameters, SUBMIT_DATA_MODE_STU5)
+        return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
 
     async def _settle_mode_and_submit(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
         """The pioneer's submission: the only one that may downgrade (#414).

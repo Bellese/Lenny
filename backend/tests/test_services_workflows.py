@@ -1041,3 +1041,95 @@ class TestDeqmPrepareAndSubmit:
         assert submit.await_count == 1
         assert outcomes[0].error is not None
         assert outcomes[0].error.phase == "submit"
+
+
+class TestDeqmGrouping:
+    """These exercise the SETTLED submit path. The pioneer — the first group
+    to submit while the mode is still undecided — belongs to the #414 barrier
+    and is covered separately; settling the event here keeps each test aimed at
+    one mechanism."""
+
+    async def _prepare(self, wf, patient_ids):
+        subjects = []
+        for pid in patient_ids:
+            with patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": pid}])),
+            ):
+                subjects.append(await wf.prepare_patient("http://cdr", pid, {}))
+        return subjects
+
+    async def test_a_group_of_n_is_one_post_with_n_bundles(self):
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = 3
+        wf._mode_settled.set()  # past the pioneer
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        submit.assert_awaited_once()
+        params = submit.call_args.kwargs["parameters"]
+        assert submit.call_args.kwargs["mode"] == "stu5"
+        assert [p["name"] for p in params["parameter"]] == ["bundle", "bundle", "bundle"]
+        assert [o.patient_id for o in outcomes] == ["p1", "p2", "p3"]
+        assert all(o.error is None for o in outcomes)
+
+    async def test_each_bundle_holds_exactly_one_subject(self):
+        """Several subjects never share a Bundle: the receiver processes each
+        as a transaction, so merging them would make one subject's bad resource
+        fail the others."""
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = 2
+        wf._mode_settled.set()  # past the pioneer
+        subjects = await self._prepare(wf, ["p1", "p2"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            await wf.submit_prepared(subjects)
+        bundles = [p["resource"] for p in submit.call_args.kwargs["parameters"]["parameter"]]
+        for bundle, pid in zip(bundles, ["p1", "p2"]):
+            assert bundle["type"] == "collection"
+            mr = bundle["entry"][0]["resource"]
+            assert mr["resourceType"] == "MeasureReport"
+            assert mr["subject"] == {"reference": f"Patient/{pid}"}
+            subjects_in_bundle = {
+                e["resource"]["id"] for e in bundle["entry"][1:] if e["resource"]["resourceType"] == "Patient"
+            }
+            assert subjects_in_bundle == {pid}
+
+    async def test_a_group_of_one_is_byte_identical_to_the_ungrouped_payload(self):
+        """The regression that would make this PR non-neutral: a size-1 group
+        must produce the same single-bundle envelope PR 1 shipped."""
+        wf = _deqm_workflow(mode="stu5")
+        wf._mode_settled.set()  # past the pioneer
+        subjects = await self._prepare(wf, ["p1"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            await wf.submit_prepared(subjects)
+        submit.assert_awaited_once()
+        params = submit.call_args.kwargs["parameters"]
+        assert [p["name"] for p in params["parameter"]] == ["bundle"]
+
+    async def test_a_group_submitted_after_a_downgrade_goes_out_individually(self):
+        """A chunk can form a group of N and then have another chunk's pioneer
+        downgrade before it submits. Building a multi-bundle envelope for a
+        server that has already refused the operation would fail every subject."""
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = 3
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        # Simulate the settled-and-downgraded state the pioneer leaves behind.
+        wf._mode = "base-fallback"
+        wf._downgraded = True
+        wf._mode_settled.set()
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 3
+        assert all(c.kwargs["mode"] == "base-fallback" for c in submit.await_args_list)
+        for call in submit.await_args_list:
+            names = [p["name"] for p in call.kwargs["parameters"]["parameter"]]
+            assert names[0] == "measureReport"
+            assert "bundle" not in names
+        assert all(o.error is None for o in outcomes)
+
+    async def test_an_empty_group_submits_nothing(self):
+        wf = _deqm_workflow(mode="stu5")
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            assert await wf.submit_prepared([]) == []
+        submit.assert_not_awaited()
