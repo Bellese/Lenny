@@ -544,58 +544,73 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
 
     async def _settle_mode_and_submit(self, subjects: list[PreparedSubject]) -> list[SubjectOutcome]:
-        """The pioneer's submission: the only one that may downgrade (#414).
+        """The pioneer group's submission: the only one that may downgrade (#414).
 
         Runs under self._mode_lock with self._mode_settled unset, so it is the
-        single point where the job's wire format is decided. In THIS task it
-        still handles one subject, which is all that can reach it while the
-        group size is 1 — a later task generalizes it to the whole group. Keeping
-        it single-subject here is what keeps the #414 tests green at every commit.
+        single point where the job's wire format is decided. The caller sets the
+        event in a finally, so a group that fails outright still releases every
+        group waiting on its verdict.
         """
-        subject = subjects[0]
+        parameters = build_stu5_parameters([SubjectBundle(s.measure_report, s.resources) for s in subjects])
         try:
-            await self._post(self._parameters_for(subject, SUBMIT_DATA_MODE_STU5), SUBMIT_DATA_MODE_STU5)
+            await self._post(parameters, SUBMIT_DATA_MODE_STU5)
         except FhirOperationError as exc:
+            # A mis-probed capability stamps Job.submit_data_mode="stu5" for a
+            # server that doesn't actually implement the type-level $submit-data
+            # bundle contract. Rather than fail every patient in the job,
+            # downgrade to base mode and re-send this group individually.
+            # Because this runs before the mode is settled, nobody has been
+            # submitted under STU5 yet, so the downgrade cannot strand anyone in
+            # the other format.
+            #
             # A bare status is only trusted when it is a statement about the
             # server (_DOWNGRADE_STATUS_CODES). A 400 is ambiguous, so it
             # downgrades only when its OperationOutcome says the operation is
-            # missing — otherwise it is a payload rejection and belongs to this
-            # subject alone, with the server's explanation preserved (#414).
+            # missing — otherwise it is a payload rejection and belongs to the
+            # subjects, with the server's explanation preserved (#414).
             capability_signal = exc.status_code in _DOWNGRADE_STATUS_CODES or (
                 exc.status_code == 400 and _outcome_reports_unsupported_operation(exc)
             )
-            if not capability_signal:
-                return [
-                    SubjectOutcome(
-                        patient_id=subject.patient_id,
-                        gather=subject.gather,
-                        error=TransferPhaseError("submit", exc),
-                    )
-                ]
-            logger.warning(
-                "STU5 $submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
-                exc.status_code,
-                self._job_id,
-                extra={
-                    "job_id": self._job_id,
-                    "patient_id": subject.patient_id,
-                    "status_code": exc.status_code,
-                },
-            )
-            self._mode = SUBMIT_DATA_MODE_BASE
-            # Read by the orchestrator to persist Job.submit_data_mode, so the
-            # Jobs badge reports the mode actually used rather than the probe's.
-            self._downgraded = True
-            return await self._submit_individually(subjects, SUBMIT_DATA_MODE_BASE)
+            if capability_signal:
+                logger.warning(
+                    "STU5 $submit-data rejected (HTTP %s) — downgrading job %s to base $submit-data",
+                    exc.status_code,
+                    self._job_id,
+                    extra={
+                        "job_id": self._job_id,
+                        "patient_id": subjects[0].patient_id,
+                        "subject_count": len(subjects),
+                        "status_code": exc.status_code,
+                    },
+                )
+                self._mode = SUBMIT_DATA_MODE_BASE
+                # Read by the orchestrator to persist Job.submit_data_mode, so
+                # the Jobs badge reports the mode actually used rather than the
+                # probe's verdict.
+                self._downgraded = True
+                # Capability first, isolation second, never both: base-fallback
+                # has no multi-bundle form, so this is a re-send, not a retry.
+                return await self._submit_individually(subjects, SUBMIT_DATA_MODE_BASE)
+            if len(subjects) > 1 and _is_payload_attributable(exc):
+                return await self._submit_individually(subjects, SUBMIT_DATA_MODE_STU5)
+            return [
+                SubjectOutcome(
+                    patient_id=s.patient_id,
+                    gather=s.gather,
+                    error=TransferPhaseError("submit", exc),
+                )
+                for s in subjects
+            ]
         except Exception as exc:  # noqa: BLE001 - an outcome, not a raise, is the contract
             return [
                 SubjectOutcome(
-                    patient_id=subject.patient_id,
-                    gather=subject.gather,
+                    patient_id=s.patient_id,
+                    gather=s.gather,
                     error=TransferPhaseError("submit", exc),
                 )
+                for s in subjects
             ]
-        return [SubjectOutcome(patient_id=subject.patient_id, gather=subject.gather)]
+        return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
 
 
 async def build_submission_workflow(

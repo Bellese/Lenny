@@ -1254,3 +1254,133 @@ class TestGroupFailureIsolation:
         assert submit.await_count == 3
         assert all(c.kwargs["mode"] == "stu5" for c in submit.await_args_list)
         assert all(o.error is None for o in outcomes)
+
+
+class TestPioneerGroup:
+    async def _prepare(self, wf, patient_ids):
+        subjects = []
+        for pid in patient_ids:
+            with patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": pid}])),
+            ):
+                subjects.append(await wf.prepare_patient("http://cdr", pid, {}))
+        return subjects
+
+    def _pioneer(self, group_size: int) -> DeqmSubmitDataWorkflow:
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = group_size
+        return wf  # _mode_settled is unset: this group IS the pioneer
+
+    async def test_the_pioneer_group_sends_n_bundles_in_one_post(self):
+        wf = self._pioneer(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock()) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        submit.assert_awaited_once()
+        assert len(submit.call_args.kwargs["parameters"]["parameter"]) == 3
+        assert all(o.error is None for o in outcomes)
+        assert wf._mode_settled.is_set()
+
+    @pytest.mark.parametrize("status", [404, 405, 501])
+    async def test_a_capability_signal_downgrades_and_does_not_isolate(self, status):
+        """Capability first, isolation second, never both. The group's subjects
+        go out individually in base mode — which is what base-fallback does
+        anyway — not as a second STU5 attempt."""
+        wf = self._pioneer(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        sent: list[str] = []
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            sent.append(mode)
+            if mode == "stu5":
+                raise _fhir_op_error(status)
+            return None
+
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)):
+            outcomes = await wf.submit_prepared(subjects)
+
+        assert sent == ["stu5", "base-fallback", "base-fallback", "base-fallback"]
+        assert wf.mode == "base-fallback"
+        assert wf.downgraded is True
+        assert all(o.error is None for o in outcomes)
+
+    async def test_a_400_saying_the_operation_is_missing_downgrades(self):
+        """#414: a 400's meaning lives in its OperationOutcome, not its status."""
+        wf = self._pioneer(2)
+        subjects = await self._prepare(wf, ["p1", "p2"])
+        sent: list[str] = []
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            sent.append(mode)
+            if mode == "stu5":
+                raise _fhir_op_error_with_outcome(400, "does not know how to handle POST operation")
+            return None
+
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)):
+            outcomes = await wf.submit_prepared(subjects)
+
+        assert sent == ["stu5", "base-fallback", "base-fallback"]
+        assert wf.downgraded is True
+        assert all(o.error is None for o in outcomes)
+
+    async def test_a_payload_rejection_isolates_and_does_not_downgrade(self):
+        wf = self._pioneer(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch(
+            "app.services.workflows.submit_data",
+            new=AsyncMock(side_effect=[_fhir_op_error(400), None, _fhir_op_error(400), None]),
+        ) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 4
+        assert all(c.kwargs["mode"] == "stu5" for c in submit.await_args_list)
+        assert wf.mode == "stu5"
+        assert wf.downgraded is False
+        assert [o.error is None for o in outcomes] == [True, False, True]
+
+    async def test_a_server_failure_in_the_pioneer_group_neither_downgrades_nor_isolates(self):
+        wf = self._pioneer(3)
+        subjects = await self._prepare(wf, ["p1", "p2", "p3"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(503))) as submit:
+            outcomes = await wf.submit_prepared(subjects)
+        assert submit.await_count == 1
+        assert wf.downgraded is False
+        assert all(o.error is not None for o in outcomes)
+
+    async def test_the_barrier_releases_even_when_the_pioneer_group_fails(self):
+        """_mode_settled.set() lives in a finally. Without it, every other group
+        in the job waits forever on a verdict that will never come."""
+        wf = self._pioneer(2)
+        subjects = await self._prepare(wf, ["p1", "p2"])
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(503))):
+            await wf.submit_prepared(subjects)
+        assert wf._mode_settled.is_set()
+
+    async def test_a_second_group_waits_for_the_pioneers_verdict(self):
+        """Two chunks submitting concurrently must not produce a job that is
+        half STU5 and half base (#414)."""
+        wf = self._pioneer(2)
+        first = await self._prepare(wf, ["p1", "p2"])
+        second = await self._prepare(wf, ["p3", "p4"])
+        modes: list[str] = []
+        release = asyncio.Event()
+
+        async def submit_side_effect(*, mcs_url, parameters, mode, measure_id, auth_headers=None):
+            modes.append(mode)
+            if mode == "stu5":
+                await release.wait()
+                raise _fhir_op_error(404)
+            return None
+
+        with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=submit_side_effect)):
+            pioneer = asyncio.create_task(wf.submit_prepared(first))
+            await asyncio.sleep(0)
+            waiter = asyncio.create_task(wf.submit_prepared(second))
+            await asyncio.sleep(0)
+            release.set()
+            await asyncio.gather(pioneer, waiter)
+
+        assert modes.count("stu5") == 1, "only the pioneer may attempt STU5"
+        assert wf.mode == "base-fallback"
+        assert all(m == "base-fallback" for m in modes[1:])
