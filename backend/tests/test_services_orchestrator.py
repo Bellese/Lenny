@@ -2223,3 +2223,73 @@ async def test_a_subject_dropped_from_outcomes_is_failed_not_silently_credited(t
     rows = (await test_session.execute(select(MeasureResult).where(MeasureResult.job_id == job.id))).scalars().all()
     failed_rows = [r for r in rows if r.error_phase == "submit"]
     assert [r.patient_id for r in failed_rows] == ["p2"]
+
+
+async def test_a_raising_submit_prepared_fails_the_group_instead_of_escaping(test_session, session_factory):
+    """submit_prepared's contract is "return one outcome per subject, never
+    raise" — but if a workflow ever violates that contract by raising instead,
+    the exception must not propagate out of _process_single_batch. Letting it
+    escape would land in the outer batch-retry handler, which retries the
+    WHOLE batch from the top — re-POSTing subjects in this same batch that a
+    prior group already delivered to the measure server. So a raising
+    submit_prepared must instead fail every subject in that group through the
+    same per-patient path as a normal error outcome, and the batch must
+    complete (not retry) with those subjects recorded as failed."""
+    from app.models.job import Batch, BatchStatus
+    from app.services.orchestrator import _process_single_batch
+
+    class _RaisingWorkflow(_RecordingGroupWorkflow):
+        async def submit_prepared(self, subjects):
+            self.groups.append([s.patient_id for s in subjects])
+            raise RuntimeError("submit_prepared blew up instead of returning outcomes")
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+        workflow="deqm_submit_data",
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+    patients = ["p1", "p2", "p3"]
+    batch = Batch(job_id=job.id, batch_number=1, patient_ids=patients, status=BatchStatus.pending)
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    workflow = _RaisingWorkflow(group_size=3)
+    with (
+        _make_session_factory_patch(session_factory),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={"resourceType": "MeasureReport", "status": "complete", "group": []},
+        ) as mock_eval,
+    ):
+        # No exception should escape here — that is the assertion. A raise
+        # from this call means the guard failed and the outer batch-retry
+        # handler is about to re-POST already-delivered subjects.
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map={p: {"resourceType": "Patient", "id": p} for p in patients},
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+            mcs_url="http://mcs/fhir",
+            workflow=workflow,
+        )
+
+    # None of the group's subjects reach Phase 2 — they were never submitted.
+    assert mock_eval.await_count == 0
+    rows = (await test_session.execute(select(MeasureResult).where(MeasureResult.job_id == job.id))).scalars().all()
+    failed_rows = [r for r in rows if r.error_phase == "submit"]
+    assert sorted(r.patient_id for r in failed_rows) == patients
+
+    # The batch itself must reach BatchStatus.complete via the normal
+    # success path, not BatchStatus.failed via the retry handler — that is
+    # what proves the exception never escaped _process_single_batch.
+    await test_session.refresh(batch)
+    assert batch.status == BatchStatus.complete
