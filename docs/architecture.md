@@ -106,29 +106,58 @@ backend/app/
                          WITHOUT the filter if that query fails — a VSAC canonical the CDR never
                          loaded returns HAPI-2788 rather than an empty set, and treating that as
                          "no such resources" silently changes populations. Also home to the
-                         DEQM $submit-data capability probe: detect_submit_data_mode() reads the
-                         MCS CapabilityStatement at job creation, then dereferences the
-                         OperationDefinition behind any advertised `submit-data` operation —
-                         a CapabilityStatement carries only `name` + a `definition` canonical, so
-                         type-level support and the `bundle` input are invisible to it. `stu5`
-                         requires `code: submit-data`, `type: true`, and a `bundle` input; every
-                         other case, including anything merely unconfirmable, is `base-fallback`.
-                         The retired DEQM `$deqm-submit-data` (retired upstream 2026-03-05) is
-                         deliberately NOT a classification signal (#413). A foreign-origin
-                         `definition` is never fetched — it is resolved via
+                         DEQM $submit-data capability probe: detect_submit_data_capability() reads
+                         the MCS CapabilityStatement at job creation, then dereferences the
+                         OperationDefinition behind any advertised `submit-data` operation — a
+                         CapabilityStatement carries only `name` + a `definition` canonical, so
+                         type-level support and the `bundle` input are invisible to it. It returns
+                         a frozen `SubmitDataCapability(mode, bundle_max)`: `mode` is `stu5` only
+                         when the OperationDefinition confirms `code: submit-data`, `type: true`,
+                         and a `bundle` input — every other case, including anything merely
+                         unconfirmable, is `base-fallback` — and `bundle_max` carries that
+                         parameter's declared ceiling (None for `*`, an absent max, or an
+                         unparseable one), which is what the bundles-per-submission clamp below
+                         consumes. The retired DEQM `$deqm-submit-data` (retired upstream
+                         2026-03-05) is deliberately NOT a classification signal (#413). A
+                         foreign-origin `definition` is never fetched — it is resolved via
                          `OperationDefinition?url=` against the MCS itself. The verdict stamps
                          `Job.submit_data_mode`, deciding which URL shape/envelope submit_data()
                          uses: type-level `Measure/$submit-data` with 1..* `bundle` parameters, or
                          instance-level `Measure/{id}/$submit-data`. A mis-probed `stu5` that
                          400s/404s on the real POST downgrades to base mode at runtime and retries
-                         once (workflows.py); the stored `Job.submit_data_mode` still reflects the
-                         original probe verdict.
+                         once (workflows.py); the orchestrator then persists that settled mode back
+                         onto the job row, so the stored `Job.submit_data_mode` reports what the job
+                         actually did rather than the original probe verdict.
+
+                         **Bundles per submission.** How many subjects' bundles ride in one type-
+                         level `$submit-data` POST is an operator-chosen request, clamped at job
+                         creation. Leaving the request unset defaults to 1 — today's per-subject
+                         behavior; an explicit `0` asks for "as many as fit in the chunk"; any other
+                         value is used as given. That candidate is then capped by the server's
+                         bundle max — the `bundle` input parameter's declared ceiling, carried as
+                         `bundle_max` on the `SubmitDataCapability` the probe returned above — and
+                         by `BATCH_SIZE`, the size of the chunk itself. Any clamp that reduces the
+                         request is logged with its reason.
+
+                         Two columns record the outcome: `jobs.bundles_per_submission_requested` is
+                         what the operator asked for and is what the creation form reads back as the
+                         remembered preference, while `jobs.bundles_per_submission` is the clamped
+                         value the job ran under. Keeping them apart is what stops a single job
+                         against a `max: "1"` server from ratcheting the preference down
+                         permanently. Both are NULL for `direct_load`, which has no submission-
+                         grouping concept.
+
+                         A job that downgrades to `base-fallback` at runtime submits one subject per
+                         call — base mode has no multi-bundle envelope — and its effective value is
+                         rewritten to 1 alongside `submit_data_mode`, so the record reports what the
+                         job actually did.
 
                          A DEQM job submits in **groups**. The orchestrator walks each processing
                          chunk in groups of `submission_group_size`, gathering each subject in turn
                          and then issuing one `$submit-data` POST carrying one `bundle` parameter
-                         per subject. Group size is 1 today; #413 PR 3 adds the operator control
-                         that raises it. The size is read fresh before every group, so a runtime
+                         per subject. The group size is the operator's clamped
+                         `bundles_per_submission` (above); the default remains 1 unless the operator
+                         raises it. The size is read fresh before every group, so a runtime
                          downgrade to `base-fallback` — which has no multi-bundle form — returns the
                          job to one subject per POST for the remainder.
 
