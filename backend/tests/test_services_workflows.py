@@ -974,3 +974,70 @@ class TestGroupProtocolDefaults:
         push.assert_awaited_once()
         assert outcomes[0].error is None
         assert outcomes[0].gather is _GATHER
+
+
+class TestDeqmPrepareAndSubmit:
+    async def test_prepare_does_the_cdr_work_and_no_mcs_io(self):
+        wf = _deqm_workflow(mode="stu5")
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch("app.services.workflows.submit_data", new=AsyncMock()) as submit,
+        ):
+            subject = await wf.prepare_patient("http://cdr", "p1", {})
+        submit.assert_not_awaited()
+        assert subject.patient_id == "p1"
+        assert subject.gather is _GATHER
+        assert subject.measure_report["id"] == "deqm-7-p1"
+        assert [r["id"] for r in subject.resources] == ["p1", "c1"]
+
+    async def test_prepare_wraps_a_gather_failure_as_a_raise(self):
+        """prepare_patient raises rather than returning an outcome: a gather
+        failure must not be collected into the group it was destined for."""
+        wf = _deqm_workflow()
+        with patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(side_effect=RuntimeError("cdr down"))):
+            with pytest.raises(TransferPhaseError) as caught:
+                await wf.prepare_patient("http://cdr", "p1", {})
+        assert caught.value.phase == "gather"
+
+    async def test_default_group_size_is_one(self):
+        assert _deqm_workflow(mode="stu5").submission_group_size == 1
+
+    async def test_group_size_collapses_to_one_outside_stu5(self):
+        """base-fallback has no multi-bundle form, so the size must read 1 no
+        matter what was configured."""
+        wf = _deqm_workflow(mode="base-fallback")
+        wf._group_size = 5
+        assert wf.submission_group_size == 1
+
+    async def test_transfer_patient_still_raises_on_a_submit_failure(self):
+        """The one-subject entry point keeps its raising contract; only
+        submit_prepared returns outcomes."""
+        wf = _deqm_workflow()
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch(
+                "app.services.workflows.submit_data",
+                new=AsyncMock(side_effect=_fhir_op_error(500)),
+            ),
+        ):
+            with pytest.raises(TransferPhaseError) as caught:
+                await wf.transfer_patient("http://cdr", "p1", {})
+        assert caught.value.phase == "submit"
+
+    async def test_a_single_subject_group_does_not_isolate(self):
+        """Isolation resubmits subjects one at a time. With one subject there
+        is nothing to isolate, and retrying would POST twice where PR 1 posts
+        once — which is what 'byte-identical at size 1' means."""
+        wf = _deqm_workflow(mode="stu5")
+        with (
+            patch.object(wf._strategy, "gather_patient_data", new=AsyncMock(return_value=_GATHER)),
+            patch(
+                "app.services.workflows.submit_data",
+                new=AsyncMock(side_effect=_fhir_op_error(400)),
+            ) as submit,
+        ):
+            subject = await wf.prepare_patient("http://cdr", "p1", {})
+            outcomes = await wf.submit_prepared([subject])
+        assert submit.await_count == 1
+        assert outcomes[0].error is not None
+        assert outcomes[0].error.phase == "submit"
