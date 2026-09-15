@@ -180,23 +180,35 @@ def _job_to_response(job: Job) -> dict:
     }
 
 
-def _effective_bundles_per_submission(requested: int | None, bundle_max: int | None, chunk: int) -> int:
-    """Resolve the operator's request against every ceiling that applies.
-
-    Spec: `min(requested or CHUNK, server_bundle_max or INF, CHUNK)`.
+def _resolve_bundles_candidate(requested: int | None, chunk: int) -> int:
+    """Resolve the operator's raw request into a pre-ceiling candidate.
 
     `requested is None` (the caller said nothing) and `requested == 0` (an
     explicit "every subject in the chunk") are DIFFERENT inputs: None keeps the
     conservative default of 1, 0 opens up to the chunk. A plain `or` would
     merge them, because 0 is falsy — which would silently turn every unspecified
     request into a 100-subject POST.
+
+    This candidate is what "was the request clamped?" must be measured
+    against — NOT the raw `requested` value, which for `0` is smaller than
+    the resolved candidate by design and would make every upward resolution
+    to `chunk` look like a downward clamp.
     """
     if requested is None:
-        candidate = 1
-    elif requested == 0:
-        candidate = chunk
-    else:
-        candidate = requested
+        return 1
+    if requested == 0:
+        return chunk
+    return requested
+
+
+def _effective_bundles_per_submission(requested: int | None, bundle_max: int | None, chunk: int) -> int:
+    """Resolve the operator's request against every ceiling that applies.
+
+    Spec: `min(requested or CHUNK, server_bundle_max or INF, CHUNK)`, with
+    `requested or CHUNK` actually computed by `_resolve_bundles_candidate` (see
+    its docstring for why a plain `or` is wrong here).
+    """
+    candidate = _resolve_bundles_candidate(requested, chunk)
     ceilings = [candidate, chunk]
     if bundle_max is not None:
         ceilings.append(bundle_max)
@@ -362,20 +374,24 @@ async def create_job(
     bundles_effective: int | None = None
     if body.workflow == "deqm_submit_data":
         bundles_requested = body.bundles_per_submission
-        bundles_effective = _effective_bundles_per_submission(
-            bundles_requested,
-            submit_data_capability.bundle_max if submit_data_capability else None,
-            settings.BATCH_SIZE,
-        )
-        if bundles_requested is not None and bundles_requested != 0 and bundles_effective < bundles_requested:
+        bundle_max = submit_data_capability.bundle_max if submit_data_capability else None
+        bundles_effective = _effective_bundles_per_submission(bundles_requested, bundle_max, settings.BATCH_SIZE)
+        # Compare against the RESOLVED candidate, not the raw request: an
+        # explicit `0` resolves UP to BATCH_SIZE before any ceiling is
+        # applied, so comparing to the raw `0` would never catch a case where
+        # that resolved chunk size is then clamped DOWN by a small
+        # `bundle_max` — the operator asked for "as many as fit" and got a
+        # silent, unexplained 10.
+        bundles_candidate = _resolve_bundles_candidate(bundles_requested, settings.BATCH_SIZE)
+        if bundles_effective < bundles_candidate:
             logger.warning(
                 "Clamped bundles per submission from %s to %s",
-                bundles_requested,
+                bundles_candidate,
                 bundles_effective,
                 extra={
                     "requested": bundles_requested,
                     "effective": bundles_effective,
-                    "server_bundle_max": submit_data_capability.bundle_max if submit_data_capability else None,
+                    "server_bundle_max": bundle_max,
                     "batch_size": settings.BATCH_SIZE,
                 },
             )

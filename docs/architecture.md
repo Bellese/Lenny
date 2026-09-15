@@ -133,11 +133,13 @@ backend/app/
                          level `$submit-data` POST is an operator-chosen request, clamped at job
                          creation. Leaving the request unset defaults to 1 — today's per-subject
                          behavior; an explicit `0` asks for "as many as fit in the chunk"; any other
-                         value is used as given. That candidate is then capped by the server's
-                         bundle max — the `bundle` input parameter's declared ceiling, carried as
-                         `bundle_max` on the `SubmitDataCapability` the probe returned above — and
-                         by `BATCH_SIZE`, the size of the chunk itself. Any clamp that reduces the
-                         request is logged with its reason.
+                         value is used as given. That resolved candidate is then capped by the
+                         server's bundle max — the `bundle` input parameter's declared ceiling,
+                         carried as `bundle_max` on the `SubmitDataCapability` the probe returned
+                         above — and by `BATCH_SIZE`, the size of the chunk itself. Any clamp that
+                         reduces the resolved candidate — including an explicit `0` resolved up to
+                         the chunk and then capped back down by the server — is logged with its
+                         reason.
 
                          Two columns record the outcome: `jobs.bundles_per_submission_requested` is
                          what the operator asked for and is what the creation form reads back as the

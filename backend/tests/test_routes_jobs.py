@@ -1703,3 +1703,41 @@ async def test_a_clamped_request_is_logged_with_its_reason(client, caplog):
     assert resp.json()["bundles_per_submission"] == 1
     assert resp.json()["bundles_per_submission_requested"] == 50
     assert any("bundles per submission" in m.lower() for m in caplog.messages)
+
+
+async def test_an_explicit_zero_clamped_down_by_the_server_is_logged(client, caplog):
+    """An explicit `0` ("as many as fit in the chunk") resolves UP to
+    BATCH_SIZE before any ceiling applies. If the server's `bundle_max` then
+    clamps that DOWN, the operator silently got far fewer bundles per POST
+    than "as many as fit" implied, and needs the same explanation a nonzero
+    request gets. Comparing against the raw `0` (as opposed to the resolved
+    candidate) would miss this reduction entirely."""
+    with patch(
+        "app.routes.jobs.detect_submit_data_capability",
+        AsyncMock(return_value=SubmitDataCapability(mode="stu5", bundle_max=10)),
+    ):
+        body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 0}
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["bundles_per_submission"] == 10
+    assert resp.json()["bundles_per_submission_requested"] == 0
+    assert any("bundles per submission" in m.lower() for m in caplog.messages)
+
+
+async def test_an_explicit_zero_with_no_server_max_logs_nothing(client, caplog):
+    """Resolving `0` UP to the chunk size is not a reduction — it is exactly
+    what "as many as fit" asked for. This is the case the `!= 0` guard in the
+    original logging condition existed to protect, and is what stops a future
+    edit from making the warning fire on every unlimited request."""
+    with patch(
+        "app.routes.jobs.detect_submit_data_capability",
+        AsyncMock(return_value=SubmitDataCapability(mode="stu5", bundle_max=None)),
+    ):
+        body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 0}
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["bundles_per_submission"] == 100  # resolved up to BATCH_SIZE, unclamped
+    assert resp.json()["bundles_per_submission_requested"] == 0
+    assert not any("bundles per submission" in m.lower() for m in caplog.messages)
