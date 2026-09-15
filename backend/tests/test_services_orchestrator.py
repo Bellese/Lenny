@@ -2156,3 +2156,70 @@ async def test_a_failed_outcome_is_persisted_and_skips_evaluate(test_session, se
     rows = (await test_session.execute(select(MeasureResult).where(MeasureResult.job_id == job.id))).scalars().all()
     failed_rows = [r for r in rows if r.error_phase == "submit"]
     assert [r.patient_id for r in failed_rows] == ["p2"]
+
+
+async def test_a_subject_dropped_from_outcomes_is_failed_not_silently_credited(test_session, session_factory):
+    """Every workflow in the repo honors "one outcome per prepared subject" by
+    convention, but nothing in the type system enforces it. This stub
+    deliberately violates that contract by dropping one subject from the
+    outcomes it returns. If the orchestrator trusted the contract instead of
+    reconciling against it, that subject would get no error row, never join
+    gather_failed_patients, and silently proceed into Phase 2 to receive a
+    normal population result for data that was never submitted — a patient
+    credited with a result they never earned. This guards that silent-vanish
+    case specifically, not a hypothetical."""
+    from app.models.job import Batch, BatchStatus
+    from app.services.orchestrator import _process_single_batch
+
+    class _SubjectDroppingWorkflow(_RecordingGroupWorkflow):
+        def __init__(self, group_size: int, dropped: str):
+            super().__init__(group_size=group_size)
+            self._dropped = dropped
+
+        async def submit_prepared(self, subjects):
+            outcomes = await super().submit_prepared(subjects)
+            return [o for o in outcomes if o.patient_id != self._dropped]
+
+    job = Job(
+        measure_id="CMS999",
+        period_start="2026-01-01",
+        period_end="2026-12-31",
+        cdr_url="http://cdr/fhir",
+        status=JobStatus.running,
+        workflow="deqm_submit_data",
+    )
+    test_session.add(job)
+    await test_session.commit()
+    await test_session.refresh(job)
+    patients = ["p1", "p2", "p3"]
+    batch = Batch(job_id=job.id, batch_number=1, patient_ids=patients, status=BatchStatus.pending)
+    test_session.add(batch)
+    await test_session.commit()
+    await test_session.refresh(batch)
+
+    workflow = _SubjectDroppingWorkflow(group_size=3, dropped="p2")
+    with (
+        _make_session_factory_patch(session_factory),
+        patch(
+            "app.services.orchestrator.evaluate_measure",
+            new_callable=AsyncMock,
+            return_value={"resourceType": "MeasureReport", "status": "complete", "group": []},
+        ) as mock_eval,
+    ):
+        await _process_single_batch(
+            job_id=job.id,
+            batch_id=batch.id,
+            patient_map={p: {"resourceType": "Patient", "id": p} for p in patients},
+            cdr_url="http://cdr/fhir",
+            auth_headers={},
+            mcs_url="http://mcs/fhir",
+            workflow=workflow,
+        )
+
+    evaluated = [c.kwargs.get("patient_id") or c.args[1] for c in mock_eval.await_args_list]
+    # The dropped subject must never reach Phase 2 — it was never actually
+    # submitted, so it must never be evaluated as if it had been.
+    assert evaluated == ["p1", "p3"]
+    rows = (await test_session.execute(select(MeasureResult).where(MeasureResult.job_id == job.id))).scalars().all()
+    failed_rows = [r for r in rows if r.error_phase == "submit"]
+    assert [r.patient_id for r in failed_rows] == ["p2"]

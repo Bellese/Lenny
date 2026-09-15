@@ -502,7 +502,7 @@ trips:
 |---|---|
 | Size-1 group fails | Exactly one POST — no isolation retry |
 | Group of N fails 503 (or 401, or times out) | Exactly one POST; all N marked failed with that verdict |
-| Group of N fails 400 | 1 + N POSTs; only the owning subject failed |
+| Group of N fails 400 (or 409/412) | 1 + N POSTs for a plain 400; up to 2 + 2N when the failing status is 409 or 412, since `submit_data` retries those once internally (`fhir_client.py:1342`) before the isolation error ever reaches `_submit_group` — the initial group POST and each of the N isolation POSTs can each consume its own retry. Only the owning subject(s) failed either way. |
 | Group formed at N, job downgraded before its submit | N individual base-mode POSTs, no multi-bundle envelope |
 | Stop requested mid-group | Zero POSTs; buffer discarded |
 

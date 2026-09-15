@@ -1346,8 +1346,13 @@ class TestPioneerGroup:
         assert all(o.error is not None for o in outcomes)
 
     async def test_the_barrier_releases_even_when_the_pioneer_group_fails(self):
-        """_mode_settled.set() lives in a finally. Without it, every other group
-        in the job waits forever on a verdict that will never come."""
+        """A pioneer group whose submission fails must still publish a verdict
+        and release every waiter: `_settle_mode_and_submit` catches the failure
+        and turns it into error outcomes, then sets `_mode_settled` on that
+        normal-return path, so other groups never wait forever on a verdict
+        that never arrives. (The `finally` this method also has covers the
+        raise path, not this one — removing `.set()` itself still fails five
+        other tests, so it stays well covered.)"""
         wf = self._pioneer(2)
         subjects = await self._prepare(wf, ["p1", "p2"])
         with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(503))):
@@ -1385,10 +1390,12 @@ class TestPioneerGroup:
 
 class TestCrossChunkSafety:
     async def test_two_concurrent_chunks_never_mix_subjects(self):
-        """The buffer is a LOCAL in the orchestrator, not state on the shared
-        workflow instance. If it ever moves onto the instance, subjects from
-        different chunks interleave into each other's submissions and their
-        failures are misattributed — this is the test that catches it."""
+        """DeqmSubmitDataWorkflow must stay stateless across concurrent
+        submit_prepared calls: one workflow instance serves every concurrent
+        chunk of a job, so any per-subject state the reviewer injects onto the
+        instance (rather than keeping it local to each submit_prepared call)
+        interleaves subjects from different chunks and misattributes their
+        failures — this is the test that catches it."""
         wf = _deqm_workflow(mode="stu5")
         wf._group_size = 2
         wf._mode_settled.set()

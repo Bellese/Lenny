@@ -603,8 +603,9 @@ async def _process_single_batch(
 ) -> None:
     """Process a single batch in two phases.
 
-    Phase 1 — TRANSFER: Delegate to `workflow.transfer_patient()` for each
-    patient. `direct_load` gathers from the CDR and pushes a Bundle of PUTs
+    Phase 1 — TRANSFER: Call `workflow.prepare_patient()` for each patient in
+    the batch, then `workflow.submit_prepared()` once per group of prepared
+    subjects. `direct_load` gathers from the CDR and pushes a Bundle of PUTs
     straight to the measure engine; `deqm_submit_data` gathers via targeted
     `$data-requirements` queries and delivers via `Measure/$submit-data`
     instead. Either way, HAPI FHIR's synchronous indexing strategy
@@ -656,9 +657,11 @@ async def _process_single_batch(
             )
 
             # ----------------------------------------------------------
-            # Phase 1: Gather this batch's patient data and deliver it to
-            # the MCS via workflow.transfer_patient() — direct_load pushes a
-            # Bundle of PUTs; deqm_submit_data POSTs a $submit-data envelope.
+            # Phase 1: Gather this batch's patient data and deliver it to the
+            # MCS via workflow.prepare_patient() per subject, then
+            # workflow.submit_prepared() once per group of prepared subjects —
+            # direct_load pushes a Bundle of PUTs; deqm_submit_data POSTs a
+            # $submit-data envelope.
             # ----------------------------------------------------------
             # Track patients that FULLY failed gather so they are skipped in evaluate.
             # Partial-gather patients proceed to evaluate with available data (AT-2).
@@ -710,7 +713,29 @@ async def _process_single_batch(
                     # of the chunk never happens.
                     return
 
-                outcomes: list[SubjectOutcome] = await workflow.submit_prepared(prepared)
+                try:
+                    outcomes: list[SubjectOutcome] = await workflow.submit_prepared(prepared)
+                except Exception as submit_exc:
+                    # submit_prepared's contract is "return one outcome per
+                    # subject, never raise" — but if it ever does, the whole
+                    # group must fail through the same per-patient path as
+                    # everything else. Letting this escape would trip the
+                    # outer batch-retry handler and re-push subjects in this
+                    # group (and this batch) that may already be delivered.
+                    for subject in prepared:
+                        gather_failed_patients.add(subject.patient_id)
+                        if not await _record_transfer_failure(
+                            job_id=job_id,
+                            batch_id=batch_id,
+                            patient_id=subject.patient_id,
+                            patient_map=patient_map,
+                            exc=TransferPhaseError("submit", submit_exc),
+                        ):
+                            return
+                        failed += 1
+                    continue
+
+                outcome_patient_ids = {outcome.patient_id for outcome in outcomes}
                 for outcome in outcomes:
                     if outcome.error is not None:
                         gather_failed_patients.add(outcome.patient_id)
@@ -754,6 +779,34 @@ async def _process_single_batch(
                                 "failed_types": failed_type_names,
                             },
                         )
+
+                # Structural reconciliation, not trust-by-convention: every
+                # workflow today returns exactly one outcome per prepared
+                # subject, but nothing in the type system enforces that. A
+                # subject missing from `outcomes` would otherwise get no
+                # error row, never join gather_failed_patients, and silently
+                # fall through to Phase 2 — evaluated as if its data had been
+                # submitted, when it never was. Fail it the same way a
+                # reported error would be failed.
+                for subject in prepared:
+                    if subject.patient_id in outcome_patient_ids:
+                        continue
+                    gather_failed_patients.add(subject.patient_id)
+                    if not await _record_transfer_failure(
+                        job_id=job_id,
+                        batch_id=batch_id,
+                        patient_id=subject.patient_id,
+                        patient_map=patient_map,
+                        exc=TransferPhaseError(
+                            "submit",
+                            RuntimeError(
+                                f"{workflow.name} returned no SubjectOutcome for patient "
+                                f"{subject.patient_id} — treating as a submission failure"
+                            ),
+                        ),
+                    ):
+                        return
+                    failed += 1
 
             if await _stop_or_delete_job(job_id):
                 return
