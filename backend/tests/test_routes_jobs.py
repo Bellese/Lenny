@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from app.services.fhir_client import SubmitDataCapability
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -1564,7 +1566,10 @@ class TestJobWorkflowSelection:
         assert resp.status_code == 422
 
     async def test_deqm_job_records_probe_result(self, client, measure_present):
-        with patch("app.routes.jobs.detect_submit_data_mode", new=AsyncMock(return_value="base-fallback")) as probe:
+        with patch(
+            "app.routes.jobs.detect_submit_data_capability",
+            new=AsyncMock(return_value=SubmitDataCapability(mode="base-fallback")),
+        ) as probe:
             resp = await client.post(
                 "/jobs",
                 json={
@@ -1581,7 +1586,7 @@ class TestJobWorkflowSelection:
         probe.assert_awaited_once()
 
     async def test_direct_load_job_skips_probe(self, client, measure_present):
-        with patch("app.routes.jobs.detect_submit_data_mode", new=AsyncMock()) as probe:
+        with patch("app.routes.jobs.detect_submit_data_capability", new=AsyncMock()) as probe:
             resp = await client.post(
                 "/jobs",
                 json={

@@ -25,9 +25,10 @@ from app.dependencies import (
 from app.models.job import BatchStatus, Job, JobStatus, MeasureResult
 from app.models.validation import ExpectedResult
 from app.services.fhir_client import (
+    SubmitDataCapability,
     _build_auth_headers,
     _validate_ssrf_url,
-    detect_submit_data_mode,
+    detect_submit_data_capability,
     list_groups,
     measure_exists,
 )
@@ -306,17 +307,19 @@ async def create_job(
         )
 
     # For DEQM jobs, decide the $submit-data wire format now and snapshot it.
-    # The probe never raises (detect_submit_data_mode swallows errors into
+    # The probe never raises (detect_submit_data_capability swallows errors into
     # base-fallback), so it cannot block creation; base-fallback renders in the
     # UI as a "no type-level $submit-data with bundles" warning from the moment
     # the job appears.
     submit_data_mode: str | None = None
+    submit_data_capability: SubmitDataCapability | None = None
     if body.workflow == "deqm_submit_data":
-        submit_data_mode = await detect_submit_data_mode(
+        submit_data_capability = await detect_submit_data_capability(
             mcs_url=mcs.mcs_url,
             auth_headers=mcs_auth_headers,
             timeout=preflight_timeout,
         )
+        submit_data_mode = submit_data_capability.mode
 
     job = Job(
         measure_id=body.measure_id,

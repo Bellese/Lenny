@@ -19,7 +19,7 @@ from app.services.fhir_client import (
     _remap_valueset_ids_for_hapi,
     _resolve_operation_definition,
     delete_measure,
-    detect_submit_data_mode,
+    detect_submit_data_capability,
     evaluate_measure,
     get_measure_canonical,
     list_measures,
@@ -3140,14 +3140,14 @@ class TestDetectSubmitDataMode:
         cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=self._responder(cap, self._CONTRACT_OD))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_STU5
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_STU5
 
     async def test_base_when_operation_is_instance_only(self):
         cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
         od = {**self._CONTRACT_OD, "type": False}
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=self._responder(cap, od))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_BASE
 
     async def test_base_when_operation_takes_no_bundle(self):
         """The distinction a CapabilityStatement alone cannot make: this server
@@ -3156,7 +3156,7 @@ class TestDetectSubmitDataMode:
         cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=self._responder(cap, self._BASE_ONLY_OD))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_BASE
 
     async def test_base_when_only_the_retired_deqm_operation_is_advertised(self):
         """#413 decision 1: support for the retired $deqm-submit-data is dropped,
@@ -3173,7 +3173,7 @@ class TestDetectSubmitDataMode:
         )
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=self._responder(cap, self._CONTRACT_OD))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_BASE
 
     async def test_retired_only_server_is_logged(self):
         cap = self._capability([{"name": "deqm-submit-data", "definition": "http://mcs/OperationDefinition/x"}])
@@ -3182,20 +3182,20 @@ class TestDetectSubmitDataMode:
             patch("app.services.fhir_client.logger.info") as info,
         ):
             _mock_async_client(mock_httpx, get=self._responder(cap, None))
-            await detect_submit_data_mode(mcs_url="http://mcs")
+            await detect_submit_data_capability(mcs_url="http://mcs")
         assert any("retired" in str(c.args[0]).lower() for c in info.call_args_list)
 
     async def test_base_when_candidate_has_no_definition(self):
         cap = self._capability([{"name": "submit-data"}])
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=self._responder(cap, self._CONTRACT_OD))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_BASE
 
     async def test_base_when_operation_definition_is_unfetchable(self):
         cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=self._responder(cap, None))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_BASE
 
     async def test_foreign_origin_definition_is_not_contacted(self):
         cap = self._capability(
@@ -3204,7 +3204,7 @@ class TestDetectSubmitDataMode:
         get = self._responder(cap, None)
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=get)
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_BASE
         for call in get.call_args_list:
             assert "hl7.org" not in call[0][0]
 
@@ -3220,7 +3220,7 @@ class TestDetectSubmitDataMode:
         }
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=self._responder(cap, self._CONTRACT_OD))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_STU5
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_STU5
 
     async def test_at_most_three_operation_definitions_are_fetched(self):
         cap = self._capability(
@@ -3229,7 +3229,7 @@ class TestDetectSubmitDataMode:
         get = self._responder(cap, self._BASE_ONLY_OD)
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=get)
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_BASE
         # 1 metadata call + exactly _MAX_OPERATION_DEFINITION_PROBES definition
         # reads. Asserted as equality: `<=` also passes when the budget is
         # spent early or no definition is read at all.
@@ -3256,7 +3256,7 @@ class TestDetectSubmitDataMode:
         get = self._responder(cap, self._BASE_ONLY_OD)
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=get)
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_BASE
         # 1 metadata call + 1 definition read, not 2.
         assert get.await_count == 2
 
@@ -3282,17 +3282,73 @@ class TestDetectSubmitDataMode:
 
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=AsyncMock(side_effect=_get))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_STU5
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_STU5
 
     async def test_fallback_when_probe_raises(self):
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=AsyncMock(side_effect=httpx.ConnectError("boom")))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_BASE
 
     async def test_never_raises_when_capability_body_is_malformed(self):
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, {"rest": "not-a-list"})))
-            assert await detect_submit_data_mode(mcs_url="http://mcs") == SUBMIT_DATA_MODE_BASE
+            assert (await detect_submit_data_capability(mcs_url="http://mcs")).mode == SUBMIT_DATA_MODE_BASE
+
+    async def test_bundle_max_star_is_unbounded(self):
+        cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=self._responder(cap, self._CONTRACT_OD))
+            result = await detect_submit_data_capability(mcs_url="http://mcs")
+        assert result.mode == SUBMIT_DATA_MODE_STU5
+        assert result.bundle_max is None
+
+    async def test_bundle_max_digit_string_is_retained(self):
+        cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
+        od = {**self._CONTRACT_OD, "parameter": [{"name": "bundle", "use": "in", "min": 1, "max": "5"}]}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=self._responder(cap, od))
+            result = await detect_submit_data_capability(mcs_url="http://mcs")
+        assert result.mode == SUBMIT_DATA_MODE_STU5
+        assert result.bundle_max == 5
+
+    async def test_bundle_max_of_one_still_classifies_stu5(self):
+        """Spec § Testing: a max:"1" server is STU5 and the max is retained for
+        clamping. The declared bound governs how many bundles we send, never
+        whether the contract is supported at all."""
+        cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
+        od = {**self._CONTRACT_OD, "parameter": [{"name": "bundle", "use": "in", "min": 1, "max": "1"}]}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=self._responder(cap, od))
+            result = await detect_submit_data_capability(mcs_url="http://mcs")
+        assert result.mode == SUBMIT_DATA_MODE_STU5
+        assert result.bundle_max == 1
+
+    async def test_missing_bundle_max_is_unbounded(self):
+        cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
+        od = {**self._CONTRACT_OD, "parameter": [{"name": "bundle", "use": "in", "min": 1}]}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=self._responder(cap, od))
+            result = await detect_submit_data_capability(mcs_url="http://mcs")
+        assert result.mode == SUBMIT_DATA_MODE_STU5
+        assert result.bundle_max is None
+
+    async def test_unparseable_bundle_max_is_unbounded_and_does_not_disturb_the_verdict(self):
+        """An unparseable bound is not evidence of a limit, and must never cost
+        a job its STU5 path."""
+        cap = self._capability([{"name": "submit-data", "definition": "http://mcs/OperationDefinition/sd"}])
+        od = {**self._CONTRACT_OD, "parameter": [{"name": "bundle", "use": "in", "min": 1, "max": "many"}]}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=self._responder(cap, od))
+            result = await detect_submit_data_capability(mcs_url="http://mcs")
+        assert result.mode == SUBMIT_DATA_MODE_STU5
+        assert result.bundle_max is None
+
+    async def test_base_fallback_reports_no_bundle_max(self):
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(side_effect=httpx.ConnectError("boom")))
+            result = await detect_submit_data_capability(mcs_url="http://mcs")
+        assert result.mode == SUBMIT_DATA_MODE_BASE
+        assert result.bundle_max is None
 
 
 class TestSubmitData:

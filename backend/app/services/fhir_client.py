@@ -1061,6 +1061,41 @@ SUBMIT_DATA_MODE_BASE = "base-fallback"
 _MAX_OPERATION_DEFINITION_PROBES = 3
 
 
+@dataclass(frozen=True)
+class SubmitDataCapability:
+    """What the CapabilityStatement probe learned about $submit-data.
+
+    `mode` is the wire format verdict — SUBMIT_DATA_MODE_STU5 or
+    SUBMIT_DATA_MODE_BASE — and carries exactly the meaning the probe has
+    always returned. `bundle_max` is the server's declared ceiling on the
+    number of `bundle` parameters one submission may carry: None means
+    unbounded, which covers `max: "*"`, an absent max, and an unparseable
+    one. An unparseable bound is not evidence of a limit, and must never
+    cost a job its STU5 path — so it never affects `mode`.
+    """
+
+    mode: str
+    bundle_max: int | None = None
+
+
+def _bundle_max_from_definition(operation_definition: dict[str, Any]) -> int | None:
+    """The declared ceiling on `bundle` parameters, or None for unbounded.
+
+    FHIR types OperationDefinition.parameter.max as a string: "*" for
+    unbounded, otherwise a digit string. A non-positive or non-numeric value
+    is malformed; both resolve to unbounded rather than to a bound we made up.
+    """
+    for param in operation_definition.get("parameter", []):
+        if param.get("name") != "bundle" or param.get("use") != "in":
+            continue
+        raw = param.get("max")
+        if not isinstance(raw, str) or not raw.isdigit():
+            return None
+        value = int(raw)
+        return value if value > 0 else None
+    return None
+
+
 def _operation_definition_matches_contract(operation_definition: dict[str, Any]) -> bool:
     """True when this OperationDefinition is the selected bundle contract.
 
@@ -1187,19 +1222,20 @@ async def get_measure_canonical(
     return f"{canonical}|{version}" if version else canonical
 
 
-async def detect_submit_data_mode(
+async def detect_submit_data_capability(
     *,
     mcs_url: str,
     auth_headers: dict[str, str] | None = None,
     timeout: float = 10.0,
-) -> str:
+) -> SubmitDataCapability:
     """Probe the MCS for the selected type-level $submit-data bundle contract.
 
-    Returns SUBMIT_DATA_MODE_STU5 only when the server advertises an operation
-    whose OperationDefinition has `code: submit-data`, `type: true`, and a
-    `bundle` input parameter. A CapabilityStatement cannot express the last two,
-    so the definition is dereferenced (never across origins — see
-    `_resolve_operation_definition`).
+    Returns a SubmitDataCapability whose `mode` is SUBMIT_DATA_MODE_STU5 only
+    when the server advertises an operation whose OperationDefinition has
+    `code: submit-data`, `type: true`, and a `bundle` input parameter, and
+    whose `bundle_max` carries that parameter's declared ceiling for clamping.
+    A CapabilityStatement cannot express the last two, so the definition is
+    dereferenced (never across origins — see `_resolve_operation_definition`).
 
     Everything else is SUBMIT_DATA_MODE_BASE, including every case where the
     contract merely cannot be CONFIRMED: an unreachable /metadata, a missing or
@@ -1244,7 +1280,10 @@ async def detect_submit_data_mode(
                     # still worth probing.
                     continue
                 if operation_definition is not None and _operation_definition_matches_contract(operation_definition):
-                    return SUBMIT_DATA_MODE_STU5
+                    return SubmitDataCapability(
+                        mode=SUBMIT_DATA_MODE_STU5,
+                        bundle_max=_bundle_max_from_definition(operation_definition),
+                    )
 
             if saw_retired_operation and not candidates:
                 logger.info(
@@ -1262,7 +1301,7 @@ async def detect_submit_data_mode(
             "CapabilityStatement probe for the $submit-data bundle contract failed — assuming base $submit-data",
             extra={"mcs_url": sanitize_url(mcs_url), "error": sanitize_error(exc)},
         )
-    return SUBMIT_DATA_MODE_BASE
+    return SubmitDataCapability(mode=SUBMIT_DATA_MODE_BASE)
 
 
 def _submit_data_rejection(resp: httpx.Response) -> FhirOperationOutcome | None:
@@ -1294,7 +1333,7 @@ async def submit_data(
     them into one:
 
     - STU5 mode POSTs to the type-level `Measure/$submit-data`. The contract
-      selected in #413 is type-level, and `detect_submit_data_mode` only
+      selected in #413 is type-level, and `detect_submit_data_capability` only
       resolves to this mode after confirming the server's OperationDefinition
       declares `type: true` with a `bundle` input.
     - Base-fallback mode POSTs to the instance-level
