@@ -212,6 +212,31 @@ describe('JobsPage — data submission workflow', () => {
     );
   });
 
+  test('clearing the field sends the remembered value, not 0', async () => {
+    // An empty input is `''`, not `null` — `formData.bundles_per_submission
+    // ?? rememberedBundles` never falls back for it, and `Number('')` is `0`,
+    // the most aggressive possible value. Clearing must behave like leaving
+    // the field untouched, not like typing an explicit 0.
+    api.getJobs = jest.fn().mockResolvedValue({
+      jobs: [
+        { ...BASE_JOB, id: 1, workflow: 'deqm_submit_data', bundles_per_submission: 8, bundles_per_submission_requested: 8 },
+      ],
+    });
+    render(<Harness />);
+    await userEvent.click(await screen.findByRole('button', { name: /New calculation/i }));
+    await userEvent.selectOptions(await screen.findByLabelText(/Data submission workflow/i), 'deqm_submit_data');
+    const input = await screen.findByLabelText(/Bundles per submission/i);
+    expect(input.value).toBe('8');
+    await userEvent.clear(input);
+    expect(input.value).toBe('');
+    const measureSelect = await screen.findByLabelText('Measure');
+    await waitFor(() => expect(measureSelect.value).toBe('CMS999'));
+    await userEvent.click(screen.getByRole('button', { name: /Start calculation/i }));
+    await waitFor(() =>
+      expect(api.createJob).toHaveBeenCalledWith(expect.objectContaining({ bundles_per_submission: 8 }))
+    );
+  });
+
   test('direct_load sends no bundles value at all', async () => {
     api.getJobs = jest.fn().mockResolvedValue({ jobs: [] });
     render(<Harness />);

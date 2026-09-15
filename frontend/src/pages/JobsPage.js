@@ -187,6 +187,13 @@ export default function JobsPage() {
     if (!formData.measure_id) { toast.error('Please select a measure'); return; }
     setCreating(true);
     try {
+      // An empty/whitespace-only field (the operator cleared it) is not the
+      // same as an untouched `null` — `''` is not `null`, so `??` never fires
+      // for it — but it must be treated the same way: fall back to the
+      // remembered preference rather than coercing `Number('')` to `0`,
+      // which would silently mean "every subject in the chunk".
+      const rawBundles = formData.bundles_per_submission;
+      const bundlesTouched = rawBundles !== null && rawBundles !== undefined && String(rawBundles).trim() !== '';
       const created = await createJob({
         measure_id: formData.measure_id,
         group_id: formData.group_id || undefined,
@@ -194,7 +201,7 @@ export default function JobsPage() {
         period_end: formData.period_end || undefined,
         workflow: formData.workflow,
         ...(formData.workflow === 'deqm_submit_data'
-          ? { bundles_per_submission: Number(formData.bundles_per_submission ?? rememberedBundles) }
+          ? { bundles_per_submission: Number(bundlesTouched ? rawBundles : rememberedBundles) }
           : {}),
       });
       toast.success('Calculation started');
