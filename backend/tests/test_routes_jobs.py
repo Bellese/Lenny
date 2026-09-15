@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 
+from app.config import settings
 from app.routes.jobs import _effective_bundles_per_submission
 from app.services.fhir_client import SubmitDataCapability
 
@@ -1738,6 +1739,37 @@ async def test_an_explicit_zero_with_no_server_max_logs_nothing(client, caplog):
         with caplog.at_level(logging.WARNING):
             resp = await client.post("/jobs", json=body)
     assert resp.status_code == 201
-    assert resp.json()["bundles_per_submission"] == 100  # resolved up to BATCH_SIZE, unclamped
+    assert resp.json()["bundles_per_submission"] == settings.BATCH_SIZE  # resolved up, unclamped
     assert resp.json()["bundles_per_submission_requested"] == 0
     assert not any("bundles per submission" in m.lower() for m in caplog.messages)
+
+
+async def test_base_fallback_mode_forces_effective_group_size_to_one(client, caplog):
+    """base-fallback has no multi-bundle envelope: DeqmSubmitDataWorkflow always
+    collapses to a group size of 1 outside STU5. A requested 50 must not be
+    stored as the effective value merely because no server `bundle_max` caught
+    it — the job would then run at 1 while its own record claims 50."""
+    with patch(
+        "app.routes.jobs.detect_submit_data_capability",
+        AsyncMock(return_value=SubmitDataCapability(mode="base-fallback", bundle_max=None)),
+    ):
+        body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 50}
+        with caplog.at_level(logging.WARNING):
+            resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["bundles_per_submission"] == 1
+    assert resp.json()["bundles_per_submission_requested"] == 50
+    assert any("bundles per submission" in m.lower() for m in caplog.messages)
+
+
+async def test_stu5_mode_is_not_clamped_to_one(client):
+    """Guards against a fix that clamps every job to 1 regardless of mode."""
+    with patch(
+        "app.routes.jobs.detect_submit_data_capability",
+        AsyncMock(return_value=SubmitDataCapability(mode="stu5", bundle_max=None)),
+    ):
+        body = {**_valid_job_body(), "workflow": "deqm_submit_data", "bundles_per_submission": 50}
+        resp = await client.post("/jobs", json=body)
+    assert resp.status_code == 201
+    assert resp.json()["bundles_per_submission"] == 50
+    assert resp.json()["bundles_per_submission_requested"] == 50

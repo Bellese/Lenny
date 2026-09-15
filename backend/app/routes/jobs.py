@@ -25,6 +25,7 @@ from app.dependencies import (
 from app.models.job import BatchStatus, Job, JobStatus, MeasureResult
 from app.models.validation import ExpectedResult
 from app.services.fhir_client import (
+    SUBMIT_DATA_MODE_STU5,
     SubmitDataCapability,
     _build_auth_headers,
     _validate_ssrf_url,
@@ -376,6 +377,14 @@ async def create_job(
         bundles_requested = body.bundles_per_submission
         bundle_max = submit_data_capability.bundle_max if submit_data_capability else None
         bundles_effective = _effective_bundles_per_submission(bundles_requested, bundle_max, settings.BATCH_SIZE)
+        if submit_data_mode != SUBMIT_DATA_MODE_STU5:
+            # Base-fallback (and any other non-STU5 mode) has no multi-bundle
+            # envelope: DeqmSubmitDataWorkflow.submission_group_size collapses
+            # to 1 outside STU5 regardless of what was requested or what the
+            # mode-blind ceilings above computed. Force the effective value to
+            # match what the job will actually run at; the raw request is
+            # still recorded unchanged in bundles_per_submission_requested.
+            bundles_effective = 1
         # Compare against the RESOLVED candidate, not the raw request: an
         # explicit `0` resolves UP to BATCH_SIZE before any ceiling is
         # applied, so comparing to the raw `0` would never catch a case where
