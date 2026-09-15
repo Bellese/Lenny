@@ -1242,7 +1242,7 @@ async def detect_submit_data_capability(
     unfetchable OperationDefinition, a malformed body. That direction is the
     safe one — base-fallback is the empirically verified path against HAPI,
     whereas a false stu5 costs the job a pioneer round trip before
-    `_settle_mode_and_submit` downgrades it.
+    `_settle_mode` downgrades it.
 
     Never raises: the probe decides the envelope, it must not block job
     creation (the measure pre-flight already proved the MCS reachable).

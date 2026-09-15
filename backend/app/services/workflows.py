@@ -332,8 +332,8 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
         # to reach the submit step under STU5 becomes the pioneer and is the
         # only one allowed to downgrade. Everyone else waits for its verdict
         # and then submits under the settled mode, with no downgrade path of
-        # their own. One group's submission is therefore serialized; the rest
-        # run fully concurrent as before.
+        # their own. One group's mode-deciding POST is therefore serialized;
+        # its re-sends and every other group run fully concurrent (finding M6).
         #
         # The barrier only engages while the mode is STU5. base-fallback has
         # nowhere to downgrade to, and per the v0.1.0.0 notes every server

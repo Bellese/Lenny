@@ -1236,7 +1236,7 @@ class TestGroupFailureIsolation:
         assert all(isinstance(o.error.cause, asyncio.TimeoutError) for o in outcomes)
 
     async def test_isolation_never_downgrades(self):
-        """Only _settle_mode_and_submit may change the mode (#414). A settled
+        """Only _settle_mode may change the mode (#414). A settled
         group that isolates must leave the job's wire format alone."""
         wf = self._settled_stu5(2)
         subjects = await self._prepare(wf, ["p1", "p2"])
@@ -1353,12 +1353,12 @@ class TestPioneerGroup:
 
     async def test_the_barrier_releases_even_when_the_pioneer_group_fails(self):
         """A pioneer group whose submission fails must still publish a verdict
-        and release every waiter: `_settle_mode_and_submit` catches the failure
-        and turns it into error outcomes, then sets `_mode_settled` on that
-        normal-return path, so other groups never wait forever on a verdict
-        that never arrives. (The `finally` this method also has covers the
-        raise path, not this one — removing `.set()` itself still fails five
-        other tests, so it stays well covered.)"""
+        and release every waiter: `_settle_mode` catches the failure and turns
+        it into a "fail" _Settlement, then submit_prepared's `finally` sets
+        `_mode_settled` on that normal-return path, so other groups never wait
+        forever on a verdict that never arrives. (That `finally` also covers
+        the raise path, not this one — removing `.set()` itself still fails
+        five other tests, so it stays well covered.)"""
         wf = self._pioneer(2)
         subjects = await self._prepare(wf, ["p1", "p2"])
         with patch("app.services.workflows.submit_data", new=AsyncMock(side_effect=_fhir_op_error(503))):
