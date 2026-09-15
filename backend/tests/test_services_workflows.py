@@ -7,7 +7,13 @@ import pytest
 
 from app.config import settings
 from app.services.deqm import LENNY_REPORTER_ORG
-from app.services.fhir_client import SUBMIT_DATA_MODE_STU5, BatchQueryStrategy, DataRequirementsStrategy, GatherResult
+from app.services.fhir_client import (
+    SUBMIT_DATA_MODE_BASE,
+    SUBMIT_DATA_MODE_STU5,
+    BatchQueryStrategy,
+    DataRequirementsStrategy,
+    GatherResult,
+)
 from app.services.fhir_errors import FhirOperationError, FhirOperationOutcome
 from app.services.workflows import (
     DeqmSubmitDataWorkflow,
@@ -1386,6 +1392,84 @@ class TestPioneerGroup:
         assert modes.count("stu5") == 1, "only the pioneer may attempt STU5"
         assert wf.mode == "base-fallback"
         assert all(m == "base-fallback" for m in modes[1:])
+
+
+class TestPioneerReleasesTheBarrierEarly:
+    async def _prepare(self, wf, patient_ids):
+        subjects = []
+        for pid in patient_ids:
+            with patch.object(
+                wf._strategy,
+                "gather_patient_data",
+                new=AsyncMock(return_value=GatherResult(resources=[{"resourceType": "Patient", "id": pid}])),
+            ):
+                subjects.append(await wf.prepare_patient("http://cdr", pid, {}))
+        return subjects
+
+    def _pioneer(self, group_size: int) -> DeqmSubmitDataWorkflow:
+        wf = _deqm_workflow(mode="stu5")
+        wf._group_size = group_size
+        return wf  # _mode_settled is unset: this group IS the pioneer
+
+    async def test_the_barrier_opens_after_the_pioneers_first_post_not_its_last(self):
+        """Finding M6. The pioneer's re-sends must happen outside _mode_lock:
+        a downgrading group of N otherwise blocks every other chunk for N
+        sequential round trips, which is only reachable once operators can
+        select N (#413 PR 3)."""
+        wf = self._pioneer(3)
+        subjects = await self._prepare(wf, ["p0", "p1", "p2"])
+        posts: list[str] = []
+        barrier_open_after: list[int] = []
+
+        async def _post(parameters, mode):
+            posts.append(mode)
+            if len(posts) == 1:
+                raise FhirOperationError(
+                    operation="submit-data", url="http://mcs", status_code=404, outcome=None, latency_ms=1
+                )
+            # By the time a re-send runs, a waiter must already be admissible.
+            if not wf._mode_lock.locked():
+                barrier_open_after.append(len(posts))
+
+        wf._post = AsyncMock(side_effect=_post)
+        outcomes = await wf.submit_prepared(subjects)
+
+        assert len(outcomes) == 3
+        assert posts[0] == SUBMIT_DATA_MODE_STU5
+        assert posts[1:] == [SUBMIT_DATA_MODE_BASE] * 3
+        # The lock was already free on the FIRST re-send, i.e. post #2.
+        assert barrier_open_after and barrier_open_after[0] == 2
+
+    async def test_the_mode_is_already_decided_when_the_barrier_opens(self):
+        """#414 must survive the narrowing: self._mode and self._downgraded are
+        written inside the lock, before the event is set, so no POST can ever
+        observe an open barrier next to a half-decided mode."""
+        wf = self._pioneer(2)
+        subjects = await self._prepare(wf, ["a", "b"])
+        calls: list[int] = []
+
+        async def _post(parameters, mode):
+            calls.append(len(calls))
+            if len(calls) == 1:
+                # The pioneer POST, still inside the lock, still undecided.
+                raise FhirOperationError(
+                    operation="submit-data", url="http://mcs", status_code=404, outcome=None, latency_ms=1
+                )
+            # Every later POST is a re-send running outside the lock. If the
+            # barrier is open, the decision must already be visible and final.
+            assert wf._mode_settled.is_set()
+            assert wf.mode == SUBMIT_DATA_MODE_BASE
+            assert wf.downgraded is True
+            assert mode == SUBMIT_DATA_MODE_BASE
+
+        wf._post = AsyncMock(side_effect=_post)
+        outcomes = await wf.submit_prepared(subjects)
+
+        assert len(calls) == 3  # one pioneer POST, then one re-send per subject
+        assert len(outcomes) == 2
+        assert all(o.error is None for o in outcomes)
+        assert wf.mode == SUBMIT_DATA_MODE_BASE
+        assert wf.downgraded is True
 
 
 class TestCrossChunkSafety:
