@@ -14,6 +14,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Literal
 
 from app.config import settings
 from app.services.deqm import (
@@ -174,7 +175,7 @@ class _Settlement:
       "fail"         — one verdict for the whole group; `error` carries it.
     """
 
-    action: str
+    action: Literal["done", "resend-base", "isolate-stu5", "fail"]
     error: Exception | None = None
 
 
@@ -651,7 +652,9 @@ class DeqmSubmitDataWorkflow(SubmissionWorkflow):
                 )
                 for s in subjects
             ]
-        return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
+        if settlement.action == "done":
+            return [SubjectOutcome(patient_id=s.patient_id, gather=s.gather) for s in subjects]
+        raise AssertionError(settlement.action)  # pragma: no cover - Literal makes this unreachable
 
 
 async def build_submission_workflow(
