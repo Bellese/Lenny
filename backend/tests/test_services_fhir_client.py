@@ -3917,3 +3917,157 @@ async def test_unfiltered_query_failure_still_reported():
         result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
 
     assert [f.resource_type for f in result.failed_types] == ["Condition"]
+
+
+# --- #455: per-type patient scope parameter -------------------------------
+#
+# The gather hardcoded `subject=Patient/{id}` for every resource type. Seven
+# types reject `subject` and need `patient`; one (AdverseEvent) is the
+# reverse; four accept neither and cannot be scoped to a patient at all.
+# Measured against HAPI 8.8.0 — see issue #455 for the full probe table.
+
+
+async def _capture_gather_urls(data_req_response: dict) -> list[str]:
+    """Run a gather against mocked CDR responses and return every URL requested."""
+    empty_bundle = {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []}
+    captured_urls: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        captured_urls.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, data_req_response)
+        if "/Patient/" in url and "?" not in url:
+            return _make_response(404, {"resourceType": "OperationOutcome"})
+        return _make_response(200, empty_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    return captured_urls
+
+
+async def test_fetch_by_requirements_coverage_is_scoped_by_patient_param():
+    """Coverage rejects `subject=` — it must be scoped with `patient=` (#455).
+
+    Witnessed in job 18: every one of 66 patients lost its Coverage, and with it
+    the `SDE Payer` supplemental data, because the gather sent `subject=`.
+    """
+    urls = await _capture_gather_urls({"resourceType": "Library", "dataRequirement": [{"type": "Coverage"}]})
+
+    coverage_urls = [u for u in urls if "/Coverage?" in u]
+    assert coverage_urls, "Coverage was never requested"
+    for url in coverage_urls:
+        assert "patient=Patient/p1" in url, f"Coverage must be scoped by patient=: {url}"
+        assert "subject=" not in url, f"Coverage rejects subject=: {url}"
+
+
+async def test_fetch_by_requirements_adverse_event_is_scoped_by_subject_param():
+    """AdverseEvent is the inverse case: it accepts `subject=` and rejects `patient=`.
+
+    Guards against "fix" #455 by swapping every type to `patient=` — that would
+    break this type. The scope parameter is per-type, not global.
+    """
+    urls = await _capture_gather_urls({"resourceType": "Library", "dataRequirement": [{"type": "AdverseEvent"}]})
+
+    ae_urls = [u for u in urls if "/AdverseEvent?" in u]
+    assert ae_urls, "AdverseEvent was never requested"
+    for url in ae_urls:
+        assert "subject=Patient/p1" in url, f"AdverseEvent must be scoped by subject=: {url}"
+        assert "patient=" not in url, f"AdverseEvent rejects patient=: {url}"
+
+
+async def test_fetch_by_requirements_immunization_and_claim_use_patient_param():
+    """The other types measured as rejecting `subject=` are scoped with `patient=` (#455)."""
+    urls = await _capture_gather_urls(
+        {
+            "resourceType": "Library",
+            "dataRequirement": [
+                {"type": "Immunization"},
+                {"type": "AllergyIntolerance"},
+                {"type": "Claim"},
+                {"type": "FamilyMemberHistory"},
+                {"type": "NutritionOrder"},
+                {"type": "Device"},
+            ],
+        }
+    )
+
+    for resource_type in (
+        "Immunization",
+        "AllergyIntolerance",
+        "Claim",
+        "FamilyMemberHistory",
+        "NutritionOrder",
+        "Device",
+    ):
+        type_urls = [u for u in urls if f"/{resource_type}?" in u]
+        assert type_urls, f"{resource_type} was never requested"
+        for url in type_urls:
+            assert "patient=Patient/p1" in url, f"{resource_type} must use patient=: {url}"
+            assert "subject=" not in url, f"{resource_type} rejects subject=: {url}"
+
+
+async def test_fetch_by_requirements_condition_keeps_subject_param():
+    """Types that accept both parameters keep `subject=` — the fix changes nothing for them."""
+    urls = await _capture_gather_urls({"resourceType": "Library", "dataRequirement": [{"type": "Condition"}]})
+
+    condition_urls = [u for u in urls if "/Condition?" in u]
+    assert condition_urls, "Condition was never requested"
+    for url in condition_urls:
+        assert "subject=Patient/p1" in url, f"Condition should still use subject=: {url}"
+
+
+async def test_fetch_by_requirements_unscopable_type_is_skipped_not_requested():
+    """Medication has no patient-scoped search parameter — don't request it at all (#455).
+
+    `subject=` and `patient=` both 400. Requesting it guarantees a failure on
+    every patient of every job, which inflates failed_types and makes a real
+    fetch failure indistinguishable from a structural one.
+    """
+    urls = await _capture_gather_urls(
+        {
+            "resourceType": "Library",
+            "dataRequirement": [{"type": "Medication"}, {"type": "Condition"}],
+        }
+    )
+
+    assert not [u for u in urls if "/Medication?" in u], (
+        "Medication cannot be scoped to a patient and must not be requested"
+    )
+    assert [u for u in urls if "/Condition?" in u], "Condition should still be requested"
+
+
+async def test_fetch_by_requirements_unscopable_type_reports_a_distinct_reason():
+    """A skipped unscopable type is reported, and says why — not as a fetch failure (#455)."""
+    empty_bundle = {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []}
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            return _make_response(
+                200,
+                {"resourceType": "Library", "dataRequirement": [{"type": "Medication"}, {"type": "Condition"}]},
+            )
+        if "/Patient/" in url and "?" not in url:
+            return _make_response(404, {"resourceType": "OperationOutcome"})
+        return _make_response(200, empty_bundle)
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    medication_failures = [f for f in result.failed_types if f.resource_type == "Medication"]
+    assert len(medication_failures) == 1, "the skipped type should be reported exactly once"
+    assert "no patient-scoped search parameter" in medication_failures[0].error, (
+        f"the reason must distinguish a structural skip from a fetch failure: {medication_failures[0].error!r}"
+    )

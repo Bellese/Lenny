@@ -253,6 +253,54 @@ async def _acquire_smart_token(credentials: dict) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Patient scoping for CDR searches
+# ---------------------------------------------------------------------------
+#
+# How a resource type is narrowed to one patient in a FHIR search. Most clinical
+# types accept both `subject=` and `patient=`, but the two sets are NOT identical
+# and neither contains the other, so a single hardcoded parameter is wrong for
+# some type whichever one you pick. Measured against HAPI 8.8.0 (issue #455):
+#
+#   subject= only : AdverseEvent
+#   patient= only : AllergyIntolerance, Claim, Coverage, Device,
+#                   FamilyMemberHistory, Immunization, NutritionOrder
+#   neither       : Medication, Location, Practitioner, Organization
+#
+# A type that rejects the parameter answers HTTP 400 (HAPI-0524, "Unknown search
+# parameter"), which the gather records as a failed type and moves past — so the
+# patient is submitted WITHOUT that data and the job still reports success. That
+# is how every CMS measure's `SDE Payer` went missing: all nine declare it, it
+# reads Coverage, and Coverage rejects `subject=`.
+_DEFAULT_PATIENT_SCOPE_PARAM = "subject"
+
+_PATIENT_SCOPE_PARAM_OVERRIDES: dict[str, str] = {
+    "AllergyIntolerance": "patient",
+    "Claim": "patient",
+    "Coverage": "patient",
+    "Device": "patient",
+    "FamilyMemberHistory": "patient",
+    "Immunization": "patient",
+    "NutritionOrder": "patient",
+}
+
+# Types with no patient-scoped search parameter at all — `subject=` and
+# `patient=` both 400. They are shared infrastructure on a multi-tenant server
+# rather than patient data, and are reachable only by following a reference from
+# a resource that IS patient-scoped (e.g. MedicationRequest.medicationReference
+# -> Medication), which is issue #409's transitive walk.
+#
+# Requesting them anyway guarantees a failure for every patient of every job,
+# which inflates `failed_types` and makes a real fetch failure indistinguishable
+# from a structural one. They are skipped deliberately instead.
+_PATIENT_UNSCOPABLE_TYPES = ("Medication", "Location", "Practitioner", "Organization")
+
+
+def _patient_scope_param(resource_type: str) -> str:
+    """Return the search parameter that scopes `resource_type` to one patient."""
+    return _PATIENT_SCOPE_PARAM_OVERRIDES.get(resource_type, _DEFAULT_PATIENT_SCOPE_PARAM)
+
+
+# ---------------------------------------------------------------------------
 # Data Acquisition Strategy (ABC + BatchQuery implementation)
 # ---------------------------------------------------------------------------
 
@@ -553,6 +601,22 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                                     error=f"CDR returned {resp.status_code} for Patient/{patient_id}",
                                 )
                             )
+                    elif resource_type in _PATIENT_UNSCOPABLE_TYPES:
+                        # No patient-scoped search parameter exists for this type,
+                        # so there is no query to make — issuing one would 400 for
+                        # every patient of every job. Reported so the operator can
+                        # see the data is absent, with a reason that distinguishes
+                        # this from a CDR that failed to answer.
+                        failed_types.append(
+                            FailedResourceFetch(
+                                resource_type=resource_type,
+                                error=(
+                                    f"{resource_type} has no patient-scoped search parameter; "
+                                    f"it can only be reached by following a reference (see issue #409)"
+                                ),
+                            )
+                        )
+                        failed_type_names.add(resource_type)
                     else:
                         # Only keep a code:in= filter when every requirement for
                         # this type agrees on a single valueset. Otherwise
@@ -560,7 +624,8 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                         type_valuesets = valuesets_by_type.get(resource_type, [])
                         distinct_valuesets = {vs for vs in type_valuesets if vs}
                         has_unfiltered = any(vs is None for vs in type_valuesets)
-                        base_params = f"subject=Patient/{patient_id}&_count=100"
+                        scope_param = _patient_scope_param(resource_type)
+                        base_params = f"{scope_param}=Patient/{patient_id}&_count=100"
 
                         # Try the narrow query first, then the same query without
                         # the code filter. A `code:in=` against a ValueSet the CDR
@@ -1699,13 +1764,13 @@ _PATIENT_SCOPED_TYPES: list[tuple[str, str]] = [
     ("Patient", "_id"),
 ]
 
-# Deliberately absent from `_PATIENT_SCOPED_TYPES`: Medication, Location,
-# Practitioner, Organization. HAPI 400s on both `patient=` and `subject=` for
-# all four, so there is no way to scope a delete to them — and no need. They are
-# shared infrastructure on a multi-tenant server (deleting another participant's
-# Practitioner is exactly the harm #392 is about), and `push_resources` PUTs them
-# back by ID on every job, so a stale copy is overwritten rather than orphaned.
-_PATIENT_UNSCOPABLE_TYPES = ("Medication", "Location", "Practitioner", "Organization")
+# Deliberately absent from `_PATIENT_SCOPED_TYPES`: the four
+# `_PATIENT_UNSCOPABLE_TYPES` defined above. HAPI 400s on both `patient=` and
+# `subject=` for all four, so there is no way to scope a delete to them — and no
+# need. They are shared infrastructure on a multi-tenant server (deleting another
+# participant's Practitioner is exactly the harm #392 is about), and
+# `push_resources` PUTs them back by ID on every job, so a stale copy is
+# overwritten rather than orphaned.
 
 # Max patient IDs per conditional-delete URL. 50 x ~40-char FHIR ids keeps the
 # request line under ~2KB, well inside the 8KB default header limit on HAPI's
