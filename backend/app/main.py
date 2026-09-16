@@ -61,6 +61,8 @@ class JSONFormatter(logging.Formatter):
             "mcs_id",
             "mcs_name",
             "mcs_url",
+            "measure_id",
+            "measure_version",
         )
         for key in _EXTRA_KEYS:
             val = getattr(record, key, None)
