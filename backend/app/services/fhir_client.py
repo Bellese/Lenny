@@ -1199,6 +1199,18 @@ _RETIRED_DEQM_OP_NAME = "deqm-submit-data"
 _SUBMIT_DATA_OP_CODE = "submit-data"
 
 
+# `MeasureReport.measure` is a canonical, which is a `uri`, whose FHIR value
+# regex is `\S*` — whitespace is illegal. `Measure.version` is a plain `string`
+# with no such restriction, so a perfectly conformant Measure can still compose
+# a non-conformant canonical. MADiE stamps every DRAFT measure with
+# `Draft based on X.Y.ZZZ`, which is exactly that case (#452).
+#
+# Only `version` is guarded here. `Measure.url` is itself typed `uri`, so a
+# server returning whitespace in it is already non-conformant at the source —
+# a different defect, and not one this function can paper over.
+_CANONICAL_ILLEGAL_WHITESPACE_RE = re.compile(r"\s")
+
+
 async def get_measure_canonical(
     measure_id: str,
     *,
@@ -1212,6 +1224,16 @@ async def get_measure_canonical(
     FhirOperationError when the Measure can't be read — the job should fail
     fast rather than submit reports pointing at nothing. A Measure without a
     `url` (unusual but legal) degrades to the relative reference.
+
+    A `version` containing whitespace is dropped and the bare `url` returned,
+    because the composed canonical would otherwise be an illegal URI that the
+    receiver rejects for EVERY patient in the job. The bare url means "any
+    version" and resolves against a server holding one copy of the measure.
+    That is a real narrowing when the MCS holds several versions, so the
+    fallback warns rather than happening silently. Percent-encoding the
+    whitespace was considered and rejected: `%20` does not match how the
+    receiver indexes the canonical, so the reference would resolve to nothing
+    instead of to the right measure.
     """
     url = f"{mcs_url}/Measure/{measure_id}"
     async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1231,7 +1253,16 @@ async def get_measure_canonical(
     if not canonical:
         return f"Measure/{measure_id}"
     version = measure.get("version")
-    return f"{canonical}|{version}" if version else canonical
+    if not version:
+        return canonical
+    if _CANONICAL_ILLEGAL_WHITESPACE_RE.search(version):
+        logger.warning(
+            "Measure version contains whitespace and cannot ride in a canonical; "
+            "submitting the version-less canonical instead",
+            extra={"measure_id": measure_id, "measure_version": version},
+        )
+        return canonical
+    return f"{canonical}|{version}"
 
 
 async def detect_submit_data_capability(

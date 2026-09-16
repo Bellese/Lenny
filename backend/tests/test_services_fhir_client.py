@@ -2933,6 +2933,61 @@ class TestGetMeasureCanonical:
             result = await get_measure_canonical("m1", mcs_url="http://mcs")
         assert result == "Measure/m1"
 
+    async def test_drops_version_containing_whitespace(self):
+        """MADiE stamps every draft measure `Draft based on X.Y.ZZZ`.
+
+        `MeasureReport.measure` is a canonical, i.e. a uri, whose value regex
+        is `\\S*` — so a version with spaces cannot ride along. The bare url
+        means "any version", which resolves; `url|Draft based on 0.0.000`
+        resolves to a 412 for every patient in the job (#452).
+        """
+        measure = {
+            "resourceType": "Measure",
+            "id": "m1",
+            "url": "http://ex.org/Measure/m1",
+            "version": "Draft based on 0.0.000",
+        }
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, measure)))
+            result = await get_measure_canonical("m1", mcs_url="http://mcs")
+        assert result == "http://ex.org/Measure/m1"
+
+    @pytest.mark.parametrize("version", ["1.0 0", "1.0\t0", "1.0\n0", "  ", "\u00a0"])
+    async def test_drops_version_for_any_whitespace_character(self, version):
+        measure = {"resourceType": "Measure", "id": "m1", "url": "http://ex.org/Measure/m1", "version": version}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, measure)))
+            result = await get_measure_canonical("m1", mcs_url="http://mcs")
+        assert result == "http://ex.org/Measure/m1"
+
+    async def test_warns_naming_the_measure_and_rejected_version(self, caplog):
+        """Dropping a version pin narrows nothing on a single-copy server, but it
+        does change meaning when the MCS holds several versions. Fall back
+        loudly, never silently."""
+        measure = {
+            "resourceType": "Measure",
+            "id": "m1",
+            "url": "http://ex.org/Measure/m1",
+            "version": "Draft based on 0.0.000",
+        }
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, measure)))
+            with caplog.at_level("WARNING"):
+                await get_measure_canonical("m1", mcs_url="http://mcs")
+        assert "whitespace" in caplog.text
+        record = next(r for r in caplog.records if "whitespace" in r.message)
+        assert record.measure_id == "m1"
+        assert record.measure_version == "Draft based on 0.0.000"
+
+    async def test_does_not_warn_for_a_legal_version(self, caplog):
+        measure = {"resourceType": "Measure", "id": "m1", "url": "http://ex.org/Measure/m1", "version": "2.0"}
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            _mock_async_client(mock_httpx, get=AsyncMock(return_value=_make_response(200, measure)))
+            with caplog.at_level("WARNING"):
+                result = await get_measure_canonical("m1", mcs_url="http://mcs")
+        assert result == "http://ex.org/Measure/m1|2.0"
+        assert caplog.text == ""
+
     async def test_raises_on_http_error(self):
         with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
             _mock_async_client(
