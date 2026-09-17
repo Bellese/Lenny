@@ -12,6 +12,9 @@ from app.services.fhir_client import (
     _PATIENT_SCOPE_PARAM_OVERRIDES,
     _PATIENT_SCOPED_TYPES,
     _PATIENT_UNSCOPABLE_TYPES,
+    _WIPE_ENUMERATE_MAX_PAGES,
+    _WIPE_ID_CHUNK_SIZE,
+    _WIPE_MAX_TXN_ENTRIES,
     SUBMIT_DATA_MODE_BASE,
     SUBMIT_DATA_MODE_STU5,
     BatchQueryStrategy,
@@ -1554,6 +1557,847 @@ class TestScopedWipeReferenceConflicts:
             )
         assert posted_headers, "no transaction Bundle was posted"
         assert posted_headers[0].get("Authorization") == "Bearer tok-1"
+
+    # -- recovery outcomes ---------------------------------------------------
+
+    async def test_raises_when_the_conflict_enumeration_is_unauthorized(self):
+        """A 401 on the enumeration must not read as "nothing left to clear".
+
+        The enumeration is also the verification step, so an unauthenticated or
+        expired-token GET that answered "no matches" would let the wipe report
+        success over data it never even looked at — the same silent success #458
+        exists to remove, one layer down.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            return _make_response(401, {"resourceType": "OperationOutcome"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._client(mock_httpx, delete=_delete, get=_get)
+            with pytest.raises(RuntimeError, match="Not authorized to enumerate"):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert mock_ctx.post.await_count == 0, "a DELETE transaction went out against an unreadable server"
+
+    async def test_conflicts_that_clear_themselves_need_no_transaction(self):
+        """The 409 was real, but the referrer was gone by the time recovery ran.
+
+        A later delete in the same pass freed it, so there is nothing to put in a
+        transaction and nothing to fail over. The wipe must complete quietly
+        rather than posting an empty Bundle or raising on an empty leftover set.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            return _make_response(200, self._EMPTY)
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._client(mock_httpx, delete=_delete, get=_get)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert mock_ctx.post.await_count == 0, "an empty leftover set still posted a transaction Bundle"
+
+    async def test_a_transaction_that_errors_but_clears_the_data_is_not_a_failure(self):
+        """Re-reading the server decides, not the transaction's status code.
+
+        HAPI can answer non-2xx on a transaction whose deletes nonetheless landed,
+        and a concurrent job can clear the leftovers regardless. Failing the job on
+        the status code alone would abort evaluations whose data is genuinely gone.
+        """
+        posted: list[dict] = []
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url and not posted:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(400, {"resourceType": "OperationOutcome"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert len(posted) == 1
+
+    async def test_a_transaction_transport_failure_is_named_in_the_error(self):
+        """The operator needs to know the recovery never reached the server.
+
+        "could not delete" plus nothing else reads as a referential-integrity
+        problem to chase on the target; a connect failure is a different fix
+        entirely.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            raise httpx.ConnectError("connection refused")
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            with pytest.raises(RuntimeError) as exc:
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        message = str(exc.value)
+        assert "transaction request failed" in message, message
+        assert "ConnectError" in message, f"the transport failure must be named: {message!r}"
+
+    async def test_the_error_carries_the_transactions_own_diagnostics(self):
+        """HAPI's account of what is pinning the resource is the actionable part.
+
+        `_conflict_diagnostics` exists to lift "First reference found was resource
+        X in path Y" out of the OperationOutcome; if it never reaches the
+        RuntimeError, the operator is left to go find it by hand.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            return self._conflict("MeasureReport/summary-1 in path MeasureReport.evaluatedResource")
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            with pytest.raises(RuntimeError) as exc:
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        message = str(exc.value)
+        assert "HTTP 409" in message, message
+        assert "MeasureReport/summary-1" in message, f"the referrer HAPI named is missing: {message!r}"
+
+    async def test_conflict_diagnostics_are_redacted(self):
+        """HAPI echoes request context into diagnostics, credentials included.
+
+        The 409 body goes into a log line and into an operator-facing error
+        message, so it travels through `redact_outcome` first. A wipe that leaks a
+        participant's bearer token into the job log is a worse bug than the one
+        being reported.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            return _make_response(
+                409,
+                {
+                    "resourceType": "OperationOutcome",
+                    "issue": [{"severity": "error", "diagnostics": "Rejected. Authorization: Bearer sekret-abc123"}],
+                },
+            )
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            with pytest.raises(RuntimeError) as exc:
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        message = str(exc.value)
+        assert "sekret-abc123" not in message, f"a credential reached the operator-facing error: {message!r}"
+        assert "[redacted]" in message, message
+
+    async def test_a_non_json_conflict_body_does_not_break_the_wipe(self):
+        """A proxy's HTML 409 must degrade to the status code, not raise.
+
+        The wipe runs against servers Lenny does not control, and a gateway in
+        front of one can answer 409 with an HTML body. Letting `.json()` escape
+        would turn a recoverable reference conflict into an opaque crash.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return httpx.Response(409, text="<html>Conflict</html>", request=_DUMMY_REQUEST)
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            return _make_response(200, self._EMPTY)
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._client(mock_httpx, delete=_delete, get=_get)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        # Still recognised as a conflict and still retried, despite the unparseable body.
+        assert len([u for u in _delete_urls(mock_ctx) if "/Encounter?" in u]) == 2
+
+    # -- enumeration mechanics ----------------------------------------------
+
+    async def test_conflict_enumeration_follows_same_origin_pagination(self):
+        """Leftovers past the first page must ride in the same transaction.
+
+        A partial enumeration would post a Bundle missing half of a cycle, which
+        is exactly the split the transaction exists to avoid — and would then
+        raise on the half it never tried to delete.
+        """
+        posted: list[dict] = []
+        page2 = "https://mcs.example.org/fhir?_getpages=abc&_getpagesoffset=200"
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if posted:
+                return _make_response(200, self._EMPTY)
+            if url == page2:
+                return self._found("Encounter", "e-2")
+            if "/Encounter?" in url:
+                return _make_response(
+                    200,
+                    {
+                        "resourceType": "Bundle",
+                        "type": "searchset",
+                        "entry": [{"resource": {"resourceType": "Encounter", "id": "e-1"}}],
+                        "link": [{"relation": "next", "url": page2}],
+                    },
+                )
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        urls = [e["request"]["url"] for e in posted[0]["entry"]]
+        assert urls == ["Encounter/e-1", "Encounter/e-2"], f"the second page was dropped: {urls}"
+
+    async def test_conflict_enumeration_rejects_a_cross_origin_next_link(self):
+        """The SSRF guard, on a code path that did not exist before #458.
+
+        A hostile or misconfigured server can hand back a next link pointing at an
+        internal host. The enumeration follows next links, so it needs the same
+        same-origin check the rest of the client applies.
+        """
+        gets: list[str] = []
+        evil = "https://evil.example.net/fhir?_getpages=abc"
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            gets.append(url)
+            if "/Encounter?" in url:
+                return _make_response(
+                    200,
+                    {
+                        "resourceType": "Bundle",
+                        "type": "searchset",
+                        "entry": [{"resource": {"resourceType": "Encounter", "id": "e-1"}}],
+                        "link": [{"relation": "next", "url": evil}],
+                    },
+                )
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            with pytest.raises(RuntimeError):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert gets, "nothing was enumerated"
+        assert not any("evil.example.net" in u for u in gets), f"followed a cross-origin next link: {gets}"
+
+    async def test_conflict_enumeration_rejects_ids_that_are_not_bare_ids(self):
+        """Server-supplied ids become the `url` of a DELETE entry, so they are input.
+
+        `Encounter/../Patient/bystander` as a transaction entry url is a delete
+        aimed at another patient — the cross-tenant damage #392 exists to prevent,
+        reached through the recovery path this diff added.
+        """
+        posted: list[dict] = []
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url and not posted:
+                return _make_response(
+                    200,
+                    {
+                        "resourceType": "Bundle",
+                        "type": "searchset",
+                        "entry": [
+                            {"resource": {"resourceType": "Encounter", "id": "../Patient/bystander"}},
+                            {"resource": {"resourceType": "Encounter", "id": "nested/id"}},
+                            {"resource": None},
+                            {"resource": {"resourceType": "Encounter"}},
+                            {"resource": {"resourceType": "Encounter", "id": "e-ok"}},
+                        ],
+                    },
+                )
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        urls = [e["request"]["url"] for e in posted[0]["entry"]]
+        assert urls == ["Encounter/e-ok"], f"a malformed id reached the DELETE transaction: {urls}"
+
+    async def test_conflict_enumeration_is_bounded_by_a_page_cap(self):
+        """A server that pages forever must not hang the job — and must not pass.
+
+        HAPI's `next` link is server-generated and a buggy one can be a fixed
+        point. The cap bounds the work, and since the pre-landing review the cap
+        also fails the wipe: a truncated view of the leftovers is not evidence
+        they were cleared, so enumeration stops at the budget and raises rather
+        than carrying a partial set into a transaction.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url:
+                return _make_response(
+                    200,
+                    {
+                        "resourceType": "Bundle",
+                        "type": "searchset",
+                        "entry": [{"resource": {"resourceType": "Encounter", "id": "e-1"}}],
+                        "link": [{"relation": "next", "url": "https://mcs.example.org/fhir/Encounter?_getpages=1"}],
+                    },
+                )
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            with pytest.raises(RuntimeError):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert mock_ctx.get.await_count == _WIPE_ENUMERATE_MAX_PAGES, (
+            f"pagination was not bounded: {mock_ctx.get.await_count} GETs"
+        )
+        assert mock_ctx.post.await_count == 0, "a truncated enumeration must not be carried into a DELETE transaction"
+
+    # -- retry loop ---------------------------------------------------------
+
+    async def test_the_retry_loop_keeps_passing_while_it_makes_progress(self):
+        """More than one retry, when each pass frees something.
+
+        A chain — A pinned by B, B pinned by C — needs as many passes as the
+        chain is deep. A fix that retried exactly once would clear the two-type
+        case in the issue body and leave anything longer behind.
+        """
+        attempts: dict[str, int] = {"Encounter": 0, "Condition": 0}
+
+        async def _delete(url, **kwargs):
+            for rt in attempts:
+                if f"/{rt}?" in url:
+                    attempts[rt] += 1
+                    # Condition frees on pass 2, Encounter on pass 3.
+                    limit = 1 if rt == "Condition" else 2
+                    if attempts[rt] <= limit:
+                        return self._conflict("the next link in the chain")
+            return _make_response(200, {})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._client(mock_httpx, delete=_delete)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert attempts == {"Encounter": 3, "Condition": 2}, f"the retry loop stopped early: {attempts}"
+        assert mock_ctx.post.await_count == 0, "the retry cleared everything, so no transaction was needed"
+        assert mock_ctx.get.await_count == 0, "nothing was left blocked, so nothing should be enumerated"
+
+    async def test_a_stranded_patient_rides_in_the_recovery_transaction(self):
+        """The Patient itself is the resource an operator actually notices.
+
+        It is last in the sweep and cannot be deleted while any clinical resource
+        points at it, so a conflict anywhere earlier strands it. The next job
+        re-pushes that id and evaluates against a merge of old and new data.
+        """
+        posted: list[dict] = []
+
+        async def _delete(url, **kwargs):
+            if "/Patient?" in url:
+                return self._conflict("Condition/c-1 in path Condition.subject")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Patient?" in url and not posted:
+                return self._found("Patient", "p1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert [e["request"]["url"] for e in posted[0]["entry"]] == ["Patient/p1"]
+
+    # -- an unreadable target server must never read as a clean wipe (review) ---
+
+    async def test_raises_when_the_conflict_enumeration_is_unreadable(self):
+        """A 5xx on the enumeration must not read as "nothing left to clear".
+
+        Found in pre-landing review by two specialists and the coverage audit.
+        `_search_scoped_refs` raised only on 401/403; every other non-200 returned
+        the refs gathered so far — usually none — and both callers read an empty
+        list as "the leftovers were freed". So one 500 after a delete had already
+        answered 409 restored #458's exact silent success, one layer down. 5xx is
+        ordinary on a shared server nobody owns.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            return _make_response(503, {"resourceType": "OperationOutcome"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get)
+            with pytest.raises(RuntimeError, match="[Cc]ould not enumerate"):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+    async def test_an_unreadable_verification_after_a_failed_transaction_is_not_success(self):
+        """The verification read is the ONLY evidence the transaction worked.
+
+        The POST's status code is deliberately not trusted, so a verification that
+        cannot be read leaves the wipe with no evidence at all — which must fail,
+        not pass.
+        """
+        posted: list[dict] = []
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if posted:
+                return _make_response(503, {"resourceType": "OperationOutcome"})
+            if "/Encounter?" in url:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(500, {"resourceType": "OperationOutcome"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            with pytest.raises(RuntimeError):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+    async def test_a_non_json_enumeration_body_fails_loudly_not_with_a_decode_error(self):
+        """A gateway answering 200 with HTML must not crash the wipe with JSONDecodeError.
+
+        Every other failure in this path becomes a RuntimeError carrying
+        operator-facing context. A bare decode error escaping from inside a wipe
+        tells the operator nothing about which server or which resource.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            return httpx.Response(200, text="<html>gateway</html>", request=_DUMMY_REQUEST)
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get)
+            with pytest.raises(RuntimeError, match="[Cc]ould not enumerate"):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+    async def test_a_truncated_enumeration_fails_loudly(self):
+        """Hitting the page cap with more pages outstanding means the set is unknown.
+
+        Returning a partial set would delete some leftovers and then report success
+        on the strength of a verification that never saw the rest.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        page = {"n": 0}
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" not in url:
+                return _make_response(200, self._EMPTY)
+            page["n"] += 1
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": [{"resource": {"resourceType": "Encounter", "id": f"e-{page['n']}"}}],
+                    "link": [
+                        {"relation": "next", "url": f"https://mcs.example.org/fhir/Encounter?_getpages={page['n']}"}
+                    ],
+                },
+            )
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get)
+            with pytest.raises(RuntimeError, match="too many|truncat|could not enumerate"):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+    async def test_a_blocked_target_that_times_out_on_retry_is_not_reported_as_wiped(self):
+        """A transport failure must not quietly drop a target already known blocked.
+
+        `except httpx.HTTPError` counted the failure and moved on without putting
+        the target back in `blocked`, so a 409'd target whose retry timed out left
+        `pending` and was never enumerated or verified — a "Scoped wipe complete"
+        over a resource the sweep had already been told it could not delete.
+        """
+        attempts = {"n": 0}
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                attempts["n"] += 1
+                if attempts["n"] == 1:
+                    return self._conflict("Condition/c-1")
+                raise httpx.TimeoutException("slow delete")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._client(mock_httpx, delete=_delete, get=_get)
+            with pytest.raises(RuntimeError):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert mock_ctx.get.await_count > 0, "the timed-out target was dropped without being verified"
+
+    async def test_the_per_resource_fallback_raises_on_unauthorized(self):
+        """The 412 fallback checked only 409, so a 401 there deleted nothing silently.
+
+        The enumeration GET in the same function already raises on 401/403 with
+        "Refusing to report a successful wipe". Reachable on exactly the server the
+        fallback exists for: one that refuses conditional delete and then refuses
+        the per-resource deletes under a read-only scope.
+        """
+
+        async def _delete(url, **kwargs):
+            if "?" in url:
+                return _make_response(412, {})
+            return _make_response(401, {})
+
+        async def _get(url, **kwargs):
+            return self._found("Condition", "c-1")
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get)
+            with pytest.raises(RuntimeError, match="Not authorized"):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+    async def test_the_id_guard_admits_only_bare_fhir_ids(self):
+        """A denylist is the wrong shape for an id that becomes a DELETE url.
+
+        FHIR ids are an allowlist (`[A-Za-z0-9.\\-]{1,64}`). The old two-substring
+        check admitted `?patient=...` — which turns a targeted entry into a
+        *conditional* delete scoped to someone else's patient — and
+        `?_cascade=delete`, which is exactly the outward reference-following blast
+        radius ADR-018 argues must never be used on a shared server.
+        """
+        posted: list[dict] = []
+        hostile = ["?patient=other-tenant", "e-1?_cascade=delete", "%2e%2e%2fMeasure%2fCMS130", "ok-1"]
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url and not posted:
+                return _make_response(
+                    200,
+                    {
+                        "resourceType": "Bundle",
+                        "type": "searchset",
+                        "entry": [{"resource": {"resourceType": "Encounter", "id": i}} for i in hostile],
+                    },
+                )
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        urls = [e["request"]["url"] for e in posted[0]["entry"]]
+        assert urls == ["Encounter/ok-1"], f"a non-bare id reached a DELETE url: {urls}"
+
+    async def test_repeated_ids_across_pages_are_not_deleted_twice(self):
+        """A server repeating an entry across pages must not produce a duplicate op.
+
+        `refs` was appended unconditionally, so a repeated entry became two DELETE
+        entries for one resource in a single transaction — which a real HAPI may
+        reject outright, turning a bounded enumeration into a failed recovery.
+        """
+        posted: list[dict] = []
+        pages = {"n": 0}
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" not in url or posted:
+                return _make_response(200, self._EMPTY)
+            pages["n"] += 1
+            body = {
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "entry": [{"resource": {"resourceType": "Encounter", "id": "e-1"}}],
+            }
+            if pages["n"] == 1:
+                body["link"] = [{"relation": "next", "url": "https://mcs.example.org/fhir/Encounter?_getpages=1"}]
+            return _make_response(200, body)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        urls = [e["request"]["url"] for e in posted[0]["entry"]]
+        assert urls == ["Encounter/e-1"], f"duplicate DELETE entries for one resource: {urls}"
+
+    async def test_the_recovery_transaction_is_posted_to_the_server_base(self):
+        """A transaction Bundle is only valid against the base, not a type endpoint.
+
+        No test asserted the POST target, so a regression to `{base}/Bundle` would
+        stay green here and only surface against a real HAPI, in the rare path.
+        """
+        urls: list[str] = []
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url and not urls:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            urls.append(url)
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert urls == ["https://mcs.example.org/fhir"], f"transaction posted to the wrong target: {urls}"
+
+    async def test_each_id_chunk_gets_its_own_transaction(self):
+        """The conflict path is chunk-shaped, and the Bundle is bounded per chunk.
+
+        One transaction for every chunk, not one for the whole job: `refs`
+        accumulated across every target, and `targets` is 23 types x ceil(N/50)
+        chunks, so a 460-patient job could hand a single POST hundreds of
+        thousands of DELETE entries — a body whose size the remote server decides.
+
+        Splitting by chunk is safe for the thing the transaction exists for:
+        `Condition.encounter` and `Encounter.reasonReference` both point within one
+        patient, and a patient never spans two chunks, so a reference cycle is
+        always inside one chunk's Bundle. Verified by
+        `test_a_cycle_inside_one_chunk_still_commits_together` below.
+        """
+        posted: list[dict] = []
+        ids = [f"p{i}" for i in range(_WIPE_ID_CHUNK_SIZE + 5)]
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url and not posted:
+                # One leftover per chunk, distinguished by the first id in the chunk.
+                marker = "a" if "p0," in url else "b"
+                return self._found("Encounter", f"e-{marker}")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=ids)
+
+        assert len(posted) == 2, f"expected one transaction per id chunk, got {len(posted)}"
+        per_txn = sorted(sorted(e["request"]["url"] for e in b["entry"]) for b in posted)
+        assert per_txn == [["Encounter/e-a"], ["Encounter/e-b"]], per_txn
+
+    async def test_a_cycle_inside_one_chunk_still_commits_together(self):
+        """Bounding per chunk must not split the pair the transaction exists for.
+
+        This is the load-bearing claim behind chunk-grouping: both halves of a
+        `Condition` <-> `Encounter` cycle belong to the same patient, so they land
+        in the same chunk and therefore the same Bundle. If that ever stopped
+        being true, cycles would stop clearing and #458 would be back.
+        """
+        posted: list[dict] = []
+        ids = [f"p{i}" for i in range(_WIPE_ID_CHUNK_SIZE + 5)]
+
+        async def _delete(url, **kwargs):
+            if "/Condition?" in url or "/Encounter?" in url:
+                return self._conflict("the other half of the cycle")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if posted:
+                return _make_response(200, self._EMPTY)
+            # Only the first chunk holds the cycle.
+            if "p0," not in url:
+                return _make_response(200, self._EMPTY)
+            if "/Condition?" in url:
+                return self._found("Condition", "c-1")
+            if "/Encounter?" in url:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=ids)
+
+        assert len(posted) == 1, f"one chunk held the cycle, so one transaction: {len(posted)}"
+        urls = sorted(e["request"]["url"] for e in posted[0]["entry"])
+        assert urls == ["Condition/c-1", "Encounter/e-1"], f"the two halves of the cycle must commit together: {urls}"
+
+    async def test_an_oversized_conflict_set_fails_loudly_instead_of_posting(self):
+        """A wipe this stuck is broken; the cap must raise, not POST whatever came back.
+
+        The remote decides how much arrives here, so without a ceiling a server
+        that refuses every conditional delete can steer Lenny into a multi-MB
+        DELETE transaction against a shared box it does not own.
+        """
+        posted: list[dict] = []
+        many = [{"resource": {"resourceType": "Encounter", "id": f"e-{i}"}} for i in range(_WIPE_MAX_TXN_ENTRIES + 1)]
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url:
+                return _make_response(200, {"resourceType": "Bundle", "type": "searchset", "entry": many})
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            with pytest.raises(RuntimeError, match="exceeds"):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert posted == [], "an oversized conflict set must not be POSTed at all"
+
+    async def test_a_conflict_body_without_diagnostics_still_names_the_status(self):
+        """HAPI does emit an OperationOutcome carrying only severity/code.
+
+        The join then returned "", and the operator-facing error composed
+        "The transaction answered HTTP 400: ." — a dangling colon where the
+        actionable text was supposed to be.
+        """
+        bare = _make_response(
+            409, {"resourceType": "OperationOutcome", "issue": [{"severity": "error", "code": "conflict"}]}
+        )
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return bare
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            return _make_response(
+                400, {"resourceType": "OperationOutcome", "issue": [{"severity": "error", "code": "processing"}]}
+            )
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            with pytest.raises(RuntimeError) as exc:
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert ": ." not in str(exc.value), f"empty diagnostics left a dangling colon: {exc.value}"
+        assert "HTTP 400" in str(exc.value)
 
 
 # ---------------------------------------------------------------------------

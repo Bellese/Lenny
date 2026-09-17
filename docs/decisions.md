@@ -333,9 +333,10 @@ are therefore respectively insufficient and unsatisfiable.
 1. **Retry the ordered sweep** over just the types that 409'd, until a pass makes no progress. Clears
    every acyclic case — the referrer was simply later in the list. Each pass strictly shrinks the
    pending set, so termination needs no attempt cap.
-2. **One transaction Bundle** of instance DELETEs for whatever is left. HAPI evaluates referential
-   integrity at commit rather than per entry, so both halves of a cycle go together. A *batch* Bundle
-   would not work: its entries apply independently and each would 409 exactly as the sweep did.
+2. **A transaction Bundle of instance DELETEs per patient-id chunk**, bounded by
+   `_WIPE_MAX_TXN_ENTRIES`. HAPI evaluates referential integrity at commit rather than per entry, so
+   both halves of a cycle go together. A *batch* Bundle would not work: its entries apply
+   independently and each would 409 exactly as the sweep did.
 3. **Verify by re-reading, then raise.** The transaction's status code does not decide; a re-search
    does. Anything still present means the referrer is outside the wipe's scope, and the wipe raises.
 
@@ -370,8 +371,15 @@ under test is the server's behavior, and a mock asserting HAPI 409s would just r
 cycle intact, so it converts a silent bug into a job that always fails on conformant data. It is
 detection, not a fix. (c) Enumerate every type after the sweep to verify — rejected, it doubles the
 request count of every job for the benefit of the rare conflicted one; enumeration is now reached only
-for a type that actually answered 409. (d) Chunk the transaction Bundle — rejected, it could put the
-two halves of a cycle in different transactions, which is the one thing the request exists to avoid.
+for a type that actually answered 409. (d) One unbounded transaction Bundle for the whole job —
+rejected in pre-landing review. The per-target page cap bounds one target, but the refs accumulated
+across every target and `targets` is (types × ⌈patients/50⌉), so the *remote* decided the body size: a
+460-patient job could reach hundreds of thousands of DELETE entries aimed at a shared server. Grouping
+by patient-id chunk bounds it without splitting what the transaction exists for — a reference cycle is
+intra-patient, and a patient never spans two chunks — and `_WIPE_MAX_TXN_ENTRIES` raises rather than
+truncating, because a wipe with that much still pinned is broken in a way a larger POST does not fix.
+Chunking that ignored patient boundaries stays rejected, for the original reason: it could put the two
+halves of a cycle in different transactions.
 
 **Not covered.** `wipe_patient_data`, the unfiltered full wipe behind `MCSConfig.wipe_before_job`, has
 the same conflict hazard on the same shared `_delete_all_of_type` helper (which now reports conflicts

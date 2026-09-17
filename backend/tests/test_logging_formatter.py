@@ -90,3 +90,25 @@ def test_emits_scoped_wipe_conflict_extras():
     assert entry["resourceType"] == "Encounter"
     assert entry["blocked_resources"] == ["Encounter/e-1", "Condition/c-1"]
     assert entry["blocked_count"] == 2
+
+
+def test_emits_the_wipe_target_and_blocked_types():
+    """#458 review: `target` names WHICH server is stuck.
+
+    The conflict warning passes `target`, `blocked_count` and `blocked_resources`
+    in one `extra` dict. Allowlisting two of the three and dropping the one that
+    identifies the server reproduced the same trap one key over. `blocked_types`
+    is a list and deliberately not `resourceType`, which carries a single type on
+    every other line (ADR-017).
+    """
+    entry = _format(
+        target="https://mcs.example.org/fhir",
+        patient_count=38,
+        consecutive_failures=2,
+        blocked_types=["Condition", "Encounter"],
+    )
+
+    assert entry["target"] == "https://mcs.example.org/fhir"
+    assert entry["patient_count"] == 38
+    assert entry["consecutive_failures"] == 2
+    assert entry["blocked_types"] == ["Condition", "Encounter"]

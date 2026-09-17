@@ -99,7 +99,27 @@ async def _exists(measure_url: str, resource_type: str, resource_id: str) -> boo
 
 
 async def _cleanup(measure_url: str) -> None:
-    await wipe_patients_by_id(base_url=measure_url, patient_ids=[_TARGET, _BYSTANDER])
+    """Teardown must not be the code under test.
+
+    `wipe_patients_by_id` now raises on an unresolvable conflict, and this runs
+    from `finally:` — so a teardown raise would replace the real assertion error
+    with the wipe's own, which is exactly what makes #458-class bugs unreadable in
+    CI. The newer tests below already tear down with `_force_delete`; this brings
+    the original three into line.
+    """
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        for patient_id in (_TARGET, _BYSTANDER):
+            refs = [f"{r['resourceType']}/{r['id']}" for r in _clinical_resources(patient_id)]
+            refs.append(f"Patient/{patient_id}")
+            await client.post(
+                measure_url,
+                json={
+                    "resourceType": "Bundle",
+                    "type": "transaction",
+                    "entry": [{"request": {"method": "DELETE", "url": ref}} for ref in refs],
+                },
+                headers={"Content-Type": "application/fhir+json"},
+            )
 
 
 async def test_scoped_wipe_leaves_other_patients_intact(measure_url):

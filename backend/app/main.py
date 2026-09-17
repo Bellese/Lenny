@@ -78,6 +78,18 @@ class JSONFormatter(logging.Formatter):
             "resourceType",
             "blocked_resources",
             "blocked_count",
+            # `target` names WHICH server is stuck, and the conflict warning
+            # passes it in the same extra dict as the two keys above — allowing
+            # those and not this one reproduced the trap one key over.
+            "target",
+            "patient_count",
+            "consecutive_failures",
+            # A list, deliberately separate from `resourceType`: ADR-017 settled
+            # that one key must not be a scalar on one line and a collection on
+            # another.
+            "blocked_types",
+            "pass_number",
+            "stalled",
         )
         for key in _EXTRA_KEYS:
             val = getattr(record, key, None)

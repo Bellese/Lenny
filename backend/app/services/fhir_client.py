@@ -2034,6 +2034,36 @@ _WIPE_CONFLICT_STATUS = 409
 _WIPE_ENUMERATE_PAGE_SIZE = 200
 _WIPE_ENUMERATE_MAX_PAGES = 20
 
+# Ordered retry passes before giving up and going to transaction recovery. The
+# loop terminates on its own (each continuing pass strictly shrinks the pending
+# set), but its bound is n(n+1)/2 conditional deletes for n targets — ~26,500
+# sequential requests for a 460-patient job whose referrers happen to be ordered
+# worst-case. Capping costs no correctness: the transaction is the correctness
+# mechanism, and a cap only makes it carry a few more entries.
+_WIPE_MAX_PASSES = 4
+
+# Ceiling on one recovery transaction. The remote decides how much arrives here —
+# a server that refuses every conditional delete hands back every target — so
+# without a ceiling it can steer Lenny into a multi-megabyte DELETE transaction
+# against a shared server it does not own. A wipe with this much still pinned is
+# broken in a way a bigger POST does not fix, so the cap raises rather than
+# truncating: the error is the useful output.
+_WIPE_MAX_TXN_ENTRIES = 1000
+
+# How many blocked refs to name, in the log line and in the raised error. The log
+# carries more because it is machine-parseable; the message stays readable.
+_WIPE_CONFLICT_LOG_SAMPLE = 20
+_WIPE_CONFLICT_ERROR_SAMPLE = 10
+
+# FHIR `id` is an allowlist datatype, and these ids become the `url` of a DELETE
+# entry in a transaction Bundle. A denylist is the wrong shape for that: the two
+# substring checks this replaced admitted `?patient=<other tenant>` — a targeted
+# entry turned into a *conditional* delete against someone else's data, the exact
+# harm #392 exists to prevent — and `?_cascade=delete`, which is the outward
+# reference-following blast radius `_clear_wipe_conflicts` argues against.
+# Percent-encoded traversal (`%2e%2e%2f`) passed both checks too.
+_FHIR_ID_RE = re.compile(r"[A-Za-z0-9.\-]{1,64}\Z")
+
 # One conditional delete: a resource type, its patient-scoping search parameter,
 # and one chunk of patient ids. The unit the sweep retries.
 _WipeTarget = tuple[str, str, list[str]]
@@ -2077,10 +2107,10 @@ async def wipe_patients_by_id(
     1. Re-issue the ordered sweep over just the types that 409'd, until a pass
        makes no progress. This clears every acyclic case, where the referrer was
        simply later in the list.
-    2. Enumerate what is left and delete it as one transaction Bundle. HAPI
-       evaluates referential integrity at commit, so mutually-referencing
-       resources go together — necessary because the reference graph has real
-       cycles and stage 1 cannot terminate on them.
+    2. Enumerate what is left and delete it as a transaction Bundle per batch of
+       patients. HAPI evaluates referential integrity at commit, so
+       mutually-referencing resources go together — necessary because the
+       reference graph has real cycles and stage 1 cannot terminate on them.
     3. Verify, and raise if anything survived.
     """
     if not patient_ids:
@@ -2102,30 +2132,32 @@ async def wipe_patients_by_id(
     pending: list[_WipeTarget] = [(rt, param, chunk) for rt, param in _PATIENT_SCOPED_TYPES for chunk in chunks]
     consecutive_failures = 0
     async with httpx.AsyncClient(timeout=300.0) as client:
-        while pending:
+        for pass_number in range(1, _WIPE_MAX_PASSES + 1):
             blocked, consecutive_failures = await _scoped_wipe_pass(
                 client, pending, base_url, auth_headers, consecutive_failures
             )
-            if not blocked:
-                pending = []
+            stalled = len(blocked) == len(pending)
+            pending = blocked
+            if not pending:
                 break
-            if len(blocked) == len(pending):
-                # No progress. Every remaining 409 is pinned by something a
-                # different delete order would not free, so retrying is pure
-                # cost — see `_clear_wipe_conflicts` for why such a state is
-                # reachable at all. Each earlier iteration strictly shrinks
-                # `pending`, so this loop always terminates.
+            if stalled or pass_number == _WIPE_MAX_PASSES:
+                # Either no progress — every remaining 409 is pinned by something
+                # a different delete order would not free — or the pass budget is
+                # spent. Both hand off to transaction recovery, which is where
+                # correctness actually lives.
                 logger.info(
-                    "Scoped wipe: retry made no progress, recovering by transaction",
+                    "Scoped wipe: retrying stopped, recovering by transaction",
                     extra={
-                        "blocked_count": len(blocked),
-                        # Deduped: one type spans several chunks on a large job.
-                        "resourceType": ",".join(dict.fromkeys(rt for rt, _, _ in blocked)),
+                        "blocked_count": len(pending),
+                        # Its own key, a list: `resourceType` carries one type on
+                        # every other line, and ADR-017 already settled that one
+                        # key must not be a scalar here and a collection there.
+                        "blocked_types": list(dict.fromkeys(rt for rt, _, _ in pending)),
+                        "pass_number": pass_number,
+                        "stalled": stalled,
                     },
                 )
-                pending = blocked
                 break
-            pending = blocked
 
         if pending:
             await _clear_wipe_conflicts(client, pending, base_url, auth_headers)
@@ -2204,6 +2236,12 @@ async def _scoped_wipe_pass(
                 "Scoped wipe: request failed",
                 extra={"resourceType": rt, "consecutive_failures": consecutive_failures},
             )
+            # Keep it pending. A timeout is not evidence the type is clear, and a
+            # target already known to be blocked must never leave the pending set
+            # on a failed retry — dropping it here meant it was never enumerated
+            # and never verified, and the wipe reported success over a resource
+            # the server had already refused to delete.
+            blocked.append((rt, param, chunk))
             if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
                 raise RuntimeError(
                     f"FHIR server unreachable: {consecutive_failures} consecutive "
@@ -2221,13 +2259,18 @@ def _conflict_diagnostics(resp: httpx.Response) -> str:
     `redact_outcome` because the diagnostics can carry a server URL.
     """
     try:
-        return "; ".join(
+        joined = "; ".join(
             str(issue.get("diagnostics"))
             for issue in redact_outcome(resp.json()).get("issue", [])
             if issue.get("diagnostics")
         )
     except Exception:
-        return f"HTTP {resp.status_code}"
+        joined = ""
+    # HAPI does emit an OperationOutcome carrying only `severity`/`code`. Falling
+    # back only on a parse *exception* left the empty join in place, and the
+    # operator-facing error read "answered HTTP 400: ." — a dangling colon where
+    # the actionable text was meant to be.
+    return joined or f"HTTP {resp.status_code}"
 
 
 async def _search_scoped_refs(
@@ -2248,10 +2291,25 @@ async def _search_scoped_refs(
     """
     rt, param, chunk = target
     search_filter = f"{param}={','.join(chunk)}"
-    url: Optional[str] = f"{base_url}/{rt}?_count={_WIPE_ENUMERATE_PAGE_SIZE}&{search_filter}"
+    # `_elements=id` because the loop reads nothing but the id: without it this
+    # pulls up to 200 complete resources per page, and Observations run to several
+    # KB each.
+    url: str | None = f"{base_url}/{rt}?_count={_WIPE_ENUMERATE_PAGE_SIZE}&_elements=id&{search_filter}"
     refs: list[str] = []
+    rejected = 0
     pages = 0
-    while url and pages < _WIPE_ENUMERATE_MAX_PAGES:
+    while url:
+        if pages >= _WIPE_ENUMERATE_MAX_PAGES:
+            # Still a page to follow with the budget spent: the leftover set is
+            # unknown, so deleting the part we saw and then verifying against the
+            # same truncated view would report success on evidence that never
+            # covered the rest.
+            raise RuntimeError(
+                f"Could not enumerate {rt} to verify the scoped wipe at "
+                f"{sanitize_url(base_url)}: still paging after "
+                f"{_WIPE_ENUMERATE_MAX_PAGES} pages, so the set of still-referenced "
+                "resources is truncated. Refusing to report a successful wipe."
+            )
         pages += 1
         resp = await client.get(url, headers=auth_headers or {})
         if resp.status_code in (401, 403):
@@ -2259,19 +2317,49 @@ async def _search_scoped_refs(
                 f"Not authorized to enumerate {rt} at the target server "
                 f"(HTTP {resp.status_code}). Refusing to report a successful wipe."
             )
+        # Any other unreadable answer fails the wipe too. This used to `break`,
+        # which returned the refs gathered so far — usually none — and both
+        # callers read an empty list as "the leftovers are gone". One 500 after a
+        # delete had already answered 409 was therefore enough to restore #458's
+        # silent success one layer down, and 5xx is ordinary on a shared server
+        # nobody owns. This read is also the only evidence the transaction
+        # worked, since its status code is deliberately not trusted.
         if resp.status_code != 200:
-            break
-        bundle = resp.json()
-        entries = bundle.get("entry", [])
+            raise RuntimeError(
+                f"Could not enumerate {rt} to verify the scoped wipe "
+                f"(HTTP {resp.status_code}) at {sanitize_url(base_url)}. Refusing to "
+                "report a successful wipe over data the server refused to delete."
+            )
+        try:
+            bundle = resp.json()
+            entries = bundle.get("entry", [])
+        except Exception as exc:
+            # A gateway in front of the server can answer 200 with HTML. Every
+            # other failure here carries operator-facing context; a bare
+            # JSONDecodeError escaping a wipe names neither server nor resource.
+            raise RuntimeError(
+                f"Could not enumerate {rt} to verify the scoped wipe at "
+                f"{sanitize_url(base_url)}: the server answered 200 with an "
+                f"unparseable body ({type(exc).__name__}). Refusing to report a "
+                "successful wipe."
+            ) from exc
         if not entries:
+            url = None
             break
         for entry in entries:
             res = entry.get("resource") or {}
             res_id = res.get("id")
-            # Same guard as `_delete_all_of_type`: the bundle is server-supplied,
-            # and these ids become the `url` of a DELETE entry in a transaction.
-            if res_id and "/" not in res_id and ".." not in res_id:
-                refs.append(f"{rt}/{res_id}")
+            # Positive match against the FHIR `id` grammar — see `_FHIR_ID_RE`
+            # for why a denylist was the wrong shape here.
+            if res_id and _FHIR_ID_RE.match(str(res_id)):
+                ref = f"{rt}/{res_id}"
+                # Deduped: a server that repeats an entry across pages would
+                # otherwise put two DELETE operations for one resource in a
+                # single transaction, which HAPI can reject outright.
+                if ref not in refs:
+                    refs.append(ref)
+            elif res_id:
+                rejected += 1
         url = None
         for link in bundle.get("link", []):
             if link.get("relation") == "next":
@@ -2284,6 +2372,11 @@ async def _search_scoped_refs(
                         extra={"url": sanitize_url(next_url)},
                     )
                 break
+    if rejected:
+        logger.warning(
+            "Scoped wipe: server returned ids that are not valid FHIR ids",
+            extra={"resourceType": rt, "count": rejected, "target": sanitize_url(base_url)},
+        )
     return refs
 
 
@@ -2308,6 +2401,13 @@ async def _clear_wipe_conflicts(
     request. A *batch* Bundle would not work — its entries are applied
     independently and each would 409 exactly as the sweep did.
 
+    One Bundle per patient-id chunk, not one for the whole job, and bounded by
+    `_WIPE_MAX_TXN_ENTRIES`. The remote decides how much reaches here, so a
+    single unbounded Bundle let a server that refuses every conditional delete
+    steer this into a multi-megabyte POST. Chunk-grouping is safe for the case
+    the transaction exists for: a reference cycle is intra-patient, and a patient
+    never spans two chunks.
+
     `_cascade=delete` would also clear it, and HAPI suggests it in the 409's own
     informational issue, but it is the wrong tool on a shared server: cascade
     follows references *outward* to whatever happens to point at the target,
@@ -2321,9 +2421,22 @@ async def _clear_wipe_conflicts(
     patients would read data the job believes it deleted. Same fail-loud rule the
     wipe already applies to 401/403.
     """
-    refs: list[str] = []
+    # Grouped by the patient-id chunk each target came from, and POSTed one
+    # transaction per chunk. `refs` used to accumulate across every target, and
+    # `targets` is (types x ceil(patients/50)) entries, so a 460-patient job could
+    # hand a single POST hundreds of thousands of DELETE entries.
+    #
+    # Splitting this way does not split what the transaction exists for:
+    # `Condition.encounter` and `Encounter.reasonReference` both point within one
+    # patient, and a patient never spans two chunks, so a reference cycle is
+    # always inside one chunk's Bundle. Pinned by
+    # `test_a_cycle_inside_one_chunk_still_commits_together`.
+    refs_by_chunk: dict[tuple[str, ...], list[str]] = {}
     for target in targets:
-        refs.extend(await _search_scoped_refs(client, target, base_url, auth_headers))
+        found = await _search_scoped_refs(client, target, base_url, auth_headers)
+        if found:
+            refs_by_chunk.setdefault(tuple(target[2]), []).extend(found)
+    refs = [ref for chunk_refs in refs_by_chunk.values() for ref in chunk_refs]
 
     if not refs:
         # The final pass's later deletes freed them after all — the conditional
@@ -2335,33 +2448,38 @@ async def _clear_wipe_conflicts(
         return
 
     logger.warning(
-        "Scoped wipe: deleting still-referenced leftovers as one transaction",
+        "Scoped wipe: deleting still-referenced leftovers by transaction",
         extra={
             "target": sanitize_url(base_url),
             "blocked_count": len(refs),
-            "blocked_resources": refs[:20],
+            "blocked_resources": refs[:_WIPE_CONFLICT_LOG_SAMPLE],
         },
     )
-    bundle = {
-        "resourceType": "Bundle",
-        "type": "transaction",
-        "entry": [{"request": {"method": "DELETE", "url": ref}} for ref in refs],
-    }
-    # Not chunked, deliberately: splitting the entries could put the two halves
-    # of a cycle in different transactions, which is the one thing this request
-    # exists to avoid. The sweep has already removed everything deletable, so
-    # what reaches here is small.
+    for chunk_refs in refs_by_chunk.values():
+        if len(chunk_refs) > _WIPE_MAX_TXN_ENTRIES:
+            raise RuntimeError(
+                f"Scoped wipe found {len(chunk_refs)} still-referenced resources for one "
+                f"batch of patients on {sanitize_url(base_url)}, which exceeds the "
+                f"{_WIPE_MAX_TXN_ENTRIES} a single recovery transaction may carry. The "
+                "sweep has already deleted everything deletable, so a set this large means "
+                "the target is holding data this wipe cannot free. Job aborted rather than "
+                "evaluating against stale data."
+            )
+
     detail = ""
-    try:
-        resp = await client.post(
-            base_url,
-            json=bundle,
-            headers={**(auth_headers or {}), "Content-Type": "application/fhir+json"},
-        )
-        if resp.status_code >= 400:
-            detail = f" The transaction answered HTTP {resp.status_code}: {_conflict_diagnostics(resp)}."
-    except httpx.HTTPError as exc:
-        detail = f" The transaction request failed: {type(exc).__name__}."
+    headers = {**(auth_headers or {}), "Content-Type": "application/fhir+json"}
+    for chunk_refs in refs_by_chunk.values():
+        bundle = {
+            "resourceType": "Bundle",
+            "type": "transaction",
+            "entry": [{"request": {"method": "DELETE", "url": ref}} for ref in chunk_refs],
+        }
+        try:
+            resp = await client.post(base_url, json=bundle, headers=headers)
+            if resp.status_code >= 400:
+                detail = f" A transaction answered HTTP {resp.status_code}: {_conflict_diagnostics(resp)}."
+        except httpx.HTTPError as exc:
+            detail = f" A transaction request failed: {type(exc).__name__}."
 
     # Re-reading the server decides, not the transaction's status code. A
     # transaction can answer 200 having deleted only some entries, and a failed
@@ -2370,7 +2488,9 @@ async def _clear_wipe_conflicts(
     for target in targets:
         remaining.extend(await _search_scoped_refs(client, target, base_url, auth_headers))
     if remaining:
-        shown = ", ".join(remaining[:10]) + (" ..." if len(remaining) > 10 else "")
+        shown = ", ".join(remaining[:_WIPE_CONFLICT_ERROR_SAMPLE]) + (
+            " ..." if len(remaining) > _WIPE_CONFLICT_ERROR_SAMPLE else ""
+        )
         raise RuntimeError(
             f"Scoped wipe could not delete {len(remaining)} still-referenced resource(s) on "
             f"{sanitize_url(base_url)}: {shown}.{detail} They are pinned by a resource this "
@@ -2441,7 +2561,7 @@ async def _delete_all_of_type(
 
     Returns the `Type/id` of every resource the server refused to delete because
     something still references it (issue #458). Callers that can act on that —
-    `wipe_patients_by_id` — retry and then clear them in one transaction; the full
+    `wipe_patients_by_id` — retry and then clear them by transaction; the full
     wipe ignores the return value.
 
     `auth_headers` MUST be threaded through from the caller. This is the fallback
@@ -2479,18 +2599,30 @@ async def _delete_all_of_type(
             # Reject ids that would escape the resource-type path. The bundle is
             # server-supplied, so "../../Measure/CMS130" would otherwise be
             # normalised into a DELETE against an arbitrary path.
-            if res_id and "/" not in res_id and ".." not in res_id:
+            if res_id and _FHIR_ID_RE.match(str(res_id)):
                 del_url = f"{base_url}/{resource_type}/{res_id}"
                 try:
                     del_resp = await client.delete(del_url, headers=headers)
-                    # A 409 does not raise from httpx, so before #458 it did not
-                    # even reach the handler below — the resource simply survived
-                    # the wipe. On a server without conditional delete every
-                    # reference conflict in the sweep took this path.
-                    if del_resp.status_code == _WIPE_CONFLICT_STATUS:
+                    if del_resp.status_code in (401, 403):
+                        # The enumeration GET above already raises on these, for
+                        # the same reason: a sweep that deletes nothing must not
+                        # report success. Checking only 409 here left a read-only
+                        # scope looking like a clean wipe.
+                        raise RuntimeError(
+                            f"Not authorized to delete {resource_type}/{res_id} at the target "
+                            f"server (HTTP {del_resp.status_code}). Refusing to report a "
+                            "successful wipe."
+                        )
+                    # Neither a 409 nor any other refusal raises from httpx, so
+                    # before #458 none of them reached a handler — the resource
+                    # simply survived the wipe. On a server without conditional
+                    # delete every reference conflict in the sweep took this path.
+                    if del_resp.status_code >= 400 and del_resp.status_code != 404:
                         blocked.append(f"{resource_type}/{res_id}")
                 except httpx.HTTPError:
-                    pass
+                    # Not proof the resource is gone — report it so the caller
+                    # retries or fails loudly.
+                    blocked.append(f"{resource_type}/{res_id}")
         # Re-check if more remain. Only follow a same-origin next link — a
         # hostile or misconfigured server could otherwise steer this loop at
         # an arbitrary host.
