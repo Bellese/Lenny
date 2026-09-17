@@ -333,10 +333,18 @@ are therefore respectively insufficient and unsatisfiable.
 1. **Retry the ordered sweep** over just the types that 409'd, until a pass makes no progress. Clears
    every acyclic case — the referrer was simply later in the list. Each pass strictly shrinks the
    pending set, so termination needs no attempt cap.
-2. **A transaction Bundle of instance DELETEs per patient-id chunk**, bounded by
-   `_WIPE_MAX_TXN_ENTRIES`. HAPI evaluates referential integrity at commit rather than per entry, so
-   both halves of a cycle go together. A *batch* Bundle would not work: its entries apply
-   independently and each would 409 exactly as the sweep did.
+2. **A transaction Bundle of instance DELETEs per patient**, bounded by `_WIPE_MAX_TXN_ENTRIES`.
+   HAPI evaluates referential integrity at commit rather than per entry, so both halves of a cycle go
+   together. A *batch* Bundle would not work: its entries apply independently and each would 409
+   exactly as the sweep did. Per patient rather than per job or per 50-patient id chunk, because every
+   ceiling in this path was reasoned about as one record's worth of leftovers — see the alternatives.
+2b. **Every answer from the target is either a complete set or a failure.** The enumeration that
+   feeds the transaction is also the wipe's only evidence, so an unreadable one — any non-200, an
+   unparseable 200 body, a page budget exhausted with pages outstanding, an entry whose id is not a
+   usable FHIR id, or a response carrying resources that do not belong to the patient asked for —
+   raises rather than returning what it managed to collect. Transport faults and 5xx are retried first,
+   because a search GET is idempotent and one flake out of thousands of reads should cost a request,
+   not a job.
 3. **Verify by re-reading, then raise.** The transaction's status code does not decide; a re-search
    does. Anything still present means the referrer is outside the wipe's scope, and the wipe raises.
 
@@ -371,7 +379,7 @@ under test is the server's behavior, and a mock asserting HAPI 409s would just r
 cycle intact, so it converts a silent bug into a job that always fails on conformant data. It is
 detection, not a fix. (c) Enumerate every type after the sweep to verify — rejected, it doubles the
 request count of every job for the benefit of the rare conflicted one; enumeration is now reached only
-for a type that actually answered 409. (d) One unbounded transaction Bundle for the whole job —
+for a type that actually answered 409. (d) Recovery bounded per 50-patient id chunk, or not at all —
 rejected in pre-landing review. The per-target page cap bounds one target, but the refs accumulated
 across every target and `targets` is (types × ⌈patients/50⌉), so the *remote* decided the body size: a
 460-patient job could reach hundreds of thousands of DELETE entries aimed at a shared server. Grouping
@@ -379,7 +387,23 @@ by patient-id chunk bounds it without splitting what the transaction exists for 
 intra-patient, and a patient never spans two chunks — and `_WIPE_MAX_TXN_ENTRIES` raises rather than
 truncating, because a wipe with that much still pinned is broken in a way a larger POST does not fix.
 Chunking that ignored patient boundaries stays rejected, for the original reason: it could put the two
-halves of a cycle in different transactions.
+halves of a cycle in different transactions. Per-*chunk* grounding was the first fix and was also
+rejected, on a second pass: it bounds the POST but leaves the enumeration page budget and the
+transaction cap applied to fifty records when both were sized for one, so a blocked high-cardinality
+type (a chunk of 50 patients with a few hundred Observations each) would exhaust the page budget and
+abort a legitimate wipe. Per patient every ceiling means what it says, and the atomicity argument
+becomes exact rather than incidental — a reference cycle is intra-patient by construction. The cost is
+more enumeration requests on the conflict path only.
+
+**What pre-landing review changed, and why it is recorded here.** The first implementation of this ADR
+reintroduced the very bug it describes, three times: an unreadable enumeration, a dropped
+transport-failed target, and a 401 in the per-resource fallback each let the wipe report success over
+resident data. A fourth defect was self-inflicted — replacing the id denylist with a positive match on
+the FHIR id grammar *admitted* bare `..` and `.`, which httpx resolves to the server base and to a bare
+type path, i.e. an unscoped conditional delete. The lesson worth keeping is not any one of those: it is
+that "treat an outcome that is not evidence of success as success" is the failure shape this whole area
+attracts, and that every new exit path has to be read against it. Mutation testing is how the tests for
+those fixes were checked, and it caught one test that passed with its fix reverted.
 
 **Not covered.** `wipe_patient_data`, the unfiltered full wipe behind `MCSConfig.wipe_before_job`, has
 the same conflict hazard on the same shared `_delete_all_of_type` helper (which now reports conflicts

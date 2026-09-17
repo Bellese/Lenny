@@ -112,3 +112,23 @@ def test_emits_the_wipe_target_and_blocked_types():
     assert entry["patient_count"] == 38
     assert entry["consecutive_failures"] == 2
     assert entry["blocked_types"] == ["Condition", "Encounter"]
+
+
+def test_emits_every_key_the_scoped_wipe_start_line_passes():
+    """#458 review: the allowlist is the recurring defect here (#452, #455, #458).
+
+    The "Scoped wipe starting" call passes five keys. Allowlisting two of them and
+    asserting only those two reproduced the trap the test above was written to
+    close, so this pins the whole extra dict of that one log line.
+    """
+    entry = _format(
+        target="https://mcs.example.org/fhir",
+        patient_count=38,
+        resource_types=23,
+        requests=46,
+        skipped_types=["Medication", "Location", "Practitioner", "Organization"],
+    )
+
+    for key in ("target", "patient_count", "resource_types", "requests", "skipped_types"):
+        assert key in entry, f"{key} was stripped by the allowlist"
+    assert entry["skipped_types"] == ["Medication", "Location", "Practitioner", "Organization"]

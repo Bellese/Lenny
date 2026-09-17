@@ -179,13 +179,19 @@ async def test_scoped_wipe_is_idempotent(measure_url):
     exactly this case. A 404-intolerant sweep would fail every such job.
     """
     await _seed(measure_url)
-    await wipe_patients_by_id(base_url=measure_url, patient_ids=[_TARGET, _BYSTANDER])
+    try:
+        await wipe_patients_by_id(base_url=measure_url, patient_ids=[_TARGET, _BYSTANDER])
 
-    # Second pass over an already-empty set.
-    await wipe_patients_by_id(base_url=measure_url, patient_ids=[_TARGET, _BYSTANDER])
+        # Second pass over an already-empty set.
+        await wipe_patients_by_id(base_url=measure_url, patient_ids=[_TARGET, _BYSTANDER])
 
-    assert not await _exists(measure_url, "Patient", _TARGET)
-    assert not await _exists(measure_url, "Patient", _BYSTANDER)
+        assert not await _exists(measure_url, "Patient", _TARGET)
+        assert not await _exists(measure_url, "Patient", _BYSTANDER)
+    finally:
+        # The wipe can now raise, and this test seeds data on a shared measure
+        # engine. Without teardown a raise would leave both patients resident for
+        # the rest of the session, under pytest-randomly's random ordering.
+        await _cleanup(measure_url)
 
 
 # ---------------------------------------------------------------------------

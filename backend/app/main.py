@@ -90,6 +90,12 @@ class JSONFormatter(logging.Formatter):
             "blocked_types",
             "pass_number",
             "stalled",
+            # The "Scoped wipe starting" line passes these three and they were
+            # dropped, so the one line that says how much work the wipe planned
+            # and which types it deliberately skipped was unreadable in prod.
+            "resource_types",
+            "requests",
+            "skipped_types",
         )
         for key in _EXTRA_KEYS:
             val = getattr(record, key, None)
