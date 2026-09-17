@@ -245,3 +245,61 @@ that would first exercise it.
 
 **Full rationale and rejected alternatives:**
 `docs/superpowers/specs/2026-09-14-deqm-submit-data-contract-design.md`. Issue #413.
+
+## ADR-017: The patient gather scopes each resource type by the parameter that type accepts (2026-09-17)
+
+**Context.** `DataRequirementsStrategy` narrowed every CDR search with one hardcoded
+`subject=Patient/{id}`. HAPI 8.8.0 does not accept one parameter for every type: seven of the
+types measures declare answer only `patient=` (AllergyIntolerance, Claim, Coverage, Device,
+FamilyMemberHistory, Immunization, NutritionOrder), `AdverseEvent` is the inverse, and four
+(Medication, Location, Practitioner, Organization) accept neither. A rejected parameter is a
+400, and the gather's design is to record the type as failed and carry on — so the job reported
+success on data that never arrived. Coverage was dropped on **every** job: all nine measures on
+the measure server declare `SDE Payer`, it reads Coverage, and it was empty in every report.
+
+**Decision.** The scope parameter is a per-type lookup, not a constant. The four types with no
+patient-scoped parameter are skipped without issuing a request at all, since asking is a
+guaranteed 400 per patient per job. The table is an empirical claim about a server, so
+`tests/integration/test_patient_scope_params.py` asserts it against a live HAPI — both halves per
+type: that the chosen parameter is accepted, and that the default is still rejected, so a HAPI
+upgrade that moves a type between sets breaks the test rather than a measure.
+
+**Why the skips still count as failures.** A structural skip stays in `failed_types` and still
+counts toward the "all REQUIRED types failed" check that triggers the `$everything` fallback. A
+measure whose every declared type is unscopable would otherwise gather nothing and report success
+— #455's exact failure mode, reintroduced. Splitting structural skips into their own field so
+`has_partial_failure` can ignore them is a behavioral change, deliberately not made here.
+
+**Why the gather now direct-reads infrastructure resources.** Gathered Coverage and Claim
+reference Organization and Practitioner, which cannot be *found* by search but can be *read* by
+id — and the gathered resources hand over exactly those ids. `$submit-data` is transaction-backed,
+so a reference whose target is absent fails the patient's entire submission: stock
+`hapiproject/hapi:v8.8.0-1` answers `400 HAPI-1094` and stores nothing. Every compose file in this
+repo sets `enforce_referential_integrity_on_write=false`, so no local or CI stack reproduces it —
+HAPI's default is `true`, and the BYO-CDR connectathon is where that default shows up. Results are
+cached per job (one Organization typically backs hundreds of Coverages); an absolute reference
+naming a different server is reported, never reduced to its last two segments and read from our
+CDR, which would ship an unrelated resource into a patient's submission. A target the CDR genuinely
+does not hold is reported by name — see #456 — rather than dropped, because the submission will
+fail on it and the operator needs to know which reference did it. The transitive walk that would
+reach these resources properly is #409.
+
+**Relationship to ADR-012.** ADR-012 probed the same question for the *wipe* path and recorded the
+answer for the types the wipe touches. This is the same knowledge for the *gather* path, which
+queries a wider set — so three types the gather can now collect (Device, FamilyMemberHistory,
+NutritionOrder) were added to `_PATIENT_SCOPED_TYPES`, or Lenny would push resources to a shared
+measure server with nothing to remove them, which is the harm #392 exists to prevent.
+`NutritionOrder` is ordered before `Encounter` deliberately: HAPI enforces referential integrity on
+delete, so `DELETE Encounter?patient=` answers 409 while a NutritionOrder still points at it and the
+sweep leaves the Encounter resident. The wipe's broader referrers-first ordering and its swallowed
+409s are pre-existing and tracked in #458.
+
+**Known gap.** The scope table is static while the set of types a server accepts is a runtime
+property of that server — tracked in #457.
+
+**Consequences.** Partial gathers now carry a per-type *reason* (`failed_type_reasons`) through the
+log line and the orchestrator's `partial_gather_patients` payload, so a type with no patient-scoped
+parameter and a CDR that failed to answer are no longer the same bare word. `JSONFormatter`'s extras
+allowlist in `main.py` had been dropping `failed_types` all along; it and the new keys are now
+listed. `validation.py`'s type→count map was renamed to `failed_type_counts` so one key does not
+carry a list on one log line and a map on another.

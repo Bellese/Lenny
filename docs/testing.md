@@ -88,6 +88,11 @@ If you pass explicit test files, directories, or node IDs, it runs only those ta
 ./scripts/run-integration-tests.sh tests/integration/test_full_workflow.py
 ```
 
+Per `CLAUDE.md`'s pre-push checklist, run any integration test file you added or
+modified explicitly before pushing. The CI-equivalent invocation carries
+`--ignore` flags, so a file on that list is silently skipped there and you are the
+only thing standing between it and `main`.
+
 Integration tests are marked `@pytest.mark.integration` and live in `backend/tests/integration/`.
 
 **Integration test files:**
@@ -100,6 +105,7 @@ Integration tests are marked `@pytest.mark.integration` and live in `backend/tes
 | `test_connectathon_measures.py` | Parametrized per-test-case run across all connectathon bundles; skipped on the PR gate and included in the nightly source-of-truth job |
 | `test_full_workflow.py` | Full-stack pipeline covering job orchestration → measure eval → result storage; skipped on the PR gate and run in its own clean nightly job |
 | `test_full_jobs_pipeline.py` | Runs all connectathon measures through Lenny's Jobs API and asserts per-patient numerator/denominator outputs match ground-truth expected populations from the connectathon bundles; closes the gap between `test_connectathon_measures.py` (bypasses Lenny) and `test_full_workflow.py` (no count assertions); requires prebaked HAPI images; skipped on the PR gate and run in its own nightly `jobs-pipeline-validation` job |
+| `test_patient_scope_params.py` | Asserts the per-type patient scope table in `fhir_client.py` (`_PATIENT_SCOPE_PARAM_OVERRIDES`, `_PATIENT_UNSCOPABLE_TYPES`) against a live HAPI: each overridden type accepts its parameter *and* still rejects the default, and the four unscopable types reject both. Unit tests mock the CDR and answer 200 to `subject=` and `patient=` alike, so they are tautological with respect to the table — only this file catches an entry that is wrong or a HAPI upgrade that moves a type between sets, which otherwise shows up as a 400 the gather swallows and a measure quietly computed from missing data (#455). Not on the PR gate's `--ignore` list, so CI's Integration Tests job collects and runs it |
 
 The nightly `connectathon-measures.yml` workflow runs once per night and on manual dispatch. It uses four independent clean jobs (PR #203 + jobs-pipeline-validation):
 - **Bundle Loader Test (vanilla HAPI)** — exercises the runtime IG load + bundle replay path against `hapiproject/hapi:v8.8.0-1`.
