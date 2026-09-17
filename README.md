@@ -96,11 +96,16 @@ cd backend && python -m pytest tests/ --ignore=tests/integration -v
 # Unit tests with coverage (70% floor enforced by CI)
 cd backend && python -m pytest tests/ --ignore=tests/integration --cov=app --cov-report=term-missing
 
-# Integration tests (CI-equivalent — same ignore flags pr-checks.yml uses)
-./scripts/run-integration-tests.sh \
+# Integration tests (CI-equivalent — same prefix and ignore flags pr-checks.yml uses;
+# without USE_PREBAKED/REQUIRE_PREBAKED the script falls back to vanilla HAPI images
+# and the run is not CI-equivalent no matter what the ignore flags say)
+USE_PREBAKED=1 REQUIRE_PREBAKED=1 ./scripts/run-integration-tests.sh \
   --ignore=tests/integration/test_golden_measures.py \
   --ignore=tests/integration/test_connectathon_measures.py \
-  --ignore=tests/integration/test_full_workflow.py
+  --ignore=tests/integration/test_full_workflow.py \
+  --ignore=tests/integration/test_groups_dropdown.py \
+  --ignore=tests/integration/test_full_jobs_pipeline.py \
+  --ignore=tests/integration/test_factory_reset.py
 
 # Lint
 cd backend && ruff check app/ tests/ && ruff format --check app/ tests/

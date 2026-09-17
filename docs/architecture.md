@@ -105,7 +105,25 @@ backend/app/
                          type is queried with its `code:in=` valueset filter first and then
                          WITHOUT the filter if that query fails — a VSAC canonical the CDR never
                          loaded returns HAPI-2788 rather than an empty set, and treating that as
-                         "no such resources" silently changes populations. Also home to the
+                         "no such resources" silently changes populations. Each type is also
+                         scoped by the parameter THAT type accepts, not one parameter for all:
+                         `subject=` by default, `patient=` for the seven types that reject
+                         `subject=` (`_PATIENT_SCOPE_PARAM_OVERRIDES`), and no query at all for
+                         the four that reject both (`_PATIENT_UNSCOPABLE_TYPES` — Medication,
+                         Location, Practitioner, Organization). A wrong parameter is a 400 the
+                         gather records and moves past, so the job still reports success on data
+                         that never arrived; that is how `SDE Payer` was empty for every measure
+                         until #455. The table is asserted against a live HAPI by
+                         `tests/integration/test_patient_scope_params.py`. Because the gathered
+                         data references the unscopable types (`Coverage.payor`,
+                         `Claim.provider`) and `$submit-data` is transaction-backed, those
+                         targets are then direct-read by id and carried along — a stock HAPI
+                         with `enforce_referential_integrity_on_write=true` answers HAPI-1094
+                         and stores nothing for the whole patient otherwise. Results are cached
+                         per job, and a target the CDR genuinely does not hold is reported by
+                         name rather than dropped. Partial gathers carry a per-type reason
+                         (`failed_type_reasons`), not just the type name, through both the log
+                         line and the orchestrator's `partial_gather_patients` payload. Also home to the
                          DEQM $submit-data capability probe: detect_submit_data_capability() reads
                          the MCS CapabilityStatement at job creation, then dereferences the
                          OperationDefinition behind any advertised `submit-data` operation — a

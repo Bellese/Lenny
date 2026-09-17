@@ -63,6 +63,14 @@ class JSONFormatter(logging.Formatter):
             "mcs_url",
             "measure_id",
             "measure_version",
+            # Without these the partial-gather warning emits a bare sentence and
+            # names no type — the same allowlist trap that made #452's fallback
+            # warning useless. `failed_types` predates #455 and was being dropped
+            # here all along; `failed_type_reasons` is what distinguishes a
+            # structural skip from a CDR that failed to answer.
+            "failed_types",
+            "failed_type_reasons",
+            "failed_type_counts",
         )
         for key in _EXTRA_KEYS:
             val = getattr(record, key, None)

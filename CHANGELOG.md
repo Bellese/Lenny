@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.4.0] - 2026-09-17
+
+### Fixed
+- **Your calculations no longer silently lose whole categories of patient data.** When Lenny collects a patient's records to send to your measure server, it asks for each kind of record by a search term. It was using the same term for every kind — but several kinds of record do not accept it and answered with an error. Lenny recorded the error, skipped that kind, and reported the job as successful, so the measure was calculated from data that never arrived. Insurance coverage was affected on every job, for every measure: all nine measures on the measure server report a Payer supplemental data element, that element reads insurance coverage, and it was empty in every result. Immunizations, allergies, claims, devices, family history and nutrition orders were affected the same way. Each kind of record is now asked for the way that kind accepts, verified against a real server rather than assumed. (#455)
+- **Insurance and claims records now arrive complete instead of failing the whole patient.** An insurance record names the organisation that pays, and a claim names the practitioner who provided care. Those referenced records cannot be looked up by patient, so they were never collected — and because the measure server processes a patient's data as all-or-nothing, a reference to something that was not sent can reject that patient entirely. Lenny now follows those references and collects what they point at, so the submission is complete. A reference the source system genuinely does not hold is reported by name rather than passed along silently. (#455)
+- **A partial collection now tells you what was missing and why.** When some kinds of record could not be collected, the job recorded only their names. A record type that has no way to be looked up by patient and a source system that simply failed to answer both appeared as the same bare word. Each now carries its own reason, and those reasons reach both the job's failure details and the logs. (#455)
+- **Records that Lenny sends to a shared measure server can now be cleaned up again.** Lenny clears a patient's previous data before recalculating. Three kinds of record it can now collect were absent from that clean-up, so they would have accumulated on a server shared with other participants with nothing to remove them. They are now included, and ordered so that clearing one does not leave another stranded behind it. (#455)
+
 ## [0.2.3.0] - 2026-09-11
 
 ### Added

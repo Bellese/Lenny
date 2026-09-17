@@ -1479,6 +1479,11 @@ async def test_run_job_partial_gather_continues_to_evaluate(test_session, sessio
         assert mr.error_details is not None
         assert "Observation" in mr.error_details["failed_types"]
         assert "Patient" in mr.error_details["succeeded_types"] or "Condition" in mr.error_details["succeeded_types"]
+        # #455: the REASON, not just the type name. A type with no
+        # patient-scoped search parameter and a CDR that failed to answer are
+        # both the bare string "Observation" without this, and this payload is
+        # what an operator reads when diagnosing a job.
+        assert mr.error_details["failed_type_reasons"]["Observation"] == "500 Internal Server Error"
 
 
 async def test_run_job_evaluate_failure_persists_error_details_and_back_compat(
