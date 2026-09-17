@@ -289,10 +289,19 @@ _PATIENT_SCOPE_PARAM_OVERRIDES: dict[str, str] = {
 # a resource that IS patient-scoped (e.g. MedicationRequest.medicationReference
 # -> Medication), which is issue #409's transitive walk.
 #
-# Requesting them anyway guarantees a failure for every patient of every job,
-# which inflates `failed_types` and makes a real fetch failure indistinguishable
-# from a structural one. They are skipped deliberately instead.
+# Requesting them anyway guarantees a 400 for every patient of every job, so they
+# are skipped deliberately instead. Note what that does and does not buy: the
+# skip still records an entry in `failed_types`, so an affected patient is still
+# reported `gather_partial` (unchanged from before). What it buys is four fewer
+# doomed round-trips per patient and an entry whose reason distinguishes a
+# structural skip from a CDR that failed to answer. Separating the two into a
+# `skipped_types` field so `has_partial_failure` ignores structural skips is a
+# larger behavioral change, deliberately not made here.
 _PATIENT_UNSCOPABLE_TYPES = ("Medication", "Location", "Practitioner", "Organization")
+
+# Cache-miss sentinel. A cached `None` means "the CDR does not hold this", which
+# must not be retried per patient; a miss means "not looked up yet".
+_UNSET: Any = object()
 
 
 def _patient_scope_param(resource_type: str) -> str:
@@ -453,6 +462,13 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
         # and got it OOM-killed mid-job at 319 patients.
         self._requirements: list[dict[str, Any]] | None = None
         self._requirements_lock = asyncio.Lock()
+        # Infrastructure resources (`_PATIENT_UNSCOPABLE_TYPES`) resolved by
+        # direct read, keyed "Type/id". Shared across every patient in the job:
+        # one Organization typically backs hundreds of Coverages, and the job
+        # would otherwise re-read it per patient. `None` records a target the
+        # CDR does not hold, so a missing reference is not retried per patient.
+        self._resolved_references: dict[str, dict[str, Any] | None] = {}
+        self._resolved_references_lock = asyncio.Lock()
 
     async def gather_patients(
         self,
@@ -517,6 +533,171 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                 library = resp.json()
                 self._requirements = library.get("dataRequirement", [])
                 return self._requirements
+
+    @staticmethod
+    def _unscopable_reference_targets(resources: list[dict[str, Any]], cdr_url: str) -> tuple[list[str], list[str]]:
+        """Collect "Type/id" references pointing at an unscopable type.
+
+        Walks the whole resource, not a fixed field list: `Coverage.payor`,
+        `Claim.provider` and `Encounter.serviceProvider` all reach Organization
+        by different paths, and a field list would silently miss the next one.
+
+        Returns `(local_targets, foreign_refs)`. An ABSOLUTE reference naming a
+        different server is NOT a target: reducing
+        `https://other.example/fhir/Organization/abc` to its last two segments
+        and reading `Organization/abc` from the configured CDR fetches whatever
+        that id happens to mean *here*, which can be an unrelated organization,
+        and ships it into the patient's submission. Those are returned
+        separately so the caller can report them instead of guessing.
+        """
+        found: dict[str, None] = {}
+        foreign: dict[str, None] = {}
+
+        def walk(node: Any) -> None:
+            if isinstance(node, dict):
+                ref = node.get("reference")
+                if isinstance(ref, str):
+                    # Contained ("#x") and urn: references resolve inside the
+                    # bundle and must not be fetched.
+                    if not ref.startswith("#") and not ref.startswith("urn:"):
+                        parts = ref.split("/")
+                        if len(parts) >= 2:
+                            rtype, rid = parts[-2], parts[-1]
+                            if rtype in _PATIENT_UNSCOPABLE_TYPES and rid and ".." not in rid:
+                                is_absolute = ref.startswith("http://") or ref.startswith("https://")
+                                if is_absolute and not _same_origin(cdr_url, ref):
+                                    foreign[ref] = None
+                                else:
+                                    found[f"{rtype}/{rid}"] = None
+                for value in node.values():
+                    walk(value)
+            elif isinstance(node, list):
+                for item in node:
+                    walk(item)
+
+        for resource in resources:
+            walk(resource)
+        return list(found), list(foreign)
+
+    async def _resolve_unscopable_references(
+        self,
+        client: httpx.AsyncClient,
+        cdr_url: str,
+        auth_headers: dict[str, str],
+        resources: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], list[FailedResourceFetch]]:
+        """Direct-read the infrastructure resources the gathered data references.
+
+        `_PATIENT_UNSCOPABLE_TYPES` have no patient-scoped search parameter, so
+        they cannot be FOUND by searching — which is why the gather skips them.
+        They can still be READ by id, and the gathered resources hand us exactly
+        those ids.
+
+        This is not an optimization. `$submit-data` is transaction-backed, so a
+        reference whose target is absent fails the patient's ENTIRE submission:
+        measured against stock `hapiproject/hapi:v8.8.0-1`, a transaction
+        carrying `Coverage.payor -> Organization/x` without that Organization
+        answers `400 HAPI-1094` and stores nothing at all. Every compose file in
+        this repo sets `enforce_referential_integrity_on_write=false`, so no
+        local or CI stack reproduces it — but HAPI's default is `true`, and the
+        BYO-CDR connectathon is exactly where that default shows up.
+
+        A target the CDR genuinely does not hold cannot be conjured by any
+        number of reads (job 18's `Practitioner/example`). Those are reported
+        rather than dropped, because the submission will fail on them and the
+        operator needs to know which reference did it — see #456 and #409.
+        """
+        targets, foreign = self._unscopable_reference_targets(resources, cdr_url)
+
+        resolved: list[dict[str, Any]] = []
+        unresolved: list[FailedResourceFetch] = [
+            FailedResourceFetch(
+                resource_type=ref.rstrip("/").split("/")[-2],
+                error=(
+                    f"referenced resource {sanitize_url(ref)} lives on a different server "
+                    f"and was not fetched; the submission will carry an unresolvable reference"
+                ),
+            )
+            for ref in foreign
+        ]
+        if not targets:
+            return resolved, unresolved
+
+        for target in targets:
+            async with self._resolved_references_lock:
+                cached = self._resolved_references.get(target, _UNSET)
+            if cached is not _UNSET:
+                if cached is None:
+                    unresolved.append(
+                        FailedResourceFetch(
+                            resource_type=target.split("/")[0],
+                            error=f"referenced resource {target} is not present on the CDR",
+                        )
+                    )
+                else:
+                    resolved.append(cached)
+                continue
+
+            fetched: dict[str, Any] | None = None
+            definitively_absent = False
+            try:
+                resp = await client.get(f"{cdr_url}/{target}", headers=auth_headers)
+                if resp.status_code == 200:
+                    body = resp.json()
+                    if isinstance(body, dict) and body.get("resourceType"):
+                        fetched = body
+                elif resp.status_code in (404, 410):
+                    # The server answered authoritatively: it does not hold this.
+                    definitively_absent = True
+                else:
+                    # 429, 500, 503 ... — a transient or server-side fault. NOT
+                    # proof of absence, so it must not be negative-cached: doing
+                    # so makes every later patient skip the read and ship an
+                    # unresolvable reference long after the CDR recovered.
+                    unresolved.append(
+                        FailedResourceFetch(
+                            resource_type=target.split("/")[0],
+                            error=(f"referenced resource {target} could not be read (HTTP {resp.status_code})"),
+                        )
+                    )
+                    continue
+            except (httpx.HTTPError, ValueError) as exc:
+                # Imported here, not at module scope: `validation` imports this
+                # module, so a top-level import is circular (same reason as the
+                # existing local import in `detect_submit_data_capability`).
+                from app.services.validation import sanitize_error
+
+                # A transport fault is not proof the resource is absent, so it is
+                # NOT cached as missing — the next patient retries it.
+                logger.warning(
+                    "Could not read referenced resource %s — %s",
+                    target,
+                    str(exc),
+                    extra={"patient_id": None, "error": str(exc)},
+                )
+                unresolved.append(
+                    FailedResourceFetch(
+                        resource_type=target.split("/")[0],
+                        error=f"referenced resource {target} could not be read: {sanitize_error(exc)}",
+                    )
+                )
+                continue
+
+            if fetched is not None or definitively_absent:
+                async with self._resolved_references_lock:
+                    self._resolved_references[target] = fetched
+
+            if fetched is None:
+                unresolved.append(
+                    FailedResourceFetch(
+                        resource_type=target.split("/")[0],
+                        error=f"referenced resource {target} is not present on the CDR",
+                    )
+                )
+            else:
+                resolved.append(fetched)
+
+        return resolved, unresolved
 
     async def _fetch_by_requirements(
         self,
@@ -604,9 +785,12 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                     elif resource_type in _PATIENT_UNSCOPABLE_TYPES:
                         # No patient-scoped search parameter exists for this type,
                         # so there is no query to make — issuing one would 400 for
-                        # every patient of every job. Reported so the operator can
-                        # see the data is absent, with a reason that distinguishes
-                        # this from a CDR that failed to answer.
+                        # every patient of every job. Reported with a reason that
+                        # distinguishes a structural skip from a CDR that failed to
+                        # answer; the reason reaches the operator through the
+                        # partial-fetch warning below and through the orchestrator's
+                        # `partial_gather_patients` payload, so it must stay readable
+                        # rather than becoming a developer-only string.
                         failed_types.append(
                             FailedResourceFetch(
                                 resource_type=resource_type,
@@ -616,6 +800,14 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                                 ),
                             )
                         )
+                        # LOAD-BEARING, and deliberately the opposite of the Patient
+                        # branch above. Counting a structural skip toward the
+                        # "all REQUIRED types failed" check is what makes a measure
+                        # whose every declared type is unscopable fall back to
+                        # `$everything` — the only route to those resources until
+                        # #409's transitive walk lands. Dropping this line turns that
+                        # case into an empty gather reported as success, which is
+                        # #455's exact failure mode reintroduced.
                         failed_type_names.add(resource_type)
                     else:
                         # Only keep a code:in= filter when every requirement for
@@ -694,7 +886,14 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                             break
                 except Exception as exc:
                     failed_type_names.add(resource_type)
-                    failed_types.append(FailedResourceFetch(resource_type=resource_type, error=str(exc)))
+                    # Sanitized and bounded: this string now travels to
+                    # `measure_results.error_details`, which `/jobs/{id}` serves
+                    # to clients. A raw `str(exc)` on a TLS or proxy failure
+                    # carries the internal hostname; every other error_details
+                    # write in the orchestrator already goes through this.
+                    from app.services.validation import sanitize_error as _sanitize
+
+                    failed_types.append(FailedResourceFetch(resource_type=resource_type, error=_sanitize(exc)[:500]))
                     logger.warning(
                         "CDR fetch failed for resource type %s, skipping — %s",
                         resource_type,
@@ -702,8 +901,18 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                         extra={"resource_type": resource_type, "patient_id": patient_id, "error": str(exc)},
                     )
 
+            # Everything gathered is submitted verbatim into a transaction-backed
+            # $submit-data, so the infrastructure resources it references have to
+            # travel with it. Done inside the same client so the connection is
+            # reused, and after the per-type loop so every reference is visible.
+            referenced, unresolved = await self._resolve_unscopable_references(client, cdr_url, auth_headers, resources)
+            resources.extend(referenced)
+            failed_types.extend(unresolved)
+
         # Only propagate failure (triggering outer $everything fallback) when all
         # REQUIRED types fail — a forced Patient-fetch failure alone doesn't count.
+        # Deliberately unaffected by reference resolution: an unresolvable
+        # reference is a problem with the data, and $everything would not fix it.
         if required_types and (failed_type_names & required_types) == required_types:
             raise RuntimeError(f"All resource types failed CDR fetch: {sorted(failed_type_names)}")
 
@@ -714,6 +923,9 @@ class DataRequirementsStrategy(DataAcquisitionStrategy):
                     "measure_id": self._measure_id,
                     "patient_id": patient_id,
                     "failed_types": [f.resource_type for f in failed_types],
+                    # The reason, not just the type name: a structural skip and a
+                    # CDR that failed to answer are both "Medication" otherwise.
+                    "failed_type_reasons": {f.resource_type: f.error for f in failed_types},
                 },
             )
         else:
@@ -1741,6 +1953,15 @@ _PATIENT_SCOPED_TYPES: list[tuple[str, str]] = [
     ("MeasureReport", "patient"),
     ("Condition", "patient"),
     ("Observation", "patient"),
+    # Before `Encounter`, deliberately: HAPI enforces referential integrity on
+    # delete, so `DELETE Encounter?patient=` answers 409 while a NutritionOrder
+    # still points at it, and the sweep moves on leaving the Encounter behind.
+    # Measured on the local CDR: NutritionOrder-then-Encounter clears both;
+    # Encounter-then-NutritionOrder leaves the Encounter resident (HTTP 200
+    # after the sweep). The same hazard already affects several entries below
+    # that reference Encounter — that is pre-existing and tracked separately;
+    # this ordering only keeps #455 from adding one more instance of it.
+    ("NutritionOrder", "patient"),
     ("Encounter", "patient"),
     ("Procedure", "patient"),
     ("MedicationRequest", "patient"),
@@ -1757,6 +1978,17 @@ _PATIENT_SCOPED_TYPES: list[tuple[str, str]] = [
     ("Task", "patient"),
     ("Coverage", "patient"),
     ("Claim", "patient"),
+    # Added with #455: the gather now fetches these (they reject `subject=` and
+    # were silently dropped before), so the scoped wipe has to be able to clear
+    # them too — otherwise Lenny pushes resources to a shared measure server that
+    # nothing ever removes, which is the harm #392 exists to prevent.
+    #
+    # `Device` sits here, after `DeviceRequest` and `Procedure`, because those
+    # reference it. `FamilyMemberHistory` references only Patient, so its
+    # position is free. `NutritionOrder` is NOT here — it references Encounter
+    # and therefore has to be deleted before it; see its entry above.
+    ("Device", "patient"),
+    ("FamilyMemberHistory", "patient"),
     # Patient is scoped by its own id, not by a reference param — HAPI 400s on
     # both `patient=` and `subject=` here. It MUST stay last: HAPI returns 409
     # when a Patient is still referenced by a Condition/Encounter/etc., so every

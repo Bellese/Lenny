@@ -7,15 +7,21 @@ import httpx
 import pytest
 
 from app.services.fhir_client import (
+    _DEFAULT_PATIENT_SCOPE_PARAM,
     _MAX_OPERATION_DEFINITION_PROBES,
+    _PATIENT_SCOPE_PARAM_OVERRIDES,
+    _PATIENT_SCOPED_TYPES,
+    _PATIENT_UNSCOPABLE_TYPES,
     SUBMIT_DATA_MODE_BASE,
     SUBMIT_DATA_MODE_STU5,
     BatchQueryStrategy,
     DataRequirementsStrategy,
+    GatherResult,
     _acquire_smart_token,
     _build_auth_headers,
     _chunk_request_entries,
     _operation_definition_matches_contract,
+    _patient_scope_param,
     _remap_valueset_ids_for_hapi,
     _resolve_operation_definition,
     delete_measure,
@@ -1052,6 +1058,24 @@ class TestWipePatientsById:
                 f"unscoped delete would wipe the server: {url}"
             )
             assert "_lastUpdated" not in url, f"full-wipe filter leaked into the scoped wipe: {url}"
+
+    async def test_unscopable_types_are_never_deleted(self):
+        """The wipe skips exactly the types the gather skips — one shared tuple, two consumers.
+
+        `_PATIENT_UNSCOPABLE_TYPES` moved to module scope in #455 so the gather
+        could reuse it. Both call sites now depend on it, and the two correct
+        answers are not guaranteed to stay identical — a type added here for the
+        gather would silently stop being wiped. This pins the wipe half.
+        """
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._mock_client(mock_httpx)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        urls = _delete_urls(mock_ctx)
+        for resource_type in _PATIENT_UNSCOPABLE_TYPES:
+            assert not [u for u in urls if f"/{resource_type}?" in u], (
+                f"{resource_type} has no patient-scoped search param — deleting it would hit other tenants"
+            )
 
     async def test_deletes_the_patient_resource_itself(self):
         """The Patient resource must go too, scoped by _id.
@@ -3927,8 +3951,15 @@ async def test_unfiltered_query_failure_still_reported():
 # Measured against HAPI 8.8.0 — see issue #455 for the full probe table.
 
 
-async def _capture_gather_urls(data_req_response: dict) -> list[str]:
-    """Run a gather against mocked CDR responses and return every URL requested."""
+async def _capture_gather(data_req_response: dict) -> tuple[list[str], GatherResult]:
+    """Run a gather against mocked CDR responses; return every URL and the result.
+
+    The Patient direct read answers 200 deliberately: a 404 there puts every
+    caller into a partial-failure state before its own assertions run, so a test
+    that only inspects URLs would still pass if the gather had additionally
+    broken resource collection. Returning the `GatherResult` lets callers prove
+    the query actually succeeded, not merely that it was spelled correctly.
+    """
     empty_bundle = {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []}
     captured_urls: list[str] = []
 
@@ -3937,7 +3968,7 @@ async def _capture_gather_urls(data_req_response: dict) -> list[str]:
         if "$data-requirements" in url:
             return _make_response(200, data_req_response)
         if "/Patient/" in url and "?" not in url:
-            return _make_response(404, {"resourceType": "OperationOutcome"})
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
         return _make_response(200, empty_bundle)
 
     with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
@@ -3947,9 +3978,9 @@ async def _capture_gather_urls(data_req_response: dict) -> list[str]:
         mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
 
         strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
-        await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
 
-    return captured_urls
+    return captured_urls, result
 
 
 async def test_fetch_by_requirements_coverage_is_scoped_by_patient_param():
@@ -3958,8 +3989,12 @@ async def test_fetch_by_requirements_coverage_is_scoped_by_patient_param():
     Witnessed in job 18: every one of 66 patients lost its Coverage, and with it
     the `SDE Payer` supplemental data, because the gather sent `subject=`.
     """
-    urls = await _capture_gather_urls({"resourceType": "Library", "dataRequirement": [{"type": "Coverage"}]})
+    urls, result = await _capture_gather({"resourceType": "Library", "dataRequirement": [{"type": "Coverage"}]})
 
+    assert result.failed_types == [], (
+        f"the Coverage query must succeed, not just be spelled correctly: "
+        f"{[(f.resource_type, f.error) for f in result.failed_types]}"
+    )
     coverage_urls = [u for u in urls if "/Coverage?" in u]
     assert coverage_urls, "Coverage was never requested"
     for url in coverage_urls:
@@ -3973,7 +4008,7 @@ async def test_fetch_by_requirements_adverse_event_is_scoped_by_subject_param():
     Guards against "fix" #455 by swapping every type to `patient=` — that would
     break this type. The scope parameter is per-type, not global.
     """
-    urls = await _capture_gather_urls({"resourceType": "Library", "dataRequirement": [{"type": "AdverseEvent"}]})
+    urls, result = await _capture_gather({"resourceType": "Library", "dataRequirement": [{"type": "AdverseEvent"}]})
 
     ae_urls = [u for u in urls if "/AdverseEvent?" in u]
     assert ae_urls, "AdverseEvent was never requested"
@@ -3984,7 +4019,7 @@ async def test_fetch_by_requirements_adverse_event_is_scoped_by_subject_param():
 
 async def test_fetch_by_requirements_immunization_and_claim_use_patient_param():
     """The other types measured as rejecting `subject=` are scoped with `patient=` (#455)."""
-    urls = await _capture_gather_urls(
+    urls, result = await _capture_gather(
         {
             "resourceType": "Library",
             "dataRequirement": [
@@ -4015,8 +4050,12 @@ async def test_fetch_by_requirements_immunization_and_claim_use_patient_param():
 
 async def test_fetch_by_requirements_condition_keeps_subject_param():
     """Types that accept both parameters keep `subject=` — the fix changes nothing for them."""
-    urls = await _capture_gather_urls({"resourceType": "Library", "dataRequirement": [{"type": "Condition"}]})
+    urls, result = await _capture_gather({"resourceType": "Library", "dataRequirement": [{"type": "Condition"}]})
 
+    assert result.failed_types == [], (
+        f"the Condition query must succeed, not just be spelled correctly: "
+        f"{[(f.resource_type, f.error) for f in result.failed_types]}"
+    )
     condition_urls = [u for u in urls if "/Condition?" in u]
     assert condition_urls, "Condition was never requested"
     for url in condition_urls:
@@ -4030,7 +4069,7 @@ async def test_fetch_by_requirements_unscopable_type_is_skipped_not_requested():
     every patient of every job, which inflates failed_types and makes a real
     fetch failure indistinguishable from a structural one.
     """
-    urls = await _capture_gather_urls(
+    urls, result = await _capture_gather(
         {
             "resourceType": "Library",
             "dataRequirement": [{"type": "Medication"}, {"type": "Condition"}],
@@ -4071,3 +4110,689 @@ async def test_fetch_by_requirements_unscopable_type_reports_a_distinct_reason()
     assert "no patient-scoped search parameter" in medication_failures[0].error, (
         f"the reason must distinguish a structural skip from a fetch failure: {medication_failures[0].error!r}"
     )
+
+
+# --- #455 gap coverage: scope-param interactions and the unscopable fallback ---
+
+
+def test_patient_scope_param_table_is_internally_consistent():
+    """The override table, the default, and the unscopable tuple must not overlap.
+
+    A type listed as unscopable but ALSO given a `patient=` override would be
+    unreachable dead config today, and would silently start being requested the
+    day the `elif` branch is reordered. Likewise an override that maps back to
+    the default is noise that hides a real typo.
+    """
+    for resource_type in _PATIENT_UNSCOPABLE_TYPES:
+        assert resource_type not in _PATIENT_SCOPE_PARAM_OVERRIDES, (
+            f"{resource_type} cannot be both unscopable and have a scope-param override"
+        )
+    for resource_type, param in _PATIENT_SCOPE_PARAM_OVERRIDES.items():
+        assert param != _DEFAULT_PATIENT_SCOPE_PARAM, f"{resource_type} override restates the default"
+        assert _patient_scope_param(resource_type) == param
+    assert _patient_scope_param("Encounter") == _DEFAULT_PATIENT_SCOPE_PARAM
+    assert _patient_scope_param("AdverseEvent") == "subject"
+
+
+async def test_fetch_by_requirements_only_unscopable_types_falls_back_to_everything():
+    """A measure whose every requirement is unscopable must fall back to $everything (#455).
+
+    The skip adds the type to `failed_type_names`, so `failed_type_names ==
+    required_types` and the outer RuntimeError fires. That is the ONLY remaining
+    route to this data — $everything walks the compartment and returns resources
+    reached by reference. Dropping the type from `failed_type_names` (tempting,
+    since the skip is deliberate rather than a fetch failure) would return an
+    empty gather and report success.
+    """
+    everything_bundle = {
+        "resourceType": "Bundle",
+        "type": "searchset",
+        "entry": [{"resource": {"resourceType": "Medication", "id": "med1"}}],
+        "link": [],
+    }
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Library",
+                    "dataRequirement": [{"type": "Medication"}, {"type": "Organization"}],
+                },
+            )
+        if "$everything" in url:
+            return _make_response(200, everything_bundle)
+        if "/Patient/" in url and "?" not in url:
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+        return _make_response(200, {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    requested = [str(c) for c in mock_ctx.get.call_args_list]
+    assert len([u for u in requested if "$everything" in u]) == 1, "the unscopable-only measure must fall back"
+    assert [r["resourceType"] for r in result.resources] == ["Medication"], (
+        "the fallback's resources must be what the caller receives"
+    )
+    assert result.failed_types == [], "the fallback result supersedes the per-type skip reports"
+
+
+async def test_fetch_by_requirements_unscopable_alongside_scopable_does_not_fall_back():
+    """One unscopable type among scopable ones is a partial gather, NOT a fallback (#455).
+
+    `failed_type_names` is a strict subset of `required_types`, so the outer
+    RuntimeError must not fire — re-fetching the whole compartment because one
+    structurally-unfetchable type was declared would undo the point of
+    $data-requirements narrowing.
+    """
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Library",
+                    "dataRequirement": [{"type": "Medication"}, {"type": "Condition"}],
+                },
+            )
+        if "/Patient/" in url and "?" not in url:
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+        return _make_response(
+            200,
+            {
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "entry": [{"resource": {"resourceType": "Condition", "id": "c1"}}],
+                "link": [],
+            },
+        )
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    requested = [str(c) for c in mock_ctx.get.call_args_list]
+    assert not [u for u in requested if "$everything" in u], "a partial gather must not trigger the fallback"
+    assert {r["resourceType"] for r in result.resources} == {"Patient", "Condition"}
+    assert [f.resource_type for f in result.failed_types] == ["Medication"]
+
+
+@pytest.mark.parametrize("unscopable", _PATIENT_UNSCOPABLE_TYPES)
+async def test_fetch_by_requirements_every_unscopable_type_is_skipped_and_reported(unscopable):
+    """All four unscopable types behave identically — not just the one spot-checked (#455).
+
+    Parametrized rather than looped so each type fails independently and is named
+    in the test id, and so the case set tracks `_PATIENT_UNSCOPABLE_TYPES` if a
+    fifth type is ever added.
+    """
+
+    async def mock_get(url, _t=unscopable, **kwargs):
+        if "$data-requirements" in url:
+            return _make_response(
+                200,
+                {"resourceType": "Library", "dataRequirement": [{"type": _t}, {"type": "Condition"}]},
+            )
+        if "/Patient/" in url and "?" not in url:
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+        return _make_response(200, {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    requested = [str(c) for c in mock_ctx.get.call_args_list]
+    assert not [u for u in requested if f"/{unscopable}?" in u], f"{unscopable} must never be requested"
+    assert [f.resource_type for f in result.failed_types] == [unscopable]
+    assert "no patient-scoped search parameter" in result.failed_types[0].error
+
+
+async def test_fetch_by_requirements_overridden_type_keeps_patient_param_with_code_filter():
+    """The `patient=` override must survive the `code:in=` filtered query (#455).
+
+    Coverage carrying a valueset is exactly the SDE Payer shape that regressed —
+    the filter and the scope parameter are composed into one query string, and
+    getting either wrong loses the same data.
+    """
+    seen: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        seen.append(url)
+        if "$data-requirements" in url:
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Library",
+                    "dataRequirement": [
+                        {
+                            "type": "Coverage",
+                            "codeFilter": [{"path": "type", "valueSet": "http://example.org/ValueSet/payer"}],
+                        }
+                    ],
+                },
+            )
+        if "/Patient/" in url and "?" not in url:
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+        return _make_response(
+            200,
+            {
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "entry": [{"resource": {"resourceType": "Coverage", "id": "cov1"}}],
+                "link": [],
+            },
+        )
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    filtered = [u for u in seen if "/Coverage?" in u and "code:in=" in u]
+    assert filtered, "the single-valueset filter should still be applied to Coverage"
+    for url in filtered:
+        assert "patient=Patient/p1" in url, f"the filtered Coverage query must keep patient=: {url}"
+        assert "subject=" not in url, f"Coverage rejects subject= even when filtered: {url}"
+    assert result.failed_types == []
+    assert "Coverage" in {r["resourceType"] for r in result.resources}
+
+
+async def test_fetch_by_requirements_overridden_type_keeps_patient_param_on_unfiltered_retry():
+    """When the filtered query fails, the unfiltered retry must reuse `patient=` (#455).
+
+    The retry rebuilds the query from the same `base_params`; if the scope
+    parameter were recomputed (or defaulted) on the retry path, the recovery
+    would 400 and the type would be dropped after all.
+    """
+    seen: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        seen.append(url)
+        if "$data-requirements" in url:
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Library",
+                    "dataRequirement": [
+                        {
+                            "type": "Coverage",
+                            "codeFilter": [{"path": "type", "valueSet": "http://cts.nlm.nih.gov/fhir/ValueSet/9.9.9"}],
+                        }
+                    ],
+                },
+            )
+        if "/Patient/" in url and "?" not in url:
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+        if "code:in=" in url:
+            return _make_response(400, {"resourceType": "OperationOutcome"})
+        return _make_response(
+            200,
+            {
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "entry": [{"resource": {"resourceType": "Coverage", "id": "cov1"}}],
+                "link": [],
+            },
+        )
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    coverage_urls = [u for u in seen if "/Coverage?" in u]
+    assert len(coverage_urls) == 2, f"expected a filtered attempt then an unfiltered retry: {coverage_urls}"
+    for url in coverage_urls:
+        assert "patient=Patient/p1" in url, f"both attempts must carry patient=: {url}"
+        assert "subject=" not in url, f"neither attempt may use subject=: {url}"
+    assert "Coverage" in {r["resourceType"] for r in result.resources}
+    assert result.failed_types == [], "a recovered type must not be reported as a partial failure"
+
+
+async def test_fetch_by_requirements_overridden_type_paginates():
+    """Pagination of an overridden type collects every page (#455).
+
+    The first page is built by us with `patient=`; later pages come from the
+    CDR's own `next` link, so the scope parameter must not be re-derived.
+    """
+    seen: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        seen.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, {"resourceType": "Library", "dataRequirement": [{"type": "Coverage"}]})
+        if "/Patient/" in url and "?" not in url:
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+        if "page=2" in url:
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": [{"resource": {"resourceType": "Coverage", "id": "cov2"}}],
+                    "link": [],
+                },
+            )
+        return _make_response(
+            200,
+            {
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "entry": [{"resource": {"resourceType": "Coverage", "id": "cov1"}}],
+                "link": [{"relation": "next", "url": "http://cdr/fhir?page=2"}],
+            },
+        )
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    first_page = next(u for u in seen if "/Coverage?" in u)
+    assert first_page.endswith("patient=Patient/p1&_count=100"), first_page
+    coverage_ids = sorted(r["id"] for r in result.resources if r["resourceType"] == "Coverage")
+    assert coverage_ids == ["cov1", "cov2"], f"both pages should be collected: {coverage_ids}"
+    assert result.failed_types == []
+
+
+# --- #455 / F1: unscopable types are resolved by direct read ----------------
+#
+# `_PATIENT_UNSCOPABLE_TYPES` have no patient-scoped search parameter, so they
+# cannot be FOUND by searching. They can still be READ by id. Gathered resources
+# reference them (Coverage.payor -> Organization, Claim.provider -> Practitioner),
+# and `$submit-data` is transaction-backed, so shipping the reference without the
+# target fails the patient's entire submission on any server enforcing
+# referential integrity — HTTP 400 HAPI-1094, nothing stored.
+
+
+async def test_unscopable_references_are_resolved_by_direct_read():
+    """A referenced Organization is fetched by id and included in the gather (#455 F1).
+
+    Measured against stock hapiproject/hapi:v8.8.0-1 (referential integrity on by
+    default): a transaction carrying Coverage.payor -> Organization/x without that
+    Organization returns 400 and stores nothing at all.
+    """
+    reads: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        reads.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, {"resourceType": "Library", "dataRequirement": [{"type": "Coverage"}]})
+        if url.endswith("/Patient/p1"):
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+        if url.endswith("/Organization/org1"):
+            return _make_response(200, {"resourceType": "Organization", "id": "org1"})
+        if "/Coverage?" in url:
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": [
+                        {
+                            "resource": {
+                                "resourceType": "Coverage",
+                                "id": "cov1",
+                                "beneficiary": {"reference": "Patient/p1"},
+                                "payor": [{"reference": "Organization/org1"}],
+                            }
+                        }
+                    ],
+                    "link": [],
+                },
+            )
+        return _make_response(200, {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    assert any(u.endswith("/Organization/org1") for u in reads), (
+        f"the referenced Organization must be read by id — it cannot be found by search: {reads}"
+    )
+    types = {r["resourceType"] for r in result.resources}
+    assert "Organization" in types, (
+        f"the referenced Organization must ship WITH the Coverage that references it, "
+        f"or the transaction-backed submission fails the whole patient: {types}"
+    )
+
+
+async def test_unresolvable_reference_is_reported_not_silently_dropped():
+    """A reference whose target does not exist anywhere is surfaced (#455 F1 / #456).
+
+    This is the `Practitioner/example` case from job 18: no direct read can
+    conjure a resource the CDR does not hold, so the honest outcome is a named
+    warning, not a silent omission that fails the submission later.
+    """
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            return _make_response(200, {"resourceType": "Library", "dataRequirement": [{"type": "Coverage"}]})
+        if url.endswith("/Patient/p1"):
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+        if "/Organization/missing" in url:
+            return _make_response(404, {"resourceType": "OperationOutcome"})
+        if "/Coverage?" in url:
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": [
+                        {
+                            "resource": {
+                                "resourceType": "Coverage",
+                                "id": "cov1",
+                                "payor": [{"reference": "Organization/missing"}],
+                            }
+                        }
+                    ],
+                    "link": [],
+                },
+            )
+        return _make_response(200, {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    unresolved = [f for f in result.failed_types if f.resource_type == "Organization"]
+    assert unresolved, (
+        f"an unresolvable reference must be reported: {[(f.resource_type, f.error) for f in result.failed_types]}"
+    )
+    assert "Organization/missing" in unresolved[0].error, unresolved[0].error
+
+
+async def test_unscopable_reference_reads_are_cached_across_patients():
+    """One strategy instance per job, so a shared Organization is read once (#455 F1)."""
+    reads: list[str] = []
+
+    def _coverage_for(pid: str) -> dict:
+        return {
+            "resourceType": "Bundle",
+            "type": "searchset",
+            "entry": [
+                {
+                    "resource": {
+                        "resourceType": "Coverage",
+                        "id": f"cov-{pid}",
+                        "payor": [{"reference": "Organization/shared"}],
+                    }
+                }
+            ],
+            "link": [],
+        }
+
+    async def mock_get(url, **kwargs):
+        reads.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, {"resourceType": "Library", "dataRequirement": [{"type": "Coverage"}]})
+        if "/Organization/shared" in url:
+            return _make_response(200, {"resourceType": "Organization", "id": "shared"})
+        if url.endswith("/Patient/p1"):
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+        if url.endswith("/Patient/p2"):
+            return _make_response(200, {"resourceType": "Patient", "id": "p2"})
+        if "/Coverage?" in url:
+            return _make_response(200, _coverage_for("p1" if "p1" in url else "p2"))
+        return _make_response(200, {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        first = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+        second = await strategy.gather_patient_data("http://cdr/fhir", "p2", {})
+
+    org_reads = [u for u in reads if "/Organization/shared" in u]
+    assert len(org_reads) == 1, f"a shared infrastructure resource should be read once per job: {org_reads}"
+    # Both patients still carry it — the cache must serve, not skip.
+    for label, res in (("p1", first), ("p2", second)):
+        assert "Organization" in {r["resourceType"] for r in res.resources}, (
+            f"{label} lost its Organization to the cache"
+        )
+
+
+async def test_unscopable_reference_transport_error_is_reported_and_not_cached():
+    """A transport fault reading a reference is reported, and is NOT cached as absent.
+
+    Also pins the local `sanitize_error` import: `validation` imports this module,
+    so a module-scope import is circular and this branch would NameError at
+    runtime while every mocked test that never raises still passed.
+    """
+    attempts: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            return _make_response(200, {"resourceType": "Library", "dataRequirement": [{"type": "Coverage"}]})
+        if url.endswith("/Patient/p1") or url.endswith("/Patient/p2"):
+            return _make_response(200, {"resourceType": "Patient", "id": url.rsplit("/", 1)[-1]})
+        if "/Organization/flaky" in url:
+            attempts.append(url)
+            raise httpx.ConnectError("[SSL: CERTIFICATE_VERIFY_FAILED] host cdr.internal.example")
+        if "/Coverage?" in url:
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": [
+                        {
+                            "resource": {
+                                "resourceType": "Coverage",
+                                "id": "cov1",
+                                "payor": [{"reference": "Organization/flaky"}],
+                            }
+                        }
+                    ],
+                    "link": [],
+                },
+            )
+        return _make_response(200, {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+        await strategy.gather_patient_data("http://cdr/fhir", "p2", {})
+
+    org_failures = [f for f in result.failed_types if f.resource_type == "Organization"]
+    assert org_failures, "a transport fault reading a reference must be reported"
+    assert "cdr.internal.example" not in org_failures[0].error, (
+        f"the internal hostname must not reach a client-facing error: {org_failures[0].error!r}"
+    )
+    assert len(attempts) == 2, (
+        f"a transport fault is not proof of absence and must be retried for the next patient: {attempts}"
+    )
+
+
+async def test_scoped_wipe_covers_every_type_the_gather_can_push():
+    """The wipe must be able to clear anything the gather can fetch (#455 F9 / #392).
+
+    The gather widened to seven previously-dropped types. Any of them that the
+    scoped wipe cannot clear accumulates on a shared measure server with nothing
+    to remove it — the exact harm #392 exists to prevent, and the reason this PR
+    added Device/FamilyMemberHistory/NutritionOrder to `_PATIENT_SCOPED_TYPES`.
+    """
+    wipeable = {rt for rt, _ in _PATIENT_SCOPED_TYPES}
+    gatherable = set(_PATIENT_SCOPE_PARAM_OVERRIDES)
+
+    missing = sorted(gatherable - wipeable)
+    assert not missing, (
+        f"the gather can fetch and push {missing}, but the scoped wipe has no entry for them — "
+        f"they would persist on a shared measure server with nothing to remove them"
+    )
+
+
+async def test_nutrition_order_is_swept_before_encounter():
+    """Ordering, not membership: HAPI 409s deleting a referenced Encounter (#455 F9).
+
+    Measured on the local CDR: `DELETE Encounter?patient=` answers 409 while a
+    NutritionOrder still points at it, the sweep moves on, and the Encounter
+    survives the wipe. NutritionOrder therefore has to be deleted first.
+    """
+    order = [rt for rt, _ in _PATIENT_SCOPED_TYPES]
+    assert "NutritionOrder" in order and "Encounter" in order
+    assert order.index("NutritionOrder") < order.index("Encounter"), (
+        "NutritionOrder references Encounter, so it must be deleted first or the "
+        "Encounter delete 409s and the resource survives a 'successful' wipe"
+    )
+    assert order[-1] == "Patient", "Patient must stay last — HAPI 409s while it is still referenced"
+
+
+async def test_transient_http_failure_on_reference_read_is_not_cached_as_missing():
+    """A 503 is not proof of absence — it must not poison the cache (#455).
+
+    A 503 response does not raise from httpx, so it reaches the same branch as a
+    404 unless the code distinguishes them. Negative-caching it would make every
+    later patient skip the read and ship an unresolvable reference, long after
+    the CDR recovered.
+    """
+    calls = {"n": 0}
+
+    async def mock_get(url, **kwargs):
+        if "$data-requirements" in url:
+            return _make_response(200, {"resourceType": "Library", "dataRequirement": [{"type": "Coverage"}]})
+        if url.endswith("/Patient/p1") or url.endswith("/Patient/p2"):
+            return _make_response(200, {"resourceType": "Patient", "id": url.rsplit("/", 1)[-1]})
+        if "/Organization/flappy" in url:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return _make_response(503, {"resourceType": "OperationOutcome"})
+            return _make_response(200, {"resourceType": "Organization", "id": "flappy"})
+        if "/Coverage?" in url:
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": [
+                        {
+                            "resource": {
+                                "resourceType": "Coverage",
+                                "id": "cov1",
+                                "payor": [{"reference": "Organization/flappy"}],
+                            }
+                        }
+                    ],
+                    "link": [],
+                },
+            )
+        return _make_response(200, {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://mcs/fhir")
+        await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+        second = await strategy.gather_patient_data("http://cdr/fhir", "p2", {})
+
+    assert calls["n"] == 2, "a 503 is not proof of absence — the next patient must retry the read"
+    assert "Organization" in {r["resourceType"] for r in second.resources}, (
+        "once the CDR recovered, the reference must resolve"
+    )
+
+
+async def test_absolute_reference_to_another_server_is_not_rebased_onto_the_cdr():
+    """An off-origin absolute reference must not be fetched from our CDR (#455).
+
+    Taking the last two path segments of
+    `https://external.example/fhir/Organization/shared` yields `Organization/shared`,
+    which the configured CDR may also hold — as a completely different
+    organization. Shipping that into the patient's submission is silent data
+    corruption, so it is reported instead.
+    """
+    reads: list[str] = []
+
+    async def mock_get(url, **kwargs):
+        reads.append(url)
+        if "$data-requirements" in url:
+            return _make_response(200, {"resourceType": "Library", "dataRequirement": [{"type": "Coverage"}]})
+        if url.endswith("/Patient/p1"):
+            return _make_response(200, {"resourceType": "Patient", "id": "p1"})
+        if "/Organization/" in url:
+            # The CDR happens to hold an unrelated Organization at the same id.
+            return _make_response(200, {"resourceType": "Organization", "id": "shared", "name": "WRONG ORG"})
+        if "/Coverage?" in url:
+            return _make_response(
+                200,
+                {
+                    "resourceType": "Bundle",
+                    "type": "searchset",
+                    "entry": [
+                        {
+                            "resource": {
+                                "resourceType": "Coverage",
+                                "id": "cov1",
+                                "payor": [{"reference": "https://external.example/fhir/Organization/shared"}],
+                            }
+                        }
+                    ],
+                    "link": [],
+                },
+            )
+        return _make_response(200, {"resourceType": "Bundle", "type": "searchset", "entry": [], "link": []})
+
+    with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+        mock_ctx = AsyncMock()
+        mock_ctx.get = AsyncMock(side_effect=mock_get)
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        strategy = DataRequirementsStrategy("m1", mcs_url="http://cdr/fhir")
+        result = await strategy.gather_patient_data("http://cdr/fhir", "p1", {})
+
+    assert not [u for u in reads if "/Organization/" in u], (
+        f"an off-origin reference must not be fetched from our CDR: {reads}"
+    )
+    names = [r.get("name") for r in result.resources if r["resourceType"] == "Organization"]
+    assert "WRONG ORG" not in names, "an unrelated local Organization was shipped for an external reference"
+    reported = [f for f in result.failed_types if f.resource_type == "Organization"]
+    assert reported, "the unsupported external reference must be reported, not silently ignored"
