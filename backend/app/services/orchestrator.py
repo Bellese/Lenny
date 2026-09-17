@@ -769,9 +769,15 @@ async def _process_single_batch(
                         succeeded_type_names = sorted(
                             {r.get("resourceType") for r in gather_result.resources if r.get("resourceType")}
                         )
+                        # Carry each type's reason, not just its name. A type that
+                        # has no patient-scoped search parameter at all and a type
+                        # the CDR failed to answer for are both bare "Medication"
+                        # otherwise, and this payload is what an operator reads when
+                        # diagnosing a job (#455).
                         partial_gather_patients[outcome.patient_id] = {
                             "operation": "gather",
                             "failed_types": failed_type_names,
+                            "failed_type_reasons": {f.resource_type: f.error for f in gather_result.failed_types},
                             "succeeded_types": succeeded_type_names,
                         }
                         logger.warning(

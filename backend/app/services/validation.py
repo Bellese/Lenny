@@ -866,10 +866,15 @@ async def triage_test_bundle(
             extra={"count": len(clinical), "cdr_url": cdr_url},
         )
         if cdr_push_result.has_failures:
-            failed_types: dict[str, int] = {}
+            # `failed_type_counts`, not `failed_types`: the gather path logs
+            # `failed_types` as a list of type NAMES, and both keys now reach the
+            # JSON formatter's allowlist. Emitting a list on one line and a
+            # type->count map on another under one key breaks any query that
+            # iterates it (#455).
+            failed_type_counts: dict[str, int] = {}
             for fe in cdr_push_result.failed:
-                failed_types[fe.resource_type] = failed_types.get(fe.resource_type, 0) + 1
-            type_summary = ", ".join(f"{count} {rt}" for rt, count in sorted(failed_types.items()))
+                failed_type_counts[fe.resource_type] = failed_type_counts.get(fe.resource_type, 0) + 1
+            type_summary = ", ".join(f"{count} {rt}" for rt, count in sorted(failed_type_counts.items()))
             total_failed = len(cdr_push_result.failed)
             total_entries = len(cdr_push_result.succeeded) + total_failed
             cdr_upload_error_details = {
@@ -892,7 +897,7 @@ async def triage_test_bundle(
                 total_failed,
                 total_entries,
                 type_summary,
-                extra={"failed_types": failed_types},
+                extra={"failed_type_counts": failed_type_counts},
             )
 
     if progress_fn:
