@@ -24,6 +24,7 @@ from app.services.fhir_errors import (
     FhirIssue,
     FhirOperationError,
     FhirOperationOutcome,
+    redact_outcome,
     sanitize_url,
 )
 
@@ -1947,20 +1948,27 @@ async def wipe_patient_data(*, base_url: str, strict: bool = True, auth_headers:
 # not read off the R4 spec, because the two disagree in one place: AdverseEvent
 # answers `subject` and 400s on `patient`.
 #
-# Ordered clinical-resources-before-Patient for the same reason as the full
-# wipe: HAPI 409s on deleting a Patient that is still referenced.
+# Ordered referrers-before-referents, which keeps `Patient` last: HAPI 409s on
+# deleting any resource that is still referenced.
+#
+# The order is an optimisation, not the correctness mechanism (issue #458). It
+# cannot be one: `Encounter.reasonReference -> Condition` and
+# `Condition.encounter -> Encounter` are both conformant R4, so the reference
+# graph can hold a genuine 2-cycle and no total order over these types clears it.
+# What a good order buys is fewer retry passes. Correctness comes from
+# `wipe_patients_by_id` retrying every 409 and then issuing the remainder as one
+# transaction Bundle — so adding a type in the wrong place here costs a request,
+# not a silently surviving resource.
 _PATIENT_SCOPED_TYPES: list[tuple[str, str]] = [
     ("MeasureReport", "patient"),
     ("Condition", "patient"),
     ("Observation", "patient"),
     # Before `Encounter`, deliberately: HAPI enforces referential integrity on
     # delete, so `DELETE Encounter?patient=` answers 409 while a NutritionOrder
-    # still points at it, and the sweep moves on leaving the Encounter behind.
-    # Measured on the local CDR: NutritionOrder-then-Encounter clears both;
-    # Encounter-then-NutritionOrder leaves the Encounter resident (HTTP 200
-    # after the sweep). The same hazard already affects several entries below
-    # that reference Encounter — that is pre-existing and tracked separately;
-    # this ordering only keeps #455 from adding one more instance of it.
+    # still points at it. Measured on the local CDR: NutritionOrder-then-Encounter
+    # clears both in one pass; the reverse needs a retry. Since #458 the sweep
+    # retries instead of moving on, so this ordering saves a request rather than
+    # a resource.
     ("NutritionOrder", "patient"),
     ("Encounter", "patient"),
     ("Procedure", "patient"),
@@ -1990,9 +1998,11 @@ _PATIENT_SCOPED_TYPES: list[tuple[str, str]] = [
     ("Device", "patient"),
     ("FamilyMemberHistory", "patient"),
     # Patient is scoped by its own id, not by a reference param — HAPI 400s on
-    # both `patient=` and `subject=` here. It MUST stay last: HAPI returns 409
-    # when a Patient is still referenced by a Condition/Encounter/etc., so every
-    # clinical type above has to be cleared first.
+    # both `patient=` and `subject=` here. It stays last: HAPI returns 409 when a
+    # Patient is still referenced by a Condition/Encounter/etc., so every clinical
+    # type above has to be cleared first. Note this rule alone never saved the
+    # Patient — a clinical type that 409'd earlier in the list strands it too,
+    # which is why #458 replaced ordering with retry-plus-transaction.
     ("Patient", "_id"),
 ]
 
@@ -2008,6 +2018,25 @@ _PATIENT_SCOPED_TYPES: list[tuple[str, str]] = [
 # request line under ~2KB, well inside the 8KB default header limit on HAPI's
 # embedded Tomcat. A 460-patient job becomes ~10 requests per type instead of 460.
 _WIPE_ID_CHUNK_SIZE = 50
+
+# HAPI's answer when a delete target is still referenced (issue #458). This repo
+# sets `hapi.fhir.enforce_referential_integrity_on_write=false` in every compose
+# file and Dockerfile but never sets the *delete* equivalent, which therefore
+# defaults to `true` — so this is the ordinary response for any resource with a
+# live referrer, on our own stacks and on a participant's server alike.
+_WIPE_CONFLICT_STATUS = 409
+
+# Paging for the conflict enumeration. Only reached once a delete has actually
+# answered 409, so it costs nothing on a clean wipe. The page cap bounds the work
+# rather than the outcome: a wipe leaving 4000 referenced resources behind is
+# broken in a way one more page does not fix, and the final verification still
+# refuses to report success.
+_WIPE_ENUMERATE_PAGE_SIZE = 200
+_WIPE_ENUMERATE_MAX_PAGES = 20
+
+# One conditional delete: a resource type, its patient-scoping search parameter,
+# and one chunk of patient ids. The unit the sweep retries.
+_WipeTarget = tuple[str, str, list[str]]
 
 
 async def wipe_patients_by_id(
@@ -2035,7 +2064,24 @@ async def wipe_patients_by_id(
 
     Raises RuntimeError on 401/403 (same fail-loud rule as `wipe_patient_data`:
     a wipe that reports success while deleting nothing corrupts the next
-    evaluation silently) and after 3 consecutive transport failures.
+    evaluation silently), after 3 consecutive transport failures, and — since
+    issue #458 — when a resource it owns is still referenced after recovery.
+
+    A 409 is never absorbed (issue #458). HAPI enforces referential integrity on
+    delete, so `DELETE {Type}?patient=` is refused while any resource points at a
+    match. That used to be logged and stepped over, which left the resource
+    resident behind a "Scoped wipe complete" line — stale data the next
+    evaluation of the same patient consumes, with no error signal anywhere. Three
+    stages now handle it, cheapest first:
+
+    1. Re-issue the ordered sweep over just the types that 409'd, until a pass
+       makes no progress. This clears every acyclic case, where the referrer was
+       simply later in the list.
+    2. Enumerate what is left and delete it as one transaction Bundle. HAPI
+       evaluates referential integrity at commit, so mutually-referencing
+       resources go together — necessary because the reference graph has real
+       cycles and stage 1 cannot terminate on them.
+    3. Verify, and raise if anything survived.
     """
     if not patient_ids:
         logger.info("Scoped wipe: no patients to wipe", extra={"target": sanitize_url(base_url)})
@@ -2053,53 +2099,288 @@ async def wipe_patients_by_id(
         },
     )
 
+    pending: list[_WipeTarget] = [(rt, param, chunk) for rt, param in _PATIENT_SCOPED_TYPES for chunk in chunks]
     consecutive_failures = 0
     async with httpx.AsyncClient(timeout=300.0) as client:
-        for rt, param in _PATIENT_SCOPED_TYPES:
-            for chunk in chunks:
-                # Comma-joined values are a FHIR OR match, so one request covers
-                # the whole chunk. Unqualified ids (not "Patient/x") match the
-                # reference search param and keep the URL short.
-                search_filter = f"{param}={','.join(chunk)}"
-                delete_url = f"{base_url}/{rt}?{search_filter}"
-                try:
-                    resp = await client.delete(delete_url, headers=auth_headers or {})
-                    if resp.status_code in (401, 403):
-                        raise RuntimeError(
-                            f"Not authorized to wipe {rt} at the target server (HTTP {resp.status_code}). "
-                            "Check the connection's credentials. Job aborted rather than "
-                            "evaluating against stale data."
-                        )
-                    if resp.status_code >= 400 and resp.status_code != 404:
-                        # 404 = the server doesn't stock this type; nothing to do.
-                        # Anything else means the conditional delete itself was
-                        # refused — most often HAPI's 412 when the search matches
-                        # multiple resources and `allow_multiple_delete` is false.
-                        # Our own containers enable it, but a shared remote MCS
-                        # (the case this function exists for) may not, so fall back
-                        # to a scoped search-and-delete rather than logging and
-                        # moving on with nothing deleted.
-                        logger.info(
-                            "Scoped wipe: conditional delete refused, falling back to per-resource delete",
-                            extra={"resourceType": rt, "status_code": resp.status_code},
-                        )
-                        await _delete_all_of_type(client, rt, base_url, auth_headers, search_filter=search_filter)
-                    consecutive_failures = 0
-                except httpx.HTTPError:
-                    consecutive_failures += 1
-                    logger.warning(
-                        "Scoped wipe: request failed",
-                        extra={"resourceType": rt, "consecutive_failures": consecutive_failures},
-                    )
-                    if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
-                        raise RuntimeError(
-                            f"FHIR server unreachable: {consecutive_failures} consecutive "
-                            "timeouts during scoped wipe. Job aborted."
-                        )
+        while pending:
+            blocked, consecutive_failures = await _scoped_wipe_pass(
+                client, pending, base_url, auth_headers, consecutive_failures
+            )
+            if not blocked:
+                pending = []
+                break
+            if len(blocked) == len(pending):
+                # No progress. Every remaining 409 is pinned by something a
+                # different delete order would not free, so retrying is pure
+                # cost — see `_clear_wipe_conflicts` for why such a state is
+                # reachable at all. Each earlier iteration strictly shrinks
+                # `pending`, so this loop always terminates.
+                logger.info(
+                    "Scoped wipe: retry made no progress, recovering by transaction",
+                    extra={
+                        "blocked_count": len(blocked),
+                        # Deduped: one type spans several chunks on a large job.
+                        "resourceType": ",".join(dict.fromkeys(rt for rt, _, _ in blocked)),
+                    },
+                )
+                pending = blocked
+                break
+            pending = blocked
+
+        if pending:
+            await _clear_wipe_conflicts(client, pending, base_url, auth_headers)
 
     logger.info(
         "Scoped wipe complete",
         extra={"target": sanitize_url(base_url), "patient_count": len(patient_ids)},
+    )
+
+
+async def _scoped_wipe_pass(
+    client: httpx.AsyncClient,
+    targets: list[_WipeTarget],
+    base_url: str,
+    auth_headers: dict[str, str] | None,
+    consecutive_failures: int,
+) -> tuple[list[_WipeTarget], int]:
+    """One ordered pass of the scoped wipe. Returns the targets that were refused
+    for being still referenced, plus the carried transport-failure count.
+
+    A 409 is returned rather than logged and dropped (issue #458) because a type
+    later in the same pass is often the referrer — `Procedure.encounter` pins the
+    `Encounter` the sweep has already tried to delete — in which case simply
+    re-issuing the same conditional delete succeeds.
+    """
+    blocked: list[_WipeTarget] = []
+    for rt, param, chunk in targets:
+        # Comma-joined values are a FHIR OR match, so one request covers the
+        # whole chunk. Unqualified ids (not "Patient/x") match the reference
+        # search param and keep the URL short.
+        search_filter = f"{param}={','.join(chunk)}"
+        delete_url = f"{base_url}/{rt}?{search_filter}"
+        try:
+            resp = await client.delete(delete_url, headers=auth_headers or {})
+            if resp.status_code in (401, 403):
+                raise RuntimeError(
+                    f"Not authorized to wipe {rt} at the target server (HTTP {resp.status_code}). "
+                    "Check the connection's credentials. Job aborted rather than "
+                    "evaluating against stale data."
+                )
+            if resp.status_code == _WIPE_CONFLICT_STATUS:
+                # HAPI's conditional delete is one transaction, so a single
+                # pinned match refuses the whole chunk. Nothing of this type was
+                # deleted; the retry re-issues it verbatim.
+                logger.info(
+                    "Scoped wipe: delete refused, a resource is still referenced",
+                    extra={
+                        "resourceType": rt,
+                        "status_code": resp.status_code,
+                        "error": _conflict_diagnostics(resp),
+                    },
+                )
+                blocked.append((rt, param, chunk))
+            elif resp.status_code >= 400 and resp.status_code != 404:
+                # 404 = the server doesn't stock this type; nothing to do.
+                # Anything else means the conditional delete itself was
+                # refused — most often HAPI's 412 when the search matches
+                # multiple resources and `allow_multiple_delete` is false.
+                # Our own containers enable it, but a shared remote MCS
+                # (the case this function exists for) may not, so fall back
+                # to a scoped search-and-delete rather than logging and
+                # moving on with nothing deleted.
+                logger.info(
+                    "Scoped wipe: conditional delete refused, falling back to per-resource delete",
+                    extra={"resourceType": rt, "status_code": resp.status_code},
+                )
+                still_referenced = await _delete_all_of_type(
+                    client, rt, base_url, auth_headers, search_filter=search_filter
+                )
+                if still_referenced:
+                    blocked.append((rt, param, chunk))
+            consecutive_failures = 0
+        except httpx.HTTPError:
+            consecutive_failures += 1
+            logger.warning(
+                "Scoped wipe: request failed",
+                extra={"resourceType": rt, "consecutive_failures": consecutive_failures},
+            )
+            if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                raise RuntimeError(
+                    f"FHIR server unreachable: {consecutive_failures} consecutive "
+                    "timeouts during scoped wipe. Job aborted."
+                )
+    return blocked, consecutive_failures
+
+
+def _conflict_diagnostics(resp: httpx.Response) -> str:
+    """HAPI's own account of what is pinning the resource, redacted for logging.
+
+    The 409 body names the first referrer it finds — "First reference found was
+    resource Encounter/x in path Encounter.reasonReference" — which is the single
+    most useful line for an operator looking at a stuck wipe. It travels through
+    `redact_outcome` because the diagnostics can carry a server URL.
+    """
+    try:
+        return "; ".join(
+            str(issue.get("diagnostics"))
+            for issue in redact_outcome(resp.json()).get("issue", [])
+            if issue.get("diagnostics")
+        )
+    except Exception:
+        return f"HTTP {resp.status_code}"
+
+
+async def _search_scoped_refs(
+    client: httpx.AsyncClient,
+    target: _WipeTarget,
+    base_url: str,
+    auth_headers: dict[str, str] | None,
+) -> list[str]:
+    """List `Type/id` for everything still matching one wipe target (issue #458).
+
+    Turns "this type is blocked" into the concrete ids a transaction Bundle can
+    delete, and doubles as the wipe's verification step.
+
+    The search carries the caller's scoping filter, for the same reason
+    `_delete_all_of_type` does: an unscoped enumeration here would collect other
+    participants' resources and feed them straight into a DELETE transaction,
+    turning #392's safety feature into the full wipe it exists to prevent.
+    """
+    rt, param, chunk = target
+    search_filter = f"{param}={','.join(chunk)}"
+    url: Optional[str] = f"{base_url}/{rt}?_count={_WIPE_ENUMERATE_PAGE_SIZE}&{search_filter}"
+    refs: list[str] = []
+    pages = 0
+    while url and pages < _WIPE_ENUMERATE_MAX_PAGES:
+        pages += 1
+        resp = await client.get(url, headers=auth_headers or {})
+        if resp.status_code in (401, 403):
+            raise RuntimeError(
+                f"Not authorized to enumerate {rt} at the target server "
+                f"(HTTP {resp.status_code}). Refusing to report a successful wipe."
+            )
+        if resp.status_code != 200:
+            break
+        bundle = resp.json()
+        entries = bundle.get("entry", [])
+        if not entries:
+            break
+        for entry in entries:
+            res = entry.get("resource") or {}
+            res_id = res.get("id")
+            # Same guard as `_delete_all_of_type`: the bundle is server-supplied,
+            # and these ids become the `url` of a DELETE entry in a transaction.
+            if res_id and "/" not in res_id and ".." not in res_id:
+                refs.append(f"{rt}/{res_id}")
+        url = None
+        for link in bundle.get("link", []):
+            if link.get("relation") == "next":
+                next_url = link.get("url")
+                if next_url and _same_origin(base_url, next_url):
+                    url = next_url
+                elif next_url:
+                    logger.warning(
+                        "SSRF: wipe conflict pagination next link rejected (origin mismatch)",
+                        extra={"url": sanitize_url(next_url)},
+                    )
+                break
+    return refs
+
+
+async def _clear_wipe_conflicts(
+    client: httpx.AsyncClient,
+    targets: list[_WipeTarget],
+    base_url: str,
+    auth_headers: dict[str, str] | None,
+) -> None:
+    """Delete wipe leftovers that pin each other, atomically, or fail loudly (#458).
+
+    Reached when the retry pass stops making progress, which means the remaining
+    409s are not an ordering problem. They cannot always be one:
+    `Encounter.reasonReference -> Condition` and `Condition.encounter ->
+    Encounter` are both conformant R4, so two types can pin each other and no
+    total order over `_PATIENT_SCOPED_TYPES` exists that clears the pair.
+    Observed on the CMS connectathon server against unmodified MADiE CMS506 data,
+    where it also stranded the `Patient` behind the surviving `Condition`.
+
+    A transaction Bundle is the fix because HAPI evaluates referential integrity
+    at commit rather than per entry, so both halves of a cycle can go in one
+    request. A *batch* Bundle would not work — its entries are applied
+    independently and each would 409 exactly as the sweep did.
+
+    `_cascade=delete` would also clear it, and HAPI suggests it in the 409's own
+    informational issue, but it is the wrong tool on a shared server: cascade
+    follows references *outward* to whatever happens to point at the target,
+    which is precisely the blast radius #392 / ADR-012 exists to contain. The
+    Bundle stays confined to ids this sweep already decided it owns.
+
+    Raises RuntimeError when the resources are still there afterwards. That means
+    the referrer is outside this wipe's scope — a summary MeasureReport that no
+    `patient=` search matches, or a type absent from `_PATIENT_SCOPED_TYPES`
+    (issue #457) — so Lenny cannot free it, and the next evaluation of these
+    patients would read data the job believes it deleted. Same fail-loud rule the
+    wipe already applies to 401/403.
+    """
+    refs: list[str] = []
+    for target in targets:
+        refs.extend(await _search_scoped_refs(client, target, base_url, auth_headers))
+
+    if not refs:
+        # The final pass's later deletes freed them after all — the conditional
+        # delete 409'd, then the referrer went away before the pass ended.
+        logger.info(
+            "Scoped wipe: blocked resources were gone by the time recovery ran",
+            extra={"target": sanitize_url(base_url)},
+        )
+        return
+
+    logger.warning(
+        "Scoped wipe: deleting still-referenced leftovers as one transaction",
+        extra={
+            "target": sanitize_url(base_url),
+            "blocked_count": len(refs),
+            "blocked_resources": refs[:20],
+        },
+    )
+    bundle = {
+        "resourceType": "Bundle",
+        "type": "transaction",
+        "entry": [{"request": {"method": "DELETE", "url": ref}} for ref in refs],
+    }
+    # Not chunked, deliberately: splitting the entries could put the two halves
+    # of a cycle in different transactions, which is the one thing this request
+    # exists to avoid. The sweep has already removed everything deletable, so
+    # what reaches here is small.
+    detail = ""
+    try:
+        resp = await client.post(
+            base_url,
+            json=bundle,
+            headers={**(auth_headers or {}), "Content-Type": "application/fhir+json"},
+        )
+        if resp.status_code >= 400:
+            detail = f" The transaction answered HTTP {resp.status_code}: {_conflict_diagnostics(resp)}."
+    except httpx.HTTPError as exc:
+        detail = f" The transaction request failed: {type(exc).__name__}."
+
+    # Re-reading the server decides, not the transaction's status code. A
+    # transaction can answer 200 having deleted only some entries, and a failed
+    # POST can still leave nothing behind if a concurrent job cleared it.
+    remaining: list[str] = []
+    for target in targets:
+        remaining.extend(await _search_scoped_refs(client, target, base_url, auth_headers))
+    if remaining:
+        shown = ", ".join(remaining[:10]) + (" ..." if len(remaining) > 10 else "")
+        raise RuntimeError(
+            f"Scoped wipe could not delete {len(remaining)} still-referenced resource(s) on "
+            f"{sanitize_url(base_url)}: {shown}.{detail} They are pinned by a resource this "
+            "wipe does not own, so the next evaluation of these patients would read data the "
+            "job believes it deleted. Job aborted rather than evaluating against stale data."
+        )
+
+    logger.info(
+        "Scoped wipe: still-referenced leftovers cleared by transaction",
+        extra={"target": sanitize_url(base_url), "blocked_count": len(refs)},
     )
 
 
@@ -2155,8 +2436,13 @@ async def _delete_all_of_type(
     base_url: str,
     auth_headers: dict[str, str] | None = None,
     search_filter: str | None = None,
-) -> None:
+) -> list[str]:
     """Delete resources of a given type one by one from the given FHIR server.
+
+    Returns the `Type/id` of every resource the server refused to delete because
+    something still references it (issue #458). Callers that can act on that —
+    `wipe_patients_by_id` — retry and then clear them in one transaction; the full
+    wipe ignores the return value.
 
     `auth_headers` MUST be threaded through from the caller. This is the fallback
     path taken when conditional delete is unsupported, and the target may be an
@@ -2171,6 +2457,7 @@ async def _delete_all_of_type(
     into the exact full wipe it exists to prevent (issue #392).
     """
     headers = auth_headers or {}
+    blocked: list[str] = []
     query = f"_count=100&{search_filter}" if search_filter else "_count=100"
     url: Optional[str] = f"{base_url}/{resource_type}?{query}"
     while url:
@@ -2195,7 +2482,13 @@ async def _delete_all_of_type(
             if res_id and "/" not in res_id and ".." not in res_id:
                 del_url = f"{base_url}/{resource_type}/{res_id}"
                 try:
-                    await client.delete(del_url, headers=headers)
+                    del_resp = await client.delete(del_url, headers=headers)
+                    # A 409 does not raise from httpx, so before #458 it did not
+                    # even reach the handler below — the resource simply survived
+                    # the wipe. On a server without conditional delete every
+                    # reference conflict in the sweep took this path.
+                    if del_resp.status_code == _WIPE_CONFLICT_STATUS:
+                        blocked.append(f"{resource_type}/{res_id}")
                 except httpx.HTTPError:
                     pass
         # Re-check if more remain. Only follow a same-origin next link — a
@@ -2213,6 +2506,7 @@ async def _delete_all_of_type(
                         extra={"url": sanitize_url(next_url)},
                     )
                 break
+    return blocked
 
 
 async def resolve_evaluated_resource(

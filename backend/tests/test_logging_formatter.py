@@ -69,3 +69,24 @@ def test_emits_partial_gather_extras():
     assert entry["failed_types"] == ["Medication", "Coverage"]
     assert "no patient-scoped search parameter" in entry["failed_type_reasons"]["Medication"]
     assert "503" in entry["failed_type_reasons"]["Coverage"]
+
+
+def test_emits_scoped_wipe_conflict_extras():
+    """#458: a wipe conflict is only diagnosable if the operator can see WHICH
+    resource type was blocked and WHICH resources survived.
+
+    `resourceType` predates #458 — every log line in both wipes already passed it
+    and it was absent from the allowlist all along, so "Scoped wipe: conditional
+    delete refused" named no type. `blocked_resources` is what turns "the wipe
+    hit a reference conflict" into something an operator can go and look at on
+    the target server.
+    """
+    entry = _format(
+        resourceType="Encounter",
+        blocked_resources=["Encounter/e-1", "Condition/c-1"],
+        blocked_count=2,
+    )
+
+    assert entry["resourceType"] == "Encounter"
+    assert entry["blocked_resources"] == ["Encounter/e-1", "Condition/c-1"]
+    assert entry["blocked_count"] == 2

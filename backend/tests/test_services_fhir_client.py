@@ -1272,6 +1272,291 @@ class TestWipePatientsById:
 
 
 # ---------------------------------------------------------------------------
+# Scoped-wipe reference conflicts (issue #458)
+# ---------------------------------------------------------------------------
+
+
+class TestScopedWipeReferenceConflicts:
+    """A 409 during the scoped wipe must never be reported as a successful wipe.
+
+    Issue #458. This repo sets `hapi.fhir.enforce_referential_integrity_on_write=false`
+    everywhere but never sets the *delete* equivalent, which therefore defaults to
+    `true`: HAPI answers 409 to `DELETE {Type}?patient=` while any resource still
+    references a match. The sweep absorbed that and moved on, so the resource
+    survived a wipe that logged "Scoped wipe complete" — stale data the next
+    evaluation of that patient can consume, with no error signal. ADR-012's
+    correctness argument does not hold for any resource with a surviving referrer.
+
+    Three behaviours are pinned here, in the order the fix applies them:
+    ordered retry (clears the acyclic cases), one transaction Bundle (clears
+    reference *cycles*, which no ordering can), then a loud failure.
+    """
+
+    def _client(self, mock_httpx, *, delete, get=None, post=None):
+        mock_ctx = AsyncMock()
+        mock_ctx.delete = AsyncMock(side_effect=delete)
+        mock_ctx.get = AsyncMock(side_effect=get) if get else AsyncMock(return_value=_make_response(200, {}))
+        mock_ctx.post = AsyncMock(side_effect=post) if post else AsyncMock(return_value=_make_response(200, {}))
+        mock_httpx.return_value.__aenter__ = AsyncMock(return_value=mock_ctx)
+        mock_httpx.return_value.__aexit__ = AsyncMock(return_value=False)
+        return mock_ctx
+
+    @staticmethod
+    def _conflict(blocker: str) -> httpx.Response:
+        """HAPI's actual 409 body, which names only the first referrer it finds."""
+        return _make_response(
+            409,
+            {
+                "resourceType": "OperationOutcome",
+                "issue": [
+                    {
+                        "severity": "error",
+                        "code": "conflict",
+                        "diagnostics": (
+                            "Unable to delete resource because at least one resource has a reference "
+                            f"to this resource. First reference found was resource {blocker}"
+                        ),
+                    }
+                ],
+            },
+        )
+
+    @staticmethod
+    def _found(resource_type: str, resource_id: str) -> httpx.Response:
+        return _make_response(
+            200,
+            {
+                "resourceType": "Bundle",
+                "type": "searchset",
+                "entry": [{"resource": {"resourceType": resource_type, "id": resource_id}}],
+            },
+        )
+
+    _EMPTY = {"resourceType": "Bundle", "type": "searchset", "entry": []}
+
+    async def test_a_type_blocked_by_a_later_referrer_is_retried(self):
+        """The acyclic case from the issue body, which ordering alone leaves behind.
+
+        `Procedure` references `Encounter` and sits *after* it in the sweep, so
+        `DELETE Encounter?patient=` 409s on the first pass. Once the Procedure is
+        gone the same delete succeeds — but only if something re-issues it. The
+        original sweep never did, and the Encounter survived.
+        """
+        attempts = {"encounter": 0}
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                attempts["encounter"] += 1
+                if attempts["encounter"] == 1:
+                    return self._conflict("Procedure/pr-1 in path Procedure.encounter")
+            return _make_response(200, {})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._client(mock_httpx, delete=_delete)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert attempts["encounter"] == 2, "a 409 was absorbed — the Encounter survives the wipe"
+        # The retry re-issues only what conflicted, not the whole sweep again.
+        condition = [u for u in _delete_urls(mock_ctx) if "/Condition?" in u]
+        assert len(condition) == 1, "the retry pass re-swept types that had already succeeded"
+
+    async def test_a_reference_cycle_is_cleared_by_one_transaction_bundle(self):
+        """`Condition` <-> `Encounter` is a type-level cycle; no order can break it.
+
+        Measured on the CMS connectathon server against unmodified MADiE CMS506
+        data: `Encounter.reasonReference -> Condition` and
+        `Condition.encounter -> Encounter` pin each other, so whichever is deleted
+        first 409s and both survive. Swapping them only moves which one fails.
+        HAPI evaluates referential integrity at commit, so a transaction Bundle
+        carrying both DELETEs removes the pair atomically.
+        """
+        posted: list[dict] = []
+
+        async def _delete(url, **kwargs):
+            if "/Condition?" in url or "/Encounter?" in url:
+                return self._conflict("the other half of the cycle")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if posted:  # the transaction cleared them
+                return _make_response(200, self._EMPTY)
+            if "/Condition?" in url:
+                return self._found("Condition", "c-1")
+            if "/Encounter?" in url:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert len(posted) == 1, f"expected exactly one transaction Bundle, got {len(posted)}"
+        bundle = posted[0]
+        assert bundle["type"] == "transaction", (
+            "a batch Bundle applies entries independently, so each half of the cycle "
+            "still 409s — only a transaction commits them together"
+        )
+        urls = [e["request"]["url"] for e in bundle["entry"]]
+        assert [e["request"]["method"] for e in bundle["entry"]] == ["DELETE"] * len(urls)
+        assert "Condition/c-1" in urls and "Encounter/e-1" in urls, (
+            f"both halves of the cycle must ride in the same transaction: {urls}"
+        )
+
+    async def test_raises_when_the_transaction_cannot_clear_the_conflicts(self):
+        """The fail-loud end of the chain, and the whole point of the issue.
+
+        A referrer outside the wipe's scope (a summary MeasureReport, a type not
+        in `_PATIENT_SCOPED_TYPES` — see #457) pins a resource that the wipe owns
+        and cannot free. Reporting success there leaves the next evaluation of
+        this patient reading data the job believes it deleted.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("MeasureReport/summary-1 in path MeasureReport.evaluatedResource")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get)
+            with pytest.raises(RuntimeError) as exc:
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        message = str(exc.value)
+        assert "Encounter/e-1" in message, f"the error must name what survived: {message!r}"
+        assert "mcs.example.org" in message or "target" in message.lower()
+
+    async def test_retry_stops_once_a_pass_makes_no_progress(self):
+        """Bounded, and bounded by *progress* rather than a fixed pass count.
+
+        A cycle 409s identically on every pass. Retrying it until some attempt
+        limit runs out would multiply every stuck type by that limit for nothing
+        — and on a 460-patient job the sweep is already ~250 requests.
+        """
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._client(mock_httpx, delete=_delete, get=_get)
+            with pytest.raises(RuntimeError):
+                await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        encounter = [u for u in _delete_urls(mock_ctx) if "/Encounter?" in u]
+        assert len(encounter) == 2, (
+            f"expected one sweep plus one retry that makes no progress, got {len(encounter)} attempts"
+        )
+
+    async def test_a_clean_wipe_issues_no_extra_requests(self):
+        """The conflict machinery must not cost anything when nothing conflicts.
+
+        Enumerating every type to check what survived would double the request
+        count of every job on the happy path. Enumeration is only allowed for the
+        types that actually answered 409.
+        """
+
+        async def _delete(url, **kwargs):
+            return _make_response(200, {})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._client(mock_httpx, delete=_delete)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert mock_ctx.delete.await_count == len(_PATIENT_SCOPED_TYPES)
+        assert mock_ctx.get.await_count == 0, "no conflict, so nothing should have been enumerated"
+        assert mock_ctx.post.await_count == 0, "no conflict, so no transaction Bundle should be needed"
+
+    async def test_a_409_in_the_per_resource_fallback_is_not_swallowed(self):
+        """The second place a 409 disappeared: the `allow_multiple_delete` fallback.
+
+        `_delete_all_of_type` wrapped each DELETE in `except httpx.HTTPError: pass`
+        — and a 409 does not raise from httpx at all, so it was not even reached.
+        On a server without conditional delete, every conflict in the sweep took
+        this path and vanished.
+        """
+        posted: list[dict] = []
+
+        async def _delete(url, **kwargs):
+            if "/Condition?" in url:
+                return _make_response(412, {})  # multiple delete disabled
+            if url.endswith("/Condition/c-1"):
+                return self._conflict("Encounter/e-1 in path Encounter.reasonReference")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Condition?" in url and not posted:
+                return self._found("Condition", "c-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted.append(kwargs.get("json"))
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"])
+
+        assert len(posted) == 1, "a conflict raised by the per-resource fallback was absorbed"
+        assert [e["request"]["url"] for e in posted[0]["entry"]] == ["Condition/c-1"]
+
+    async def test_conflict_recovery_stays_authenticated_and_scoped(self):
+        """Both new requests carry credentials, and the enumeration stays scoped.
+
+        An unauthenticated enumeration 401s and reports nothing left to clear,
+        which is the silent success this issue is about. An *unscoped* one would
+        list other participants' resources and feed them to a DELETE transaction
+        — turning #392's safety feature into the full wipe it exists to prevent.
+        """
+        headers = {"Authorization": "Bearer tok-1"}
+        posted_headers: list[dict] = []
+        cleared: list[bool] = []
+
+        async def _delete(url, **kwargs):
+            if "/Encounter?" in url:
+                return self._conflict("Condition/c-1")
+            return _make_response(200, {})
+
+        async def _get(url, **kwargs):
+            if "/Encounter?" in url and not cleared:
+                return self._found("Encounter", "e-1")
+            return _make_response(200, self._EMPTY)
+
+        async def _post(url, **kwargs):
+            posted_headers.append(kwargs.get("headers") or {})
+            cleared.append(True)
+            return _make_response(200, {"resourceType": "Bundle", "type": "transaction-response"})
+
+        with patch("app.services.fhir_client.httpx.AsyncClient") as mock_httpx:
+            mock_ctx = self._client(mock_httpx, delete=_delete, get=_get, post=_post)
+            await wipe_patients_by_id(base_url="https://mcs.example.org/fhir", patient_ids=["p1"], auth_headers=headers)
+
+        assert mock_ctx.get.await_count > 0
+        for call in mock_ctx.get.await_args_list:
+            url = call.args[0]
+            assert call.kwargs.get("headers") == headers, "conflict enumeration went out unauthenticated"
+            assert any(f"{p}=" in url for p in ("patient", "subject", "_id")), (
+                f"conflict enumeration was unscoped — it would list other tenants' resources: {url}"
+            )
+        assert posted_headers, "no transaction Bundle was posted"
+        assert posted_headers[0].get("Authorization") == "Bearer tok-1"
+
+
+# ---------------------------------------------------------------------------
 # wipe_measure_definitions (issue #397)
 # ---------------------------------------------------------------------------
 

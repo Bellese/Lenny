@@ -144,6 +144,8 @@ This log records significant technical and process choices with their rationale.
 
 **Alternatives considered:** (a) Flag-only, keeping the full wipe as the sole mechanism (issue #392's stated minimum) — rejected: a remote user wanting correctness would still have to nuke a shared server. (b) Scoped wipe only, no flag — rejected: the local engine would accumulate prior jobs' patients indefinitely, growing the dataset and slowing factory reset (#399). (c) Inferring locality from the URL — rejected, see above.
 
+**Superseded in part by ADR-018 (issue #458).** The paragraph above is right that `Patient` must be deleted last, and wrong that ordering is the whole dependency. HAPI enforces referential integrity on delete between *clinical* resources too, so any type with a surviving referrer 409'd and the sweep stepped over it — including cases no ordering can fix, since `Condition` and `Encounter` can reference each other. The correctness argument in this ADR ("the stale data that *can* affect them ... is exactly what this deletes") did not hold for any such resource until ADR-018 added retry-then-transaction recovery and made an unclearable conflict fail the job.
+
 **Known limitation:** the abort threshold counts *consecutive* transport failures, so a server that fails intermittently can defeat it and the wipe reports success with some deletes unapplied. This predates #392 in `wipe_patient_data`, but chunking makes it more reachable (19 types × ceil(N/50) requests instead of 23). Tightening it was deliberately deferred — failing every job against a merely-flaky remote is a worse default.
 
 ---
@@ -292,7 +294,8 @@ measure server with nothing to remove them, which is the harm #392 exists to pre
 `NutritionOrder` is ordered before `Encounter` deliberately: HAPI enforces referential integrity on
 delete, so `DELETE Encounter?patient=` answers 409 while a NutritionOrder still points at it and the
 sweep leaves the Encounter resident. The wipe's broader referrers-first ordering and its swallowed
-409s are pre-existing and tracked in #458.
+409s were pre-existing and are now closed by ADR-018 (#458), which demotes that ordering to an
+optimisation — a misplaced entry costs a retry request rather than a surviving resource.
 
 **Known gap.** The scope table is static while the set of types a server accepts is a runtime
 property of that server — tracked in #457.
@@ -303,3 +306,74 @@ parameter and a CDR that failed to answer are no longer the same bare word. `JSO
 allowlist in `main.py` had been dropping `failed_types` all along; it and the new keys are now
 listed. `validation.py`'s type→count map was renamed to `failed_type_counts` so one key does not
 carry a list on one log line and a map on another.
+
+---
+
+## ADR-018: The patient-scoped wipe recovers from reference conflicts by retry then transaction, and fails loudly; ordering is demoted to an optimisation (2026-09-17)
+
+**Context (issue #458).** `hapi.fhir.enforce_referential_integrity_on_delete` defaults to `true` and
+this repo never sets it — only the `_on_write` half, which is `false` everywhere. So HAPI refuses
+`DELETE {Type}?patient=` with a 409 while any resource still points at a match. `wipe_patients_by_id`
+logged that and stepped over it, then logged "Scoped wipe complete". The resource stayed attached to a
+patient the job was about to re-push and re-evaluate, with no error signal anywhere. ADR-012 named
+exactly one dependency — "Patient must be deleted last or HAPI 409s" — and that rule never saved the
+Patient either: a clinical type that 409s earlier in the list strands the Patient behind it.
+
+**Why ordering is not the fix, and cannot be.** `Encounter.reasonReference → Condition` and
+`Condition.encounter → Encounter` are both conformant R4, so the reference graph can hold a genuine
+2-cycle *at the type level*. Whichever of the pair is deleted first 409s; swapping them only moves
+which one fails. No total order over `_PATIENT_SCOPED_TYPES` clears it. Found on the CMS connectathon
+server in unmodified MADiE CMS506 data — the September connectathon's own content — where the
+surviving `Condition` also stranded its `Patient`. #458's first proposal (order the list
+referrers-first) and its suggested invariant test ("no earlier type may be referenced by a later one")
+are therefore respectively insufficient and unsatisfiable.
+
+**Decision.** Three stages, cheapest first, inside `wipe_patients_by_id`:
+
+1. **Retry the ordered sweep** over just the types that 409'd, until a pass makes no progress. Clears
+   every acyclic case — the referrer was simply later in the list. Each pass strictly shrinks the
+   pending set, so termination needs no attempt cap.
+2. **One transaction Bundle** of instance DELETEs for whatever is left. HAPI evaluates referential
+   integrity at commit rather than per entry, so both halves of a cycle go together. A *batch* Bundle
+   would not work: its entries apply independently and each would 409 exactly as the sweep did.
+3. **Verify by re-reading, then raise.** The transaction's status code does not decide; a re-search
+   does. Anything still present means the referrer is outside the wipe's scope, and the wipe raises.
+
+`_PATIENT_SCOPED_TYPES` keeps its referrers-first order, demoted from correctness mechanism to
+optimisation: a good order costs fewer retry passes, and a type added in the wrong place now costs a
+request rather than a silently surviving resource. The comments say so, because the old ones documented
+only the Patient-last rule and that is why the gap stayed invisible.
+
+**Why not `_cascade=delete`,** which HAPI itself suggests in the 409's informational issue: cascade
+follows references *outward* to whatever happens to point at the target. On a shared connectathon
+server that is exactly the blast radius #392/ADR-012 exists to contain. The transaction Bundle stays
+confined to the ids the sweep already decided it owns, which is why it is the right tool here and
+cascade is not.
+
+**The raise is a behavior change, deliberately.** A job whose wipe cannot clear its own patients' data
+now fails instead of evaluating. The referrer in that case belongs to someone else — a summary
+MeasureReport no `patient=` search matches, a type absent from the list (#457), another participant's
+resource — so Lenny cannot free it without doing the cross-tenant damage #392 prohibits. The
+alternative is evaluating against data the job believes it deleted and reporting the resulting
+populations as correct. This is the same fail-loud rule the wipe already applied to 401/403, applied to
+a 409 for the same stated reason: "a wipe that reports success while deleting nothing corrupts the next
+evaluation silently."
+
+**Enforced, not asserted.** `tests/integration/test_scoped_wipe.py` seeds the cycle, the acyclic
+`Procedure`→`Encounter` pin, and a bystander-pinned Condition against a live HAPI. Each probes the
+conflict with a plain instance DELETE first and asserts it is a 409, so a server that does *not*
+enforce integrity on delete fails the precondition rather than passing the test vacuously — the bug
+under test is the server's behavior, and a mock asserting HAPI 409s would just restate the assumption.
+
+**Alternatives considered:** (a) Reorder the list only — rejected, provably insufficient (above).
+(b) Retry-until-no-progress then fail, with no transaction — rejected: it terminates with every real
+cycle intact, so it converts a silent bug into a job that always fails on conformant data. It is
+detection, not a fix. (c) Enumerate every type after the sweep to verify — rejected, it doubles the
+request count of every job for the benefit of the rare conflicted one; enumeration is now reached only
+for a type that actually answered 409. (d) Chunk the transaction Bundle — rejected, it could put the
+two halves of a cycle in different transactions, which is the one thing the request exists to avoid.
+
+**Not covered.** `wipe_patient_data`, the unfiltered full wipe behind `MCSConfig.wipe_before_job`, has
+the same conflict hazard on the same shared `_delete_all_of_type` helper (which now reports conflicts
+rather than swallowing them, so the machinery is available). #458 is scoped to the patient-scoped wipe
+and ADR-012; the full-wipe analogue is left for a follow-up rather than widened into here.

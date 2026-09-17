@@ -71,6 +71,13 @@ class JSONFormatter(logging.Formatter):
             "failed_types",
             "failed_type_reasons",
             "failed_type_counts",
+            # #458: every log line in both wipes already passed `resourceType`
+            # and it was absent here all along, so "conditional delete refused"
+            # named no type. `blocked_resources` is what makes a wipe that hit a
+            # reference conflict something an operator can go and look at.
+            "resourceType",
+            "blocked_resources",
+            "blocked_count",
         )
         for key in _EXTRA_KEYS:
             val = getattr(record, key, None)
