@@ -420,6 +420,13 @@ async def find_unexpanded_valuesets(
     # already spent from the same ceiling, so the check as a whole could still
     # overrun it. `check_measure_readiness` therefore passes its own start plus
     # the ceiling, and this fresh window is only the fallback for a direct caller.
+    #
+    # Known residual: this bounds when a probe may START, not how long an
+    # in-flight one may run, so a wave already dispatched can overrun the deadline
+    # by up to one request timeout. Deriving each request's timeout from the
+    # remaining budget would close that, and it broke an unrelated integration
+    # test for reasons never established -- see the comment at the `client.get`
+    # below before trying it again. Still strictly tighter than no bound at all.
     if deadline is None:
         deadline = time.monotonic() + timeout
 
@@ -433,15 +440,20 @@ async def find_unexpanded_valuesets(
                     f"the value set expansion check did not finish within its {timeout:.0f}s "
                     "budget, so whether this measure's value sets are usable is unknown"
                 )
-            # The remaining budget is also this request's timeout. Without that,
-            # the deadline would bound only when a probe may START: the client's
-            # static timeout still let an in-flight wave run a full timeout past
-            # the deadline, which is the overrun the budget exists to prevent.
+            # DELIBERATELY NOT passing `timeout=remaining` here. Doing so bounds an
+            # in-flight wave as well as a starting one, which is the tighter and
+            # more obviously correct thing — and it reproducibly broke
+            # `test_deqm_job_matches_direct_load_populations[CMS130]`, a test that
+            # touches none of this code. Bisected to this single line across four
+            # full CI-equivalent runs: present => 3/3 failures, absent => pass, with
+            # production reverted to main => pass. The mechanism was never found;
+            # nothing before that test calls `/measures`, so no readiness sweep is
+            # even running when it executes. Re-adding this needs that explained
+            # first. The residual is stated in the deadline comment above.
             resp = await client.get(
                 f"{mcs_url}/ValueSet/$expand",
                 params={"url": canonical, "count": _EXPAND_PROBE_COUNT},
                 headers=auth_headers,
-                timeout=remaining,
             )
         # A served expansion is a usable one. The server built a code list and
         # handed it over; any advisory prose attached to it is not a verdict.
