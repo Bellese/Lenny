@@ -360,6 +360,78 @@ def _make_seed_tx_bundle(resources: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _wait_for_terminology_expansion(base_url: str, budget: SetupBudget) -> None:
+    """Block until the measure server can expand every value set it holds.
+
+    The prebaked images ship their expansions baked into H2, which is why the
+    branch below skips the load-and-expand work entirely. What they do NOT do is
+    make those expansions queryable the instant HAPI answers `/fhir/metadata` —
+    measured on the standalone measure image, a value set answered `$expand` with
+    HAPI-0831 at t+87s and served a pre-calculated expansion by t+118s.
+
+    Inside that window the CQL engine's retrieves come back empty, so
+    `$evaluate-measure` reports every population as 0 with no error: the exact
+    all-False population mismatch that made `test_deqm_job_matches_direct_load_populations`
+    fail 2 of 4 local full-suite runs while passing when run alone. It is also
+    what `check_measure_readiness` now correctly reports as `unknown` (#444).
+
+    `count=2` short-circuits: the server answers from its pre-expanded store if it
+    has one and trips HAPI-0831 if it does not, without building the full code list.
+    """
+    import concurrent.futures
+
+    import httpx as _httpx
+
+    started = time.monotonic()
+    cap = budget.allot("terminology-expansion-gate", 300.0)
+    deadline = time.monotonic() + cap
+
+    with _httpx.Client(timeout=30) as client:
+        try:
+            listing = client.get(f"{base_url}/ValueSet?_elements=url&_count=500&_total=accurate")
+            listing.raise_for_status()
+            body = listing.json()
+        except Exception as exc:
+            record_gate("terminology-expansion-gate (UNREADABLE)", time.monotonic() - started)
+            raise RuntimeError(f"Could not list value sets on {base_url} to gate on their expansion: {exc}") from exc
+
+        urls = sorted({(e.get("resource") or {}).get("url") for e in body.get("entry", [])} - {None})
+        if not urls:
+            record_gate("terminology-expansion-gate (none)", time.monotonic() - started)
+            return
+        if body.get("total") != len(body.get("entry", [])):
+            raise RuntimeError(
+                f"{base_url} reports {body.get('total')} value sets but returned "
+                f"{len(body.get('entry', []))} in one page — raise _count so this gate covers all."
+            )
+
+        def _expands(url: str) -> tuple[str, bool]:
+            try:
+                resp = client.get(f"{base_url}/ValueSet/$expand", params={"url": url, "count": 2})
+                return url, resp.status_code < 400
+            except Exception:
+                return url, False
+
+        pending = urls
+        while True:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(_expands, pending))
+            pending = [u for u, ok in results if not ok]
+            if not pending:
+                break
+            if time.monotonic() >= deadline:
+                record_gate("terminology-expansion-gate (TIMEOUT)", time.monotonic() - started)
+                raise RuntimeError(
+                    f"{len(pending)} value set(s) on {base_url} still could not be expanded after "
+                    f"{cap:.0f}s: {pending[:5]}{'...' if len(pending) > 5 else ''}. HAPI pre-expands "
+                    "in the background, so this is a stack problem (scheduler stalled or starved), "
+                    "not a measure-content problem."
+                )
+            time.sleep(5)
+
+    record_gate("terminology-expansion-gate", time.monotonic() - started)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _load_seed_data(_require_infrastructure):
     """Load measure-bundle.json and patient-bundle.json into the test HAPI instances.
@@ -385,7 +457,8 @@ def _load_seed_data(_require_infrastructure):
     budget = SetupBudget(_SETUP_BUDGET_SECONDS)
 
     if os.environ.get("HAPI_PREBAKED") == "1":
-        # Images are pre-seeded; skip loading + reindex + ValueSet expansion.
+        # Images are pre-seeded; skip loading. Expansion still needs gating below:
+        # baked != queryable-on-boot.
         # Smoke probe: if Patient count is 0 the baked image is corrupt — fail fast.
         for base_url, label in [(TEST_CDR_URL, "CDR"), (TEST_MEASURE_URL, "measure")]:
             try:
@@ -432,6 +505,11 @@ def _load_seed_data(_require_infrastructure):
         # HAPI to restart async jobs, producing 500 errors on in-flight CQL evaluations.
         if probe_patient_id and probe_encounter_id:
             _trigger_reindex_and_wait(TEST_MEASURE_URL, probe_patient_id, probe_encounter_id, budget)
+        # The baked expansions are not queryable the moment /fhir/metadata answers,
+        # and until they are, every CQL retrieve comes back empty and every
+        # population evaluates to 0 with no error. Gate on it once here rather
+        # than per-test: the race reaches any test that evaluates a measure.
+        _wait_for_terminology_expansion(TEST_MEASURE_URL, budget)
         return
 
     measure_bundle_path = SEED_DIR / "measure-bundle.json"

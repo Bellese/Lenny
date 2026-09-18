@@ -195,6 +195,12 @@ async def test_every_seeded_measure_is_ready(measure_url):
         "correctly, or did the seed id scheme change?"
     )
 
+    # The terminology-expansion gate lives in conftest's `_load_seed_data`, so it
+    # has already run for the whole session by the time any test gets here.
+    # Readiness legitimately answers `unknown` while HAPI's pre-expansion is
+    # still running, so asserting `ready` before then would be a race, not a
+    # check — and the same race reaches every test that evaluates a measure,
+    # which is why the gate is session-wide rather than local to this file.
     failures = []
     for measure_id in measures_to_check:
         verdict = await check_measure_readiness(measure_url, measure_id, auth_headers={}, timeout=120.0)
