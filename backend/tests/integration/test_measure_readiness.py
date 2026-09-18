@@ -19,7 +19,11 @@ import httpx
 import pytest
 
 from app.models.measure_readiness import ReadinessState
-from app.services.measure_readiness import check_measure_readiness, find_missing_valuesets
+from app.services.measure_readiness import (
+    check_measure_readiness,
+    extract_valueset_canonicals,
+    find_missing_valuesets,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -153,6 +157,60 @@ async def test_a_canonical_that_does_not_exist_is_reported_missing(measure_url):
     assert missing == [bogus]
 
 
+def _wait_until_expandable(measure_url: str, measure_ids: list[str], *, budget_seconds: float = 300.0) -> None:
+    """Block until every value set the given measures reference can be expanded.
+
+    Uses `count=2`, the same probe production uses, because it is the only one
+    that reaches HAPI's pre-calculated expansion store -- see the measured table
+    on the `$expand` request in `measure_readiness.find_unexpanded_valuesets`.
+    Waiting on the identical signal is the point: this returns exactly when the
+    readiness check below will agree.
+    """
+    import time
+
+    deadline = time.monotonic() + budget_seconds
+    pending: set[str] = set()
+    for measure_id in measure_ids:
+        resp = httpx.get(f"{measure_url}/Measure/{measure_id}/$data-requirements", timeout=120)
+        resp.raise_for_status()
+        pending.update(extract_valueset_canonicals(resp.json()))
+
+    # A wait that finds nothing passes vacuously and silently stops being a gate.
+    # The first version of this helper parsed the `$data-requirements` Library as
+    # `{"parameter": [{"resource": {...}}]}`, which is the wrong shape: it
+    # extracted zero canonicals, skipped the loop, and asserted success while the
+    # very condition it existed to wait for was still red. Reusing production's
+    # own extractor removes the chance of that divergence; this guard catches it
+    # if the response shape ever changes underneath both.
+    assert pending, (
+        f"No ValueSet canonicals extracted from $data-requirements for {measure_ids} — "
+        "this wait would pass without checking anything. Fix the extraction before trusting it."
+    )
+
+    while pending and time.monotonic() < deadline:
+        still: set[str] = set()
+        for url in pending:
+            try:
+                probe = httpx.get(
+                    f"{measure_url}/ValueSet/$expand",
+                    params={"url": url, "count": 2},
+                    timeout=120,
+                )
+                if not 200 <= probe.status_code < 300:
+                    still.add(url)
+            except httpx.RequestError:
+                still.add(url)
+        pending = still
+        if pending:
+            time.sleep(5)
+
+    assert not pending, (
+        f"{len(pending)} value set(s) on {measure_url} were still not expandable after "
+        f"{budget_seconds:.0f}s: {sorted(pending)[:5]}. HAPI pre-expands in the background, so "
+        "this is a stack-timing problem (scheduler stalled or starved), not a measure-content one."
+    )
+
+
 async def test_every_seeded_measure_is_ready(measure_url):
     """The local prebaked stack ships complete content; all of it must pass.
 
@@ -194,6 +252,21 @@ async def test_every_seeded_measure_is_ready(measure_url):
         f"{len(seeded_ids)} known seeded ids ({sorted(seeded_ids)}) — is the prebaked stack seeded "
         "correctly, or did the seed id scheme change?"
     )
+
+    # A LOCAL wait, immediately before the assertion, on top of the session-wide
+    # gate in conftest's `_load_seed_data`. The session gate samples once, before
+    # any test; this re-checks the precondition at the point it is actually
+    # relied on, which is the cheap and honest place to put it.
+    #
+    # It is deliberately the SAME `count=2` probe production uses, so it can only
+    # clear when the check below will agree. An earlier revision of this file
+    # justified the local wait by claiming content writes elsewhere in the suite
+    # invalidate HAPI's pre-calculated expansions. That was never measured and a
+    # controlled subset run disproved it -- the DEQM `$submit-data` workflow, the
+    # measure upload and the resource push all ran with no invalidation. The real
+    # cause of the failure that prompted this was the probe, not the writes:
+    # see the table in `measure_readiness.find_unexpanded_valuesets`.
+    _wait_until_expandable(measure_url, measures_to_check)
 
     failures = []
     for measure_id in measures_to_check:

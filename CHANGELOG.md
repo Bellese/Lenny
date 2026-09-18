@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.5.0] - 2026-09-18
+
+### Fixed
+- **A measure no longer reports "ready" when the server cannot yet use the code lists it depends on.** Every measure is defined against value sets — named lists of medical codes. Lenny checked that the measure server held each list, but not that it could read one back. A server keeps large lists in a prepared form and builds that form in the background after it starts, so a list can be present and still unusable; a calculation started in that window fails for every patient, with nothing reported at the measure level to say why. Lenny now asks the server to read each list back before calling a measure ready. When a list is there but not yet usable the measure reads "unknown" and names the lists responsible, instead of green-lighting a job that could only fail. The condition clears on its own once the server finishes, but the verdict is cached and does not refresh by itself, so the message says to use Re-check readiness. (#444)
+
 ## [0.2.4.0] - 2026-09-17
 
 ### Fixed

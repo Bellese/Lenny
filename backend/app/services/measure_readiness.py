@@ -1,11 +1,19 @@
 """Measure readiness: can the active MCS actually evaluate this measure?
 
-Two questions, in order:
+Three questions, in order, each gating the next:
   1. Does `$data-requirements` succeed? That is the compile check — it is what
      fails when a Library the CQL includes is absent.
   2. Is every ValueSet canonical the server named actually present?
+  3. Can the server expand each of those ValueSets? Presence is not usability:
+     one over the server's in-memory expansion cap is unusable until a
+     background task pre-expands it, and a measure that needs one evaluates
+     every patient into an empty population without reporting anything (#444).
 
 Lenny parses no CQL. The server computes the dependency closure and returns it.
+
+Note what readiness still does NOT answer: whether data can be *submitted*
+against the measure. It addresses the measure by id throughout; the submit path
+composes a canonical, and the two never meet (#454).
 """
 
 import asyncio
@@ -303,6 +311,233 @@ async def find_missing_valuesets(
     return [c for c in normalised if c not in present]
 
 
+class ValueSetExpansionProbeError(RuntimeError):
+    """Raised when the expansion probe could not reach a verdict for a ValueSet.
+
+    Distinct from "not expandable": the probe recognises that condition by a marker
+    in the answer, so an answer it cannot read at all — a 401, a 5xx with no
+    marker — must not fall through as "expandable". That would convert a credential
+    or transport fault into a green badge, which is the false-`ready` shape this
+    whole check exists to remove. Both outcomes reach the operator as `unknown`,
+    never `not_ready` (see the verdict block in `check_measure_readiness`), but
+    they carry different text: this one names the status, not the value sets.
+    """
+
+
+# HAPI's code for "expansion produced too many codes - Operation aborted". It does
+# NOT reliably name the ValueSet — job #9's diagnostic carried a corrupted
+# placeholder where the URL should have been — so the probe tracks which canonical
+# it asked about rather than parsing the answer.
+#
+# Deliberately NOT keyed on "NOT_EXPANDED": HAPI stamps `Current status:
+# NOT_EXPANDED` on every in-memory expansion, which is the ordinary, healthy case
+# for any value set under the cap. Keying on that phrase would mark most complete
+# measures `not_ready` — a worse bug than the one being fixed.
+_HAPI_TOO_COSTLY_CODE = "HAPI-0831"
+
+# The FHIR-standard issue code for the same condition, for servers that are not HAPI.
+_TOO_COSTLY_ISSUE_CODE = "too-costly"
+
+
+def _means_not_expandable(resp: httpx.Response) -> bool:
+    """Does this error answer mean "present, but not expandable yet"?
+
+    Only called for a non-2xx answer — a served expansion is a usable one whatever
+    notes ride along with it.
+    """
+    if _HAPI_TOO_COSTLY_CODE in resp.text:
+        return True
+    try:
+        body = resp.json()
+    except Exception:
+        return False
+    if not isinstance(body, dict):
+        return False
+    return any(
+        isinstance(issue, dict) and issue.get("code") == _TOO_COSTLY_ISSUE_CODE for issue in body.get("issue") or []
+    )
+
+
+# How many canonicals the verdict text names before it summarises the rest. The
+# names come from the MCS's own $data-requirements answer, and `error` is
+# persisted to an unbounded Text column and returned by every GET /measures — so
+# a measure declaring hundreds of value sets must not put hundreds of
+# server-supplied URLs into a row the UI then renders.
+_EXPAND_ERROR_MAX_NAMED = 10
+
+# One request per ValueSet (29 for CMS125), so the probe is bounded on its own.
+# `READINESS_CONCURRENCY` bounds whole measures and is far too small to also
+# serve as the fan-out here.
+# See the table on the `$expand` request in `find_unexpanded_valuesets`: this is
+# the only value that reaches HAPI's pre-calculated expansion store, and raising
+# it does not raise HAPI's own 1,000 cap.
+_EXPAND_PROBE_COUNT = 2
+
+# Kept at 4 deliberately, after an attempt to halve it to 2 was reverted.
+# Removing the `count` cap raised what one probe costs the SERVER (a real
+# in-memory expansion, where the capped probe aborted after 2 codes), which
+# argues for a smaller fan-out. It argues the other way on our side: the whole
+# check shares one `READINESS_TIMEOUT_SECONDS` (60s) anchored at its start, so
+# halving the fan-out doubles the number of waves -- 29 canonicals go from 8
+# waves to 15, each now doing real work. Overrunning that budget raises and the
+# verdict becomes `unknown`, which is the exact false `unknown` this stage was
+# rewritten to stop producing. Between a load risk that has never been measured
+# and a latency risk the budget makes concrete, 4 keeps the headroom.
+#
+# The OOM this used to cite as precedent is not precedent: `fhir_client.py:458-463`
+# records `$data-requirements` being called ONCE PER PATIENT and OOM-killing the
+# engine at 319 patients, fixed by memoising it. That was repetition, not
+# concurrency, and it says nothing about how wide to fan out here.
+_EXPAND_PROBE_CONCURRENCY = 4
+
+
+async def find_unexpanded_valuesets(
+    mcs_url: str,
+    canonicals: list[str],
+    *,
+    auth_headers: dict[str, str],
+    timeout: float,
+    transport: httpx.AsyncBaseTransport | None = None,
+    deadline: float | None = None,
+) -> list[str]:
+    """Return the subset of `canonicals` the MCS holds but cannot expand yet.
+
+    Presence is not usability. HAPI caps *in-memory* expansion at 1,000 codes, and
+    a ValueSet over that limit stays unusable until a background scheduler
+    pre-expands it. A measure whose closure includes one evaluates to an empty
+    population for every patient, with nothing reported at the measure level —
+    witnessed as job #9, 66/66 patients failed while readiness said `ready` (#444).
+
+    Type-level `$expand?url=` is deliberate: it needs no resource id, so this costs
+    one request per canonical instead of a lookup followed by a probe.
+
+    Order follows `canonicals`, not completion order, so the verdict text is stable.
+    """
+    if not canonicals:
+        return []
+
+    normalised = [c.split("|")[0] for c in canonicals]
+    semaphore = asyncio.Semaphore(_EXPAND_PROBE_CONCURRENCY)
+    unexpanded: set[str] = set()
+
+    # `timeout` is a per-REQUEST httpx timeout, not a budget for the operation —
+    # the distinction #439 is open about. One request per canonical through a
+    # semaphore of 4 means 29 value sets run as 8 sequential waves, each entitled
+    # to the full timeout, so the ceiling `READINESS_TIMEOUT_SECONDS` is meant to
+    # impose could be exceeded eightfold while holding one of only
+    # `READINESS_CONCURRENCY` slots. Reuses `timeout` as the stage budget rather
+    # than adding a setting, so #439 can introduce one knob for both loops.
+    #
+    # `deadline` is what keeps that honest. Anchoring to a FRESH `timeout` here
+    # would only move the bug up a level: the two stages before this one have
+    # already spent from the same ceiling, so the check as a whole could still
+    # overrun it. `check_measure_readiness` therefore passes its own start plus
+    # the ceiling, and this fresh window is only the fallback for a direct caller.
+    # To be exact about what that buys: stages 1 and 2 remain unbounded (#439), so
+    # this anchors only stage 3's START times to the ceiling. A slow stage 2 can
+    # still blow the whole budget before this stage reads the clock — it then
+    # finds the deadline spent and returns `unknown`, which is the safe direction.
+    #
+    # Known residual: this bounds when a probe may START, not how long an
+    # in-flight one may run, so a wave already dispatched can overrun the deadline
+    # by up to one request timeout. Deriving each request's timeout from the
+    # remaining budget would close that, and it broke an unrelated integration
+    # test for reasons never established -- see the comment at the `client.get`
+    # below before trying it again. Still strictly tighter than no bound at all.
+    if deadline is None:
+        deadline = time.monotonic() + timeout
+
+    async def probe(client: httpx.AsyncClient, canonical: str) -> None:
+        async with semaphore:
+            # Checked after the semaphore, so a queued probe abandons rather than
+            # issuing a request the budget has already spent.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ValueSetExpansionProbeError(
+                    f"the value set expansion check did not finish within its {timeout:.0f}s "
+                    "budget, so whether this measure's value sets are usable is unknown"
+                )
+            # DELIBERATELY NOT passing `timeout=remaining` here. Doing so bounds an
+            # in-flight wave as well as a starting one, which is the tighter and
+            # more obviously correct thing — and it reproducibly broke
+            # `test_deqm_job_matches_direct_load_populations[CMS130]`, a test that
+            # touches none of this code. Bisected to this single line across four
+            # full CI-equivalent runs: present => 3/3 failures, absent => pass, with
+            # production reverted to main => pass. The mechanism was never found;
+            # nothing before that test calls `/measures`, so no readiness sweep is
+            # even running when it executes. Re-adding this needs that explained
+            # first. The residual is stated in the deadline comment above.
+            # `count=2` IS LOAD-BEARING. Do not remove it, do not raise it, and
+            # read this table before touching it -- one revision of #444 dropped
+            # it on a measurement taken from a small value set only, and shipped a
+            # permanent false `unknown` on the largest ones.
+            #
+            # Measured on HAPI v8.8.0, both rows in the same server state:
+            #
+            #                        1,797 codes, pre-expanded   5 codes, not pre-expanded
+            #     count=2            200 "pre-calculated"        500 HAPI-0831 (maximum 2)
+            #     no count           500 HAPI-0831 (max 1,000)   200 served
+            #     count=1000         500 HAPI-0831 (max 1,000)   --
+            #     count=100000       500 HAPI-0831 (max 1,000)   200 served
+            #
+            # Two facts drive it. `count` only ever LOWERS HAPI's cap -- 100000
+            # still reports `maximum 1,000` -- and `$expand` reaches the
+            # pre-calculated expansion store only on the `count=2` path. Without
+            # it HAPI re-expands `compose` in memory and aborts above 1,000, no
+            # matter that a perfectly good pre-calculated expansion exists.
+            #
+            # So no single value is right for both rows, and the choice is which
+            # way to be wrong:
+            #
+            #   count=2   -> wrong on a small value set that has not been
+            #                pre-expanded yet. TRANSIENT: clears by itself once
+            #                the background scheduler catches up, which is what
+            #                the verdict text tells the operator.
+            #   anything  -> wrong on any value set whose expansion exceeds 1,000,
+            #     else       pre-expanded or not. PERMANENT, and it is exactly the
+            #                value sets CMS122/125/130 depend on.
+            #
+            # A transient `unknown` in the minutes after a server start beats a
+            # permanent one on the measures people actually run.
+            resp = await client.get(
+                f"{mcs_url}/ValueSet/$expand",
+                params={"url": canonical, "count": _EXPAND_PROBE_COUNT},
+                headers=auth_headers,
+            )
+        # A served expansion is a usable one. The server built a code list and
+        # handed it over; any advisory prose attached to it is not a verdict.
+        #
+        # 2xx ONLY, deliberately. `httpx` does not follow redirects, so a 3xx
+        # arrives here intact and `< 400` would read it as a served expansion —
+        # a false `ready` reachable through nothing worse than an http->https
+        # upgrade or a trailing-slash normalisation in a proxy in front of the
+        # MCS. Stage 1 of this same check already refuses 3xx for that reason;
+        # this stage has to as well, or the proxy makes every probe pass.
+        if 200 <= resp.status_code < 300:
+            return
+        if _means_not_expandable(resp):
+            unexpanded.add(canonical)
+            return
+        raise ValueSetExpansionProbeError(
+            f"the measure server answered the value set expansion check with HTTP {resp.status_code}"
+        )
+
+    async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
+        # `return_exceptions=True` so one refusal does not abandon its siblings
+        # mid-request. A bare gather returns on the first raise, the client then
+        # closes underneath every probe still in flight, and each of those logs
+        # "task exception was never retrieved" — one bad answer becomes a burst
+        # of noise in the operator's log at the moment they most need it legible.
+        results = await asyncio.gather(*(probe(client, c) for c in normalised), return_exceptions=True)
+
+    # Input order, so the reported reason is the same one on every run.
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+    return [c for c in normalised if c in unexpanded]
+
+
 async def check_measure_readiness(
     mcs_url: str,
     measure_id: str,
@@ -491,6 +726,77 @@ async def check_measure_readiness(
             state=ReadinessState.not_ready,
             missing_valuesets=missing,
             error=f"{len(missing)} {noun} referenced by this measure are not on this server.",
+            duration_ms=elapsed(),
+        )
+
+    # Every canonical is present. Presence is not usability: a ValueSet over the
+    # server's in-memory expansion cap is unusable until a background scheduler
+    # pre-expands it, and a measure that depends on one evaluates every patient
+    # into an empty population without reporting anything (#444).
+    try:
+        unexpanded = await find_unexpanded_valuesets(
+            mcs_url,
+            canonicals,
+            auth_headers=auth_headers,
+            timeout=timeout,
+            transport=transport,
+            # Anchored to the start of THIS check, not of this stage, so the
+            # documented per-measure ceiling means what it says.
+            deadline=started + timeout,
+        )
+    except ValueSetExpansionProbeError as exc:
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error=f"Could not verify value set expansion: {exc}.",
+            duration_ms=elapsed(),
+        )
+    except Exception as exc:
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error=f"Could not verify value set expansion: {hint_for_network_exception(exc)}",
+            duration_ms=elapsed(),
+        )
+
+    if unexpanded:
+        noun = "value set" if len(unexpanded) == 1 else "value sets"
+        # `unknown`, not `not_ready`. A value set with no pre-calculated expansion
+        # makes HAPI attempt an in-memory expansion of the entire `compose`, and one
+        # whose expansion exceeds the server's cap stays unusable until the
+        # background scheduler pre-expands it. (An earlier revision justified this
+        # with "23-of-23 and 29-of-29 canonicals observed failing together, small
+        # ones included" and blamed a SNOMED filter. That was this probe's own
+        # `count=2` signature, not a server property — see the comment on the
+        # `$expand` request in `find_unexpanded_valuesets`. The
+        # verdict is unchanged; the reason was wrong.) The
+        # window opens on every server start, because HAPI serves `/metadata`
+        # before its expansions are ready, and it closes on its own. `not_ready`
+        # would paint every measure on the server red and read as a content
+        # defect. This still closes #444: the bug was answering `ready` ahead of
+        # a job that could only fail, and this is not `ready`.
+        #
+        # Named in the error text rather than in `missing_valuesets`: these are
+        # present, and that field means absent. A row that names nothing is its
+        # own defect (#451).
+        #
+        # The text must not promise that the BADGE clears by itself. The server
+        # side does, within minutes — but `claim_unchecked` only claims measures
+        # with no row and verdicts have no TTL (#440), so a sweep that lands in
+        # the window leaves this verdict cached until someone re-checks or an
+        # invalidating event fires. That is a sticky-transient class the pre-#444
+        # behaviour did not have: the false `ready` it replaced became true on its
+        # own once the window closed, and this does not.
+        named = ", ".join(unexpanded[:_EXPAND_ERROR_MAX_NAMED])
+        if len(unexpanded) > _EXPAND_ERROR_MAX_NAMED:
+            named += f", and {len(unexpanded) - _EXPAND_ERROR_MAX_NAMED} more"
+        return ReadinessVerdict(
+            state=ReadinessState.unknown,
+            error=(
+                f"Could not verify {len(unexpanded)} {noun} this measure references: present on "
+                f"this server, but not expandable yet: {named}. A job started now would fail to "
+                "evaluate. The server pre-expands value sets in the background, so the server "
+                "side of this usually clears within minutes — but this verdict is cached and "
+                "will not refresh on its own, so use Re-check readiness."
+            ),
             duration_ms=elapsed(),
         )
 
