@@ -358,13 +358,6 @@ def _means_not_expandable(resp: httpx.Response) -> bool:
     )
 
 
-# `count=2` short-circuits: the server answers from its pre-expanded store if it
-# has one and trips HAPI-0831 if it does not, without ever building the full code
-# list. Established by `fhir_client.wait_for_valueset_expansion` and
-# `tests/integration/conftest.py`. `count=1` is not enough — a one-code ValueSet
-# would answer without consulting the store at all.
-_EXPAND_PROBE_COUNT = 2
-
 # How many canonicals the verdict text names before it summarises the rest. The
 # names come from the MCS's own $data-requirements answer, and `error` is
 # persisted to an unbounded Text column and returned by every GET /measures — so
@@ -375,6 +368,26 @@ _EXPAND_ERROR_MAX_NAMED = 10
 # One request per ValueSet (29 for CMS125), so the probe is bounded on its own.
 # `READINESS_CONCURRENCY` bounds whole measures and is far too small to also
 # serve as the fan-out here.
+# See the table on the `$expand` request in `find_unexpanded_valuesets`: this is
+# the only value that reaches HAPI's pre-calculated expansion store, and raising
+# it does not raise HAPI's own 1,000 cap.
+_EXPAND_PROBE_COUNT = 2
+
+# Kept at 4 deliberately, after an attempt to halve it to 2 was reverted.
+# Removing the `count` cap raised what one probe costs the SERVER (a real
+# in-memory expansion, where the capped probe aborted after 2 codes), which
+# argues for a smaller fan-out. It argues the other way on our side: the whole
+# check shares one `READINESS_TIMEOUT_SECONDS` (60s) anchored at its start, so
+# halving the fan-out doubles the number of waves -- 29 canonicals go from 8
+# waves to 15, each now doing real work. Overrunning that budget raises and the
+# verdict becomes `unknown`, which is the exact false `unknown` this stage was
+# rewritten to stop producing. Between a load risk that has never been measured
+# and a latency risk the budget makes concrete, 4 keeps the headroom.
+#
+# The OOM this used to cite as precedent is not precedent: `fhir_client.py:458-463`
+# records `$data-requirements` being called ONCE PER PATIENT and OOM-killing the
+# engine at 319 patients, fixed by memoising it. That was repetition, not
+# concurrency, and it says nothing about how wide to fan out here.
 _EXPAND_PROBE_CONCURRENCY = 4
 
 
@@ -420,6 +433,10 @@ async def find_unexpanded_valuesets(
     # already spent from the same ceiling, so the check as a whole could still
     # overrun it. `check_measure_readiness` therefore passes its own start plus
     # the ceiling, and this fresh window is only the fallback for a direct caller.
+    # To be exact about what that buys: stages 1 and 2 remain unbounded (#439), so
+    # this anchors only stage 3's START times to the ceiling. A slow stage 2 can
+    # still blow the whole budget before this stage reads the clock — it then
+    # finds the deadline spent and returns `unknown`, which is the safe direction.
     #
     # Known residual: this bounds when a probe may START, not how long an
     # in-flight one may run, so a wave already dispatched can overrun the deadline
@@ -450,6 +467,38 @@ async def find_unexpanded_valuesets(
             # nothing before that test calls `/measures`, so no readiness sweep is
             # even running when it executes. Re-adding this needs that explained
             # first. The residual is stated in the deadline comment above.
+            # `count=2` IS LOAD-BEARING. Do not remove it, do not raise it, and
+            # read this table before touching it -- one revision of #444 dropped
+            # it on a measurement taken from a small value set only, and shipped a
+            # permanent false `unknown` on the largest ones.
+            #
+            # Measured on HAPI v8.8.0, both rows in the same server state:
+            #
+            #                        1,797 codes, pre-expanded   5 codes, not pre-expanded
+            #     count=2            200 "pre-calculated"        500 HAPI-0831 (maximum 2)
+            #     no count           500 HAPI-0831 (max 1,000)   200 served
+            #     count=1000         500 HAPI-0831 (max 1,000)   --
+            #     count=100000       500 HAPI-0831 (max 1,000)   200 served
+            #
+            # Two facts drive it. `count` only ever LOWERS HAPI's cap -- 100000
+            # still reports `maximum 1,000` -- and `$expand` reaches the
+            # pre-calculated expansion store only on the `count=2` path. Without
+            # it HAPI re-expands `compose` in memory and aborts above 1,000, no
+            # matter that a perfectly good pre-calculated expansion exists.
+            #
+            # So no single value is right for both rows, and the choice is which
+            # way to be wrong:
+            #
+            #   count=2   -> wrong on a small value set that has not been
+            #                pre-expanded yet. TRANSIENT: clears by itself once
+            #                the background scheduler catches up, which is what
+            #                the verdict text tells the operator.
+            #   anything  -> wrong on any value set whose expansion exceeds 1,000,
+            #     else       pre-expanded or not. PERMANENT, and it is exactly the
+            #                value sets CMS122/125/130 depend on.
+            #
+            # A transient `unknown` in the minutes after a server start beats a
+            # permanent one on the measures people actually run.
             resp = await client.get(
                 f"{mcs_url}/ValueSet/$expand",
                 params={"url": canonical, "count": _EXPAND_PROBE_COUNT},
@@ -710,11 +759,15 @@ async def check_measure_readiness(
 
     if unexpanded:
         noun = "value set" if len(unexpanded) == 1 else "value sets"
-        # `unknown`, not `not_ready`, and the difference was measured. A value set
-        # with no pre-calculated expansion makes HAPI attempt an in-memory
-        # expansion of the entire `compose`, so a SNOMED filter trips the
-        # 1,000-code cap even when the value set is tiny — 23-of-23 and 29-of-29
-        # canonicals were observed failing together, small ones included. The
+        # `unknown`, not `not_ready`. A value set with no pre-calculated expansion
+        # makes HAPI attempt an in-memory expansion of the entire `compose`, and one
+        # whose expansion exceeds the server's cap stays unusable until the
+        # background scheduler pre-expands it. (An earlier revision justified this
+        # with "23-of-23 and 29-of-29 canonicals observed failing together, small
+        # ones included" and blamed a SNOMED filter. That was this probe's own
+        # `count=2` signature, not a server property — see the comment on the
+        # `$expand` request in `find_unexpanded_valuesets`. The
+        # verdict is unchanged; the reason was wrong.) The
         # window opens on every server start, because HAPI serves `/metadata`
         # before its expansions are ready, and it closes on its own. `not_ready`
         # would paint every measure on the server red and read as a content

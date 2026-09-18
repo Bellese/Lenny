@@ -375,8 +375,15 @@ def _wait_for_terminology_expansion(base_url: str, budget: SetupBudget) -> None:
     fail 2 of 4 local full-suite runs while passing when run alone. It is also
     what `check_measure_readiness` now correctly reports as `unknown` (#444).
 
-    `count=2` short-circuits: the server answers from its pre-expanded store if it
-    has one and trips HAPI-0831 if it does not, without building the full code list.
+    `count=2` is deliberate and is NOT what production asks. HAPI reads `count` as
+    the maximum expansion size, so `count=2` fails until a pre-calculated expansion
+    exists -- which is exactly the condition this gate waits for, and why Bug 2 in
+    `docs/connectathon-measures-status.md` moved every probe off `count=1`. The
+    readiness probe in `measure_readiness.py` sends `count=2` for the same reason
+    -- it is the only probe that reaches HAPI's pre-calculated expansion store,
+    and the table on its `$expand` request records why nothing else works. This
+    gate therefore waits for exactly the condition production checks, which is
+    also what keeps `test_deqm_job_matches_direct_load_populations` from flaking.
     """
     import concurrent.futures
 
@@ -407,8 +414,13 @@ def _wait_for_terminology_expansion(base_url: str, budget: SetupBudget) -> None:
 
         def _expands(url: str) -> tuple[str, bool]:
             try:
+                # `count=2` per the docstring: this gate waits for pre-expansion,
+                # so it wants the strict probe, not the one production uses.
+                # 2xx (not `< 400`) because a 3xx is not a served expansion --
+                # an http->https upgrade or a proxy's trailing-slash redirect
+                # would otherwise clear this gate silently.
                 resp = client.get(f"{base_url}/ValueSet/$expand", params={"url": url, "count": 2})
-                return url, resp.status_code < 400
+                return url, 200 <= resp.status_code < 300
             except Exception:
                 return url, False
 

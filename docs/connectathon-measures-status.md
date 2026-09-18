@@ -156,6 +156,8 @@ Cause: HAPI short-circuits `$expand?count=1` — returns HTTP 200 immediately wi
 
 Fix: Changed all expansion probes to `count=2`. HAPI correctly raises HAPI-0831 with `count=2` until pre-expansion completes.
 
+Update (#444): the readiness probe in `measure_readiness.py` sends `count=2` for the same reason everything else here does, and this is load-bearing. Measured on HAPI v8.8.0 in one server state: for a pre-expanded 1,797-code value set, `count=2` returns 200 "pre-calculated" while no-`count`, `count=1000` and `count=100000` all return HAPI-0831 `maximum 1,000`. `count` only ever LOWERS HAPI's cap, and `$expand` reaches the pre-calculated expansion store only on the `count=2` path. The cost is that a small value set which has not been pre-expanded yet reads `unknown` until the background scheduler catches up — transient, and far cheaper than being permanently wrong about every value set over 1,000 codes.
+
 Files: `backend/tests/integration/conftest.py`, `scripts/smoke_connectathon.py`
 
 ---

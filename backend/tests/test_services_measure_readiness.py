@@ -1,5 +1,7 @@
 """Tests for the measure readiness check, sweep, and storage model."""
 
+import re
+
 import pytest
 import pytest_asyncio
 
@@ -467,17 +469,23 @@ async def test_check_returns_not_ready_when_valuesets_are_absent():
 def _hapi_0831_outcome(vs_url: str) -> dict:
     """HAPI's answer to `$expand` for a ValueSet past the 1,000-code in-memory cap.
 
-    Shape taken from the diagnostic witnessed in job #9 (#444). Note HAPI's own
-    placeholder corruption — it does not reliably name the ValueSet — which is
-    why the probe has to know which canonical it asked about rather than parse
-    the message.
+    Shape captured verbatim from HAPI v8.8.0 (#444). `code` is `processing`, NOT
+    `too-costly`: HAPI does not use the `too-costly` issue code here, and a
+    fixture that said it did let the `HAPI-0831`-in-text branch of
+    `_means_not_expandable` be deleted with all tests still green. `too-costly`
+    is still recognised in production for servers that do emit it, and is
+    covered separately by the non-HAPI test below.
+
+    Note HAPI's own placeholder corruption — it does not reliably name the
+    ValueSet — which is why the probe has to know which canonical it asked about
+    rather than parse the message.
     """
     return {
         "resourceType": "OperationOutcome",
         "issue": [
             {
                 "severity": "error",
-                "code": "too-costly",
+                "code": "processing",
                 "diagnostics": (
                     "HAPI-0831: Expansion of ValueSet produced too many codes (maximum 1,000) - "
                     "Operation aborted! - ValueSet has not yet been pre-expanded. Performing "
@@ -607,10 +615,9 @@ async def test_check_probes_every_present_valueset_and_stays_ready_when_all_expa
             return httpx.Response(200, json=_dr_library(canonicals))
         if "$expand" in url:
             asked = request.url.params.get("url")
-            # `count` is load-bearing and its constant carries a warning: at
-            # count=1 a one-code value set answers without consulting the
-            # pre-expansion store, so the probe would miss the very condition it
-            # exists to detect. Nothing else in this file would catch that revert.
+            # `count=2` is required, not incidental -- it is the only probe that
+            # reaches HAPI's pre-calculated expansion store. See the measured
+            # table on the `$expand` request in `find_unexpanded_valuesets`.
             assert request.url.params.get("count") == "2", request.url.params.get("count")
             probed.append(asked)
             return httpx.Response(200, json=_expanded_valueset(asked))
@@ -664,14 +671,20 @@ async def test_one_refused_probe_among_many_settles_cleanly():
     """The realistic shape: CMS125 has 29 value sets, not one.
 
     The probe fans out, so a single refusal is raised while siblings are still
-    queued. `return_exceptions=True` is what lets every sibling reach a terminal
-    state instead of being abandoned mid-request when the client closes, and the
-    assertion below pins that: all 24 canonicals are probed even though the 8th
-    refuses.
+    queued. The assertion below pins that all 24 canonicals are probed even
+    though the 8th refuses, and that the verdict is `unknown` naming the 401.
 
-    Note what this does NOT prove: `httpx.MockTransport` answers synchronously,
-    so no probe is ever genuinely in flight when the refusal lands. The
-    orphaned-request behaviour this guards against is not observable here.
+    Note what this does NOT prove, and do not add the claim back: this test does
+    NOT pin `return_exceptions=True`. `httpx.MockTransport` answers a sync
+    handler synchronously, so every probe coroutine is already scheduled before
+    the refusal can abandon anything — flip the flag to False and this test
+    still passes (verified by mutation). The orphaned-request behaviour is not
+    observable here either, for the same reason.
+
+    The flag itself is pinned by
+    `test_find_unexpanded_valuesets_reraises_the_earliest_ordered_error_not_first_completed`,
+    which uses an ASYNC handler whose sleep makes completion order differ from
+    input order. That is the test to keep green if you touch the gather.
     """
     import httpx
 
@@ -2575,3 +2588,282 @@ async def test_the_verdict_text_bounds_how_many_server_supplied_names_it_carries
     assert "40 value sets" in (verdict.error or ""), verdict.error
     assert verdict.error.count("http://vs/") == _EXPAND_ERROR_MAX_NAMED, verdict.error
     assert f"and {40 - _EXPAND_ERROR_MAX_NAMED} more" in verdict.error, verdict.error
+
+
+async def test_the_verdict_text_names_every_canonical_at_exactly_the_cap_with_no_summary_suffix():
+    """The cap is `>`, not `>=`: exactly `_EXPAND_ERROR_MAX_NAMED` unexpanded value
+    sets must all be named, with no "and N more" tacked on.
+
+    The existing bound test only exercises a count well past the cap (40 vs. 10),
+    which cannot distinguish `>` from `>=` — both trim the enumeration there. This
+    pins the boundary itself: an off-by-one that trimmed one name early (or added
+    a spurious ", and 0 more") would pass every other test in this file.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import _EXPAND_ERROR_MAX_NAMED, check_measure_readiness
+
+    canonicals = [f"http://vs/{i:03d}" for i in range(_EXPAND_ERROR_MAX_NAMED)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "$data-requirements" in url:
+            return httpx.Response(200, json=_dr_library(canonicals))
+        if "$expand" in url:
+            return httpx.Response(500, json=_hapi_0831_outcome(request.url.params.get("url")))
+        return httpx.Response(200, json=_vs_bundle(canonicals))
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert verdict.state is ReadinessState.unknown
+    error = verdict.error or ""
+    assert error.count("http://vs/") == _EXPAND_ERROR_MAX_NAMED, error
+    for canonical in canonicals:
+        assert canonical in error, f"{canonical} missing from a count exactly at the cap: {error}"
+    assert not re.search(r"and \d+ more", error), f"a summary suffix appeared at exactly the cap: {error}"
+
+
+async def test_check_uses_singular_wording_for_exactly_one_unexpanded_valueset():
+    """The plural test (`test_check_reports_multiple_unexpanded_valuesets_with_plural_wording`)
+    pins "2 value sets"; nothing pins the singular branch's exact wording. "1 value
+    set" is a substring of "1 value sets", so a regression to always-plural would
+    slip past a naive `in` check — this asserts the plural phrase is ABSENT too.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "$data-requirements" in url:
+            return httpx.Response(200, json=_dr_library(["http://vs/a"]))
+        if "$expand" in url:
+            return httpx.Response(500, json=_hapi_0831_outcome("http://vs/a"))
+        return httpx.Response(200, json=_vs_bundle(["http://vs/a"]))
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert verdict.state is ReadinessState.unknown
+    error = verdict.error or ""
+    assert "Could not verify 1 value set this measure references" in error, error
+    assert "1 value sets" not in error, f"singular count got plural wording: {error!r}"
+
+
+async def test_check_does_not_report_present_but_unexpandable_valuesets_as_missing():
+    """`missing_valuesets` means ABSENT; a value set the expansion probe flags is,
+    by construction, present (stage 2 already confirmed it, or stage 3 would never
+    have run). Populating `missing_valuesets` with it as well would relabel a
+    present-but-not-yet-usable value set as absent — the exact confusion #451 is
+    about, and one a reviewer could introduce by reusing `missing` instead of
+    threading a fresh empty list through this branch.
+
+    Every other expansion test asserts `state` and the `error` text but never this
+    field, so a regression here would pass the whole rest of the suite.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "$data-requirements" in url:
+            return httpx.Response(200, json=_dr_library(["http://vs/a", "http://vs/b"]))
+        if "$expand" in url:
+            probed = request.url.params.get("url")
+            if probed == "http://vs/b":
+                return httpx.Response(500, json=_hapi_0831_outcome(probed))
+            return httpx.Response(200, json=_expanded_valueset(probed))
+        return httpx.Response(200, json=_vs_bundle(["http://vs/a", "http://vs/b"]))
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert verdict.state is ReadinessState.unknown
+    assert verdict.missing_valuesets == [], (
+        f"a present-but-unexpandable value set leaked into missing_valuesets: {verdict.missing_valuesets}"
+    )
+    assert "http://vs/b" in (verdict.error or "")
+
+
+async def test_check_reports_unknown_when_the_expansion_deadline_is_already_spent_before_the_stage_starts():
+    """End-to-end version of the two `find_unexpanded_valuesets`-level budget tests.
+
+    Both existing budget tests exercise `find_unexpanded_valuesets` directly (one
+    calling it standalone, the other patching it out entirely with a spy) or a
+    generic bad-HTTP-response `ValueSetExpansionProbeError`. Neither proves that
+    `check_measure_readiness`'s own `except ValueSetExpansionProbeError` branch is
+    what actually catches a budget-exhaustion error arising from its REAL,
+    unmocked call into stage 3 and turns it into the documented verdict shape.
+    What this test uniquely pins is the ANCHORING -- `deadline=started + timeout`
+    rather than a fresh window; swap that for `deadline=None` and only this test
+    and one other notice. It does not uniquely pin the `except` clause itself:
+    deleting that fails 8 tests, 7 of them pre-existing. Measured, not assumed,
+    because a docstring claiming coverage it does not have is the exact defect
+    this file was rewritten to remove.
+
+    Stage 1 is made to burn the entire timeout, so by the time stage 3's probe
+    acquires the semaphore, `deadline` (anchored to the check's start) is already
+    behind `time.monotonic()` and the very first probe must refuse to fire.
+    """
+    import asyncio
+
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    timeout = 0.05
+    expand_calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "$data-requirements" in url:
+            # Comfortably longer than `timeout`, so the deadline anchored to the
+            # check's start is already spent by the time stage 3 begins.
+            await asyncio.sleep(timeout * 4)
+            return httpx.Response(200, json=_dr_library(["http://vs/a"]))
+        if "$expand" in url:
+            expand_calls.append(request.url.params.get("url"))
+            return httpx.Response(200, json=_expanded_valueset("http://vs/a"))
+        return httpx.Response(200, json=_vs_bundle(["http://vs/a"]))
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={},
+        timeout=timeout,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert verdict.state is ReadinessState.unknown
+    error = verdict.error or ""
+    assert error.startswith("Could not verify value set expansion: "), error
+    assert "budget" in error.lower(), error
+    assert expand_calls == [], f"a probe fired after the anchored deadline had already passed: {expand_calls}"
+
+
+async def test_the_expansion_probe_forwards_the_mcs_credentials():
+    """A secured MCS must see the same auth on `$expand` as on every other stage.
+
+    Dropping `headers=auth_headers` from the probe is invisible to every other
+    test in this file: an unauthenticated probe against a secured server answers
+    401, which is a non-2xx with no HAPI-0831 marker, so it raises and the verdict
+    is `unknown`. Safe, but every measure on that connection would read `unknown`
+    forever with no hint that credentials were the cause. Nothing else pins this.
+    """
+    import httpx
+
+    from app.models.measure_readiness import ReadinessState
+    from app.services.measure_readiness import check_measure_readiness
+
+    canonicals = ["http://vs/a", "http://vs/b"]
+    seen_on_expand: list[str | None] = []
+    seen_on_requirements: list[str | None] = []
+    seen_on_search: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "$data-requirements" in url:
+            seen_on_requirements.append(request.headers.get("authorization"))
+            return httpx.Response(200, json=_dr_library(canonicals))
+        if "$expand" in url:
+            seen_on_expand.append(request.headers.get("authorization"))
+            return httpx.Response(200, json=_expanded_valueset(request.url.params.get("url")))
+        seen_on_search.append(request.headers.get("authorization"))
+        return httpx.Response(200, json=_vs_bundle(canonicals))
+
+    verdict = await check_measure_readiness(
+        "https://mcs.example.com/fhir",
+        "CMS122",
+        auth_headers={"Authorization": "Bearer s3cret"},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert verdict.state is ReadinessState.ready
+    assert seen_on_expand == ["Bearer s3cret", "Bearer s3cret"], seen_on_expand
+    # Stages 1 and 2 were unpinned too: dropping `headers=auth_headers` from
+    # either left the whole suite green, and against a secured MCS that produces
+    # the same permanent `unknown` with no hint that credentials were the cause.
+    assert seen_on_requirements == ["Bearer s3cret"], seen_on_requirements
+    assert seen_on_search and all(h == "Bearer s3cret" for h in seen_on_search), seen_on_search
+
+
+def test_the_expansion_probe_fan_out_stays_at_its_justified_width():
+    """Pins the literal, because the semaphore assertion nearby cannot.
+
+    `test_find_unexpanded_valuesets_never_exceeds_its_concurrency_bound` compares
+    the observed peak against this constant, so it holds for any value the fixture
+    can reach -- it proves the semaphore is wired, not that the width is right.
+    Halving this to 2 passes that test and the whole suite while silently doubling
+    the number of waves the check's shared 60s budget has to cover, which turns
+    into the `unknown` verdicts this stage exists to stop emitting.
+    """
+    from app.services.measure_readiness import _EXPAND_PROBE_CONCURRENCY
+
+    assert _EXPAND_PROBE_CONCURRENCY == 4, (
+        "changing the fan-out changes how many waves the shared "
+        "READINESS_TIMEOUT_SECONDS budget must cover; see the constant's comment "
+        "for why 4 and not 2"
+    )
+
+
+async def test_the_expansion_probe_asks_the_pre_calculated_store():
+    """Pins `count=2`, which is the only probe that reads HAPI's expansion store.
+
+    Measured on HAPI v8.8.0, same server state, both rows:
+
+                     1,797 codes, pre-expanded   5 codes, not pre-expanded
+        count=2      200 "pre-calculated"        500 HAPI-0831 (maximum 2)
+        no count     500 HAPI-0831 (max 1,000)   200 served
+        count=100000 500 HAPI-0831 (max 1,000)   200 served
+
+    `count` only lowers HAPI's cap, and dropping it makes `$expand` re-expand
+    `compose` in memory and abort above 1,000 even when a pre-calculated
+    expansion exists. A revision of #444 dropped it and turned a transient
+    startup-window `unknown` into a permanent one on every measure whose value
+    sets exceed 1,000 codes -- caught only by the integration suite, because
+    every unit fixture here is small enough that both probes agree.
+    """
+    import httpx
+
+    from app.services.measure_readiness import find_unexpanded_valuesets
+
+    seen: list[dict[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(dict(request.url.params))
+        return httpx.Response(200, json=_expanded_valueset(request.url.params.get("url")))
+
+    await find_unexpanded_valuesets(
+        "https://mcs.example.com/fhir",
+        ["http://vs/a", "http://vs/b"],
+        auth_headers={},
+        timeout=5.0,
+        transport=httpx.MockTransport(handler),
+    )
+
+    assert seen == [
+        {"url": "http://vs/a", "count": "2"},
+        {"url": "http://vs/b", "count": "2"},
+    ], seen
