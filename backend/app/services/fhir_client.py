@@ -1753,6 +1753,21 @@ async def _remap_valueset_ids_for_hapi(
     under a versioned id (e.g. "…1014-20240112"), the POST fails with HAPI-0902.
     Querying by URL and remapping the id turns the create into an in-place update.
 
+    The search is scoped to the bundle resource's VERSION as well as its url
+    (#469). A server loaded from several MADiE bundles routinely holds one
+    canonical at two or three versions -- `find_missing_valuesets` documents the
+    same fact -- and a url-only search returns an arbitrary one of them. Taking
+    that id redirects the entry into the wrong version's resource, so HAPI sees a
+    create for a (url, version) pair that already exists elsewhere and rejects
+    the transaction with the very HAPI-0902 this function exists to avoid.
+    Witnessed against a connectathon server: bundle version 20260210 remapped
+    onto the `-20200307` resource, upload failed 422, and the bundle's own
+    request line had been correct before the rewrite.
+
+    No match for this (url, version) means a genuine create: the entry is left
+    exactly as authored. A versionless bundle resource keeps the url-only
+    behaviour, since there is nothing to scope by.
+
     `base_url` must be the same MCS the bundle is about to be POSTed to —
     remapping against a different server would rewrite ids to values that don't
     exist on the upload target.
@@ -1761,10 +1776,15 @@ async def _remap_valueset_ids_for_hapi(
         resource = entry.get("resource", {})
         if resource.get("resourceType") != "ValueSet" or not resource.get("url"):
             continue
+        # `_count` stays small but the search must be specific enough that the
+        # single result it returns is the RIGHT one -- see the docstring.
+        params = {"url": resource["url"], "_count": "1"}
+        if resource.get("version"):
+            params["version"] = resource["version"]
         try:
             resp = await client.get(
                 f"{base_url}/ValueSet",
-                params={"url": resource["url"], "_count": "1"},
+                params=params,
                 headers=auth_headers or {},
                 timeout=10,
             )
