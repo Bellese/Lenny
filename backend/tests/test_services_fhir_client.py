@@ -1722,6 +1722,94 @@ async def test_remap_valueset_ids_queries_passed_base_url():
     assert out[0]["request"]["url"] == "ValueSet/1014-20240112"
 
 
+async def test_remap_valueset_ids_matches_on_version_not_just_url():
+    """A canonical held at two versions must resolve to the MATCHING one (#469).
+
+    FHIR uniqueness is on (url, version), and a server loaded from several MADiE
+    bundles routinely holds one VSAC canonical at two or three versions -- the
+    same fact `find_missing_valuesets` documents. Matching on url alone takes an
+    arbitrary version's resource id and redirects the upload into it, so HAPI
+    sees a create for a (url, version) pair that already exists elsewhere and
+    rejects the whole transaction with HAPI-0902. The remap exists to PREVENT
+    HAPI-0902; url-only matching makes it cause one.
+
+    Witnessed against the CMS Connectathon server: bundle version 20260210 was
+    remapped onto the `-20200307` resource and the upload failed 422.
+    """
+    entries = [
+        {
+            "resource": {
+                "resourceType": "ValueSet",
+                "id": "307",
+                "url": "http://vs.example.com/307",
+                "version": "20260210",
+            },
+            "request": {"method": "PUT", "url": "ValueSet/307"},
+        }
+    ]
+    # The server answers a version-scoped search with only the matching resource.
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=_make_response(200, {"entry": [{"resource": {"id": "307-20260210"}}]}))
+
+    out = await _remap_valueset_ids_for_hapi(entries, client, _ACTIVE_MCS, {})
+
+    assert client.get.await_args.kwargs["params"].get("version") == "20260210", (
+        "the search must be scoped to the bundle resource's version; without it the "
+        "server may answer with a different version's resource id"
+    )
+    assert out[0]["resource"]["id"] == "307-20260210"
+    assert out[0]["request"]["url"] == "ValueSet/307-20260210"
+
+
+async def test_remap_valueset_ids_leaves_the_entry_alone_when_that_version_is_absent():
+    """No match for this (url, version) means it is a genuine create.
+
+    Rewriting the id to some other version's resource would turn a clean create
+    into the HAPI-0902 collision of #469. The bundle's own id is already right.
+    """
+    entries = [
+        {
+            "resource": {
+                "resourceType": "ValueSet",
+                "id": "307",
+                "url": "http://vs.example.com/307",
+                "version": "20260210",
+            },
+            "request": {"method": "PUT", "url": "ValueSet/307"},
+        }
+    ]
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=_make_response(200, {"entry": []}))
+
+    out = await _remap_valueset_ids_for_hapi(entries, client, _ACTIVE_MCS, {})
+
+    assert out[0]["resource"]["id"] == "307"
+    assert out[0]["request"]["url"] == "ValueSet/307"
+
+
+async def test_remap_valueset_ids_still_matches_on_url_when_the_bundle_has_no_version():
+    """A versionless bundle resource keeps the url-only behaviour.
+
+    There is nothing to scope the search by, and this is the pre-#469 path that
+    `test_remap_valueset_ids_queries_passed_base_url` covers -- pinned here so a
+    version-aware rewrite cannot quietly drop it.
+    """
+    entries = [
+        {
+            "resource": {"resourceType": "ValueSet", "id": "1014", "url": "http://vs.example.com/1014"},
+            "request": {"method": "PUT", "url": "ValueSet/1014"},
+        }
+    ]
+    client = AsyncMock()
+    client.get = AsyncMock(return_value=_make_response(200, {"entry": [{"resource": {"id": "1014-20240112"}}]}))
+
+    out = await _remap_valueset_ids_for_hapi(entries, client, _ACTIVE_MCS, {})
+
+    assert "version" not in client.get.await_args.kwargs["params"]
+    assert out[0]["resource"]["id"] == "1014-20240112"
+    assert out[0]["request"]["url"] == "ValueSet/1014-20240112"
+
+
 # ---------------------------------------------------------------------------
 # measure_exists
 # ---------------------------------------------------------------------------
